@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env};
 
 mod test;
 
@@ -59,6 +59,11 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .set(&DataKey::Vault(vault_id), &vault);
+
+        env.events().publish(
+            (symbol_short!("check_in"), vault_id),
+            vault.last_check_in,
+        );
     }
 
     /// Deposit XLM into the vault.
