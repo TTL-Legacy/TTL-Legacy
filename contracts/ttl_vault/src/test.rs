@@ -2,8 +2,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    Address, Env,
+    testutils::{Address as _, Ledger, Events as _},
+    Address, Env, Symbol, FromVal,
 };
 
 fn setup() -> (Env, Address, Address) {
@@ -26,6 +26,22 @@ fn test_create_vault() {
     assert_eq!(vault.owner, owner);
     assert_eq!(vault.beneficiary, beneficiary);
     assert_eq!(vault.balance, 0);
+
+    // Assert that vault creation event was emitted
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    
+    let event = events.first().unwrap();
+    
+    // Check the topics (event.1 is a Vec<Val>)
+    let topics = &event.1;
+    assert_eq!(topics.len(), 1);
+    let topic_symbol = Symbol::from_val(&env, &topics.get_unchecked(0));
+    assert_eq!(topic_symbol, Symbol::new(&env, "v_created"));
+    
+    // Check the data (event.2 is a Val containing our tuple)
+    let data_tuple = <(u64, Address, Address, u64)>::from_val(&env, &event.2);
+    assert_eq!(data_tuple, (vault_id, owner, beneficiary, 86400u64));
 }
 
 #[test]

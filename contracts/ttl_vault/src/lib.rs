@@ -3,7 +3,7 @@ use soroban_sdk::{contract, contractimpl, token, Address, Env};
 mod test;
 
 mod types;
-use types::{DataKey, ReleaseStatus, Vault};
+use types::{DataKey, ReleaseStatus, Vault, VaultCreatedEvent};
 
 #[contract]
 pub struct TtlVaultContract;
@@ -27,8 +27,8 @@ impl TtlVaultContract {
             + 1;
 
         let vault = Vault {
-            owner,
-            beneficiary,
+            owner: owner.clone(),
+            beneficiary: beneficiary.clone(),
             balance: 0,
             check_in_interval,
             last_check_in: env.ledger().timestamp(),
@@ -41,6 +41,10 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .set(&DataKey::VaultCount, &vault_id);
+
+        // Emit vault creation event
+        let event = VaultCreatedEvent::new(vault_id, owner, beneficiary, check_in_interval);
+        env.events().publish((event.topic(),), event.to_tuple());
 
         vault_id
     }
