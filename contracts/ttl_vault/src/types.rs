@@ -10,6 +10,8 @@ pub enum VaultError {
     AlreadyReleased = 3,
     NotExpired = 4,
     InsufficientBalance = 5,
+    /// Amount must be greater than zero.
+    InvalidAmount = 6,
 }
 
 #[contracttype]

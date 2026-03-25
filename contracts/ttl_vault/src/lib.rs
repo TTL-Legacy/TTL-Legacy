@@ -91,15 +91,19 @@ impl TtlVaultContract {
     }
 
     /// Owner withdraws from the vault.
-    pub fn withdraw(env: Env, vault_id: u64, amount: i128) {
+    pub fn withdraw(env: Env, vault_id: u64, amount: i128) -> Result<(), VaultError> {
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
         let mut vault: Vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
 
-        assert!(
-            vault.status == ReleaseStatus::Locked,
-            "vault already released"
-        );
-        assert!(vault.balance >= amount, "insufficient balance");
+        if vault.status != ReleaseStatus::Locked {
+            return Err(VaultError::AlreadyReleased);
+        }
+        if vault.balance < amount {
+            return Err(VaultError::InsufficientBalance);
+        }
 
         let xlm = token::Client::new(&env, &env.current_contract_address());
         xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
@@ -108,6 +112,7 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .set(&DataKey::Vault(vault_id), &vault);
+        Ok(())
     }
 
     /// Anyone can call this once the TTL has lapsed to release funds to beneficiary.

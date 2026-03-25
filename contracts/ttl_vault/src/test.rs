@@ -84,6 +84,26 @@ fn test_is_expired_after_interval() {
 }
 
 #[test]
+fn test_withdraw_zero_amount_rejected() {
+    let (env, owner, beneficiary) = setup();
+    let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+    let result = client.try_withdraw(&vault_id, &0i128);
+    assert_eq!(result, Err(Ok(VaultError::InvalidAmount)));
+}
+
+#[test]
+fn test_withdraw_negative_amount_rejected() {
+    let (env, owner, beneficiary) = setup();
+    let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+    let result = client.try_withdraw(&vault_id, &-1i128);
+    assert_eq!(result, Err(Ok(VaultError::InvalidAmount)));
+}
+
+#[test]
 fn test_update_beneficiary() {
     let (env, owner, beneficiary) = setup();
     let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
