@@ -29,6 +29,10 @@ impl TtlVaultContract {
     ) -> u64 {
         owner.require_auth();
 
+        if check_in_interval == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+
         let vault_id: u64 = env
             .storage()
             .instance()

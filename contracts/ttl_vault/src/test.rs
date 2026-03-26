@@ -175,6 +175,14 @@ fn test_update_beneficiary() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_create_vault_zero_interval() {
+    let (env, owner, beneficiary) = setup();
+    let client = TtlVaultContractClient::new(&env, &env.register_contract(None, TtlVaultContract));
+    client.create_vault(&owner, &beneficiary, &0u64);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #1)")]
 fn test_load_nonexistent_vault() {
     let (env, _, _) = setup();
