@@ -29,6 +29,7 @@ pub enum ContractError {
     InsufficientBalance = 8,
     NotAdmin = 9,
     Paused = 10,
+    InvalidBeneficiary = 11,
 }
 
 #[contract]
@@ -84,6 +85,10 @@ impl TtlVaultContract {
 
         if check_in_interval == 0 {
             panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+
+        if owner == beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
         }
 
         let vault_id = Self::vault_count(env.clone()) + 1;
@@ -272,6 +277,10 @@ impl TtlVaultContract {
 
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
+        }
+
+        if vault.owner == new_beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
         }
 
         vault.beneficiary = new_beneficiary;

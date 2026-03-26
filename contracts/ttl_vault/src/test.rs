@@ -117,3 +117,18 @@ fn test_paused_blocks_check_in_withdraw_and_trigger_release() {
         ReleaseStatus::Released
     );
 }
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_create_vault_rejects_owner_as_beneficiary() {
+    let (_, owner, _, _, _, client) = setup();
+    client.create_vault(&owner, &owner, &1000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_update_beneficiary_rejects_owner_as_beneficiary() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000);
+    client.update_beneficiary(&vault_id, &owner);
+}
