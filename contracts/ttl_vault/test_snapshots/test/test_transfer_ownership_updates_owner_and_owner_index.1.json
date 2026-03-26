@@ -490,6 +490,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "beneficiaries"
+                      },
+                      "val": {
+                        "vec": []
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "beneficiary"
                       },
                       "val": {
@@ -510,6 +518,14 @@
                       },
                       "val": {
                         "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "metadata"
+                      },
+                      "val": {
+                        "string": ""
                       }
                     },
                     {
@@ -1431,6 +1447,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "beneficiaries"
+                  },
+                  "val": {
+                    "vec": []
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "beneficiary"
                   },
                   "val": {
@@ -1451,6 +1475,14 @@
                   },
                   "val": {
                     "u64": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "metadata"
+                  },
+                  "val": {
+                    "string": ""
                   }
                 },
                 {
