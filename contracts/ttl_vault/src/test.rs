@@ -215,6 +215,16 @@ fn test_trigger_release_transfers_to_beneficiary() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_trigger_release_zero_balance() {
+    let (env, owner, beneficiary, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+    // no deposit — balance stays 0
+    env.ledger().with_mut(|l| l.timestamp += 90000);
+    client.trigger_release(&vault_id);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_create_vault_zero_interval() {
     let (_, owner, beneficiary, _, client) = setup();

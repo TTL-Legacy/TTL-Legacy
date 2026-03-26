@@ -144,14 +144,16 @@ impl TtlVaultContract {
         );
         assert!(Self::is_expired(&env, vault_id), "vault not yet expired");
 
-        if vault.balance > 0 {
-            let xlm = token::Client::new(&env, &Self::load_token(&env));
-            xlm.transfer(
-                &env.current_contract_address(),
-                &vault.beneficiary,
-                &vault.balance,
-            );
+        if vault.balance == 0 {
+            panic_with_error!(&env, ContractError::EmptyVault);
         }
+
+        let xlm = token::Client::new(&env, &Self::load_token(&env));
+        xlm.transfer(
+            &env.current_contract_address(),
+            &vault.beneficiary,
+            &vault.balance,
+        );
 
         vault.balance = 0;
         vault.status = ReleaseStatus::Released;
