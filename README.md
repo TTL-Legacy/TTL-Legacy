@@ -112,7 +112,7 @@ stellar keys generate deployer --network testnet
 ```rust
 create_vault(beneficiary: Address, check_in_interval: u64) -> u64
 get_vault(vault_id: u64) -> Vault
-get_ttl_remaining(vault_id: u64) -> u64
+get_ttl_remaining(vault_id: u64) -> Option<u64>
 ```
 
 ### Owner Actions

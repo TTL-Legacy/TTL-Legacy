@@ -177,14 +177,19 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id)
     }
 
-    pub fn get_ttl_remaining(env: Env, vault_id: u64) -> u64 {
-        let vault: Vault = Self::load_vault(&env, vault_id);
+    pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
+        let vault: Vault = match env.storage()
+            .persistent()
+            .get(&DataKey::Vault(vault_id)) {
+            Some(v) => v,
+            None => return None,
+        };
         let deadline = vault.last_check_in + vault.check_in_interval;
         let now = env.ledger().timestamp();
         if now >= deadline {
-            0
+            Some(0)
         } else {
-            deadline - now
+            Some(deadline - now)
         }
     }
 
