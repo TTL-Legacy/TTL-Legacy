@@ -4,6 +4,16 @@ mod test;
 
 mod types;
 use types::{ContractError, DataKey, ReleaseStatus, Vault};
+use types::{DataKey, ReleaseStatus, Vault, VaultError};
+
+/// ~5 years in ledgers (1 ledger ≈ 5 s). Vaults are long-lived by design.
+const VAULT_TTL_LEDGERS: u32 = 31_536_000;
+/// Extend vault persistent entry when less than ~30 days remain.
+const VAULT_TTL_THRESHOLD: u32 = 518_400;
+/// ~1 year in ledgers for instance storage.
+const INSTANCE_TTL_LEDGERS: u32 = 6_307_200;
+/// Extend instance storage when less than ~30 days remain.
+const INSTANCE_TTL_THRESHOLD: u32 = 518_400;
 
 #[contract]
 pub struct TtlVaultContract;
@@ -49,30 +59,38 @@ impl TtlVaultContract {
             status: ReleaseStatus::Locked,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Vault(vault_id), &vault);
+        Self::save_vault(&env, vault_id, &vault);
         env.storage()
             .instance()
             .set(&DataKey::VaultCount, &vault_id);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
         vault_id
     }
 
     /// Owner checks in, resetting the TTL countdown.
-    pub fn check_in(env: Env, vault_id: u64) {
+    ///
+    /// Auth model: `vault.owner.require_auth()` enforces that the transaction
+    /// must be signed by the vault owner. The explicit `NotOwner` check below
+    /// runs first so callers receive a clear error code rather than a generic
+    /// auth failure when they supply a vault_id they do not own.
+    pub fn check_in(env: Env, vault_id: u64, caller: Address) -> Result<(), VaultError> {
+        caller.require_auth();
         let mut vault: Vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
 
-        assert!(
-            vault.status == ReleaseStatus::Locked,
-            "vault already released"
-        );
+        if caller != vault.owner {
+            return Err(VaultError::NotOwner);
+        }
+
+        if vault.status != ReleaseStatus::Locked {
+            return Err(VaultError::AlreadyReleased);
+        }
 
         vault.last_check_in = env.ledger().timestamp();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Vault(vault_id), &vault);
+        Self::save_vault(&env, vault_id, &vault);
+        Ok(())
     }
 
     /// Deposit XLM into the vault.
@@ -90,29 +108,30 @@ impl TtlVaultContract {
         xlm.transfer(&from, &env.current_contract_address(), &amount);
 
         vault.balance += amount;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Vault(vault_id), &vault);
+        Self::save_vault(&env, vault_id, &vault);
     }
 
     /// Owner withdraws from the vault.
-    pub fn withdraw(env: Env, vault_id: u64, amount: i128) {
+    pub fn withdraw(env: Env, vault_id: u64, amount: i128) -> Result<(), VaultError> {
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
         let mut vault: Vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
 
-        assert!(
-            vault.status == ReleaseStatus::Locked,
-            "vault already released"
-        );
-        assert!(vault.balance >= amount, "insufficient balance");
+        if vault.status != ReleaseStatus::Locked {
+            return Err(VaultError::AlreadyReleased);
+        }
+        if vault.balance < amount {
+            return Err(VaultError::InsufficientBalance);
+        }
 
         let xlm = token::Client::new(&env, &Self::load_token(&env));
         xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
 
         vault.balance -= amount;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Vault(vault_id), &vault);
+        Self::save_vault(&env, vault_id, &vault);
+        Ok(())
     }
 
     /// Anyone can call this once the TTL has lapsed to release funds to beneficiary.
@@ -136,9 +155,7 @@ impl TtlVaultContract {
 
         vault.balance = 0;
         vault.status = ReleaseStatus::Released;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Vault(vault_id), &vault);
+        Self::save_vault(&env, vault_id, &vault);
     }
 
     /// Returns true if the check-in window has passed.
@@ -167,9 +184,7 @@ impl TtlVaultContract {
         let mut vault: Vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
         vault.beneficiary = new_beneficiary;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Vault(vault_id), &vault);
+        Self::save_vault(&env, vault_id, &vault);
     }
 
     // --- helpers ---
@@ -186,5 +201,14 @@ impl TtlVaultContract {
             .persistent()
             .get(&DataKey::Vault(vault_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::VaultNotFound))
+    }
+
+    /// Persist a vault and extend its TTL so it is never silently archived.
+    fn save_vault(env: &Env, vault_id: u64, vault: &Vault) {
+        let key = DataKey::Vault(vault_id);
+        env.storage().persistent().set(&key, vault);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
     }
 }
