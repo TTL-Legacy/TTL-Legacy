@@ -2,8 +2,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, Events as _},
-    Address, Env, Symbol, FromVal,
+    testutils::{Address as _, Events as _, Ledger},
+    Address, Env, TryIntoVal,
 };
 use types::VaultError;
 
@@ -178,6 +178,30 @@ fn test_withdraw_negative_amount_rejected() {
     let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
     let result = client.try_withdraw(&vault_id, &-1i128);
     assert_eq!(result, Err(Ok(VaultError::InvalidAmount)));
+}
+
+#[test]
+fn test_check_in_emits_event() {
+    let (env, owner, beneficiary) = setup();
+    let contract_id = env.register_contract(None, TtlVaultContract);
+    let client = TtlVaultContractClient::new(&env, &contract_id);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &86400u64);
+    let ts = env.ledger().timestamp();
+    client.check_in(&vault_id);
+
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+
+    let (_, topics, data) = events.get(0).unwrap();
+    // topic[0] = symbol "check_in", topic[1] = vault_id
+    let topic0: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+    let topic1: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(topic0, symbol_short!("check_in"));
+    assert_eq!(topic1, vault_id);
+    // data = last_check_in timestamp
+    let emitted_ts: u64 = data.try_into_val(&env).unwrap();
+    assert_eq!(emitted_ts, ts);
 }
 
 #[test]
