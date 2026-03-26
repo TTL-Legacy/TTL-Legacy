@@ -2,6 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, panic_with_error, symbol_short, token, Address, Env,
+    Vec,
 };
 
 mod types;
@@ -98,6 +99,7 @@ impl TtlVaultContract {
         };
 
         Self::save_vault(&env, vault_id, &vault);
+        Self::add_owner_vault_id(&env, &owner, vault_id);
         env.storage()
             .instance()
             .set(&DataKey::VaultCount, &vault_id);
@@ -241,6 +243,10 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id)
     }
 
+    pub fn get_vaults_by_owner(env: Env, owner: Address) -> Vec<u64> {
+        Self::load_owner_vault_ids(&env, &owner)
+    }
+
     pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
         let vault: Vault = env.storage().persistent().get(&DataKey::Vault(vault_id))?;
 
@@ -276,6 +282,83 @@ impl TtlVaultContract {
 
         vault.beneficiary = new_beneficiary;
         Self::save_vault(&env, vault_id, &vault);
+    }
+
+    pub fn update_check_in_interval(
+        env: Env,
+        vault_id: u64,
+        new_interval: u64,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+
+        if new_interval == 0 {
+            return Err(ContractError::InvalidInterval);
+        }
+
+        let mut vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        vault.check_in_interval = new_interval;
+        Self::save_vault(&env, vault_id, &vault);
+        Ok(())
+    }
+
+    pub fn cancel_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+
+        let mut vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let refund_amount = vault.balance;
+        if refund_amount > 0 {
+            let xlm = token::Client::new(&env, &Self::load_token(&env));
+            xlm.transfer(&env.current_contract_address(), &vault.owner, &refund_amount);
+        }
+
+        vault.balance = 0;
+        vault.status = ReleaseStatus::Cancelled;
+        Self::save_vault(&env, vault_id, &vault);
+        Ok(())
+    }
+
+    pub fn transfer_ownership(
+        env: Env,
+        vault_id: u64,
+        new_owner: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+
+        let mut vault = Self::load_vault(&env, vault_id);
+        let old_owner = vault.owner.clone();
+        old_owner.require_auth();
+        new_owner.require_auth();
+
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        if old_owner != new_owner {
+            Self::remove_owner_vault_id(&env, &old_owner, vault_id);
+            Self::add_owner_vault_id(&env, &new_owner, vault_id);
+        }
+
+        vault.owner = new_owner;
+        Self::save_vault(&env, vault_id, &vault);
+        Ok(())
     }
 
     // --- helpers ---
@@ -314,6 +397,40 @@ impl TtlVaultContract {
             .persistent()
             .get(&DataKey::Vault(vault_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::VaultNotFound))
+    }
+
+    fn load_owner_vault_ids(env: &Env, owner: &Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OwnerVaults(owner.clone()))
+            .unwrap_or(Vec::new(env))
+    }
+
+    fn save_owner_vault_ids(env: &Env, owner: &Address, vault_ids: &Vec<u64>) {
+        let key = DataKey::OwnerVaults(owner.clone());
+        env.storage().persistent().set(&key, vault_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+    }
+
+    fn add_owner_vault_id(env: &Env, owner: &Address, vault_id: u64) {
+        let mut vault_ids = Self::load_owner_vault_ids(env, owner);
+        vault_ids.push_back(vault_id);
+        Self::save_owner_vault_ids(env, owner, &vault_ids);
+    }
+
+    fn remove_owner_vault_id(env: &Env, owner: &Address, vault_id: u64) {
+        let vault_ids = Self::load_owner_vault_ids(env, owner);
+        let mut next_ids = Vec::new(env);
+
+        for id in vault_ids.iter() {
+            if id != vault_id {
+                next_ids.push_back(id);
+            }
+        }
+
+        Self::save_owner_vault_ids(env, owner, &next_ids);
     }
 
     /// Persist a vault and extend its TTL so it is never silently archived.

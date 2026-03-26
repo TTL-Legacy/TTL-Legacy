@@ -7,6 +7,7 @@ pub const VAULT_CREATED_TOPIC: Symbol = symbol_short!("v_created");
 #[derive(Clone)]
 pub enum DataKey {
     Vault(u64),
+    OwnerVaults(Address),
     VaultCount,
     TokenAddress,
     Admin,
@@ -18,6 +19,7 @@ pub enum DataKey {
 pub enum ReleaseStatus {
     Locked,
     Released,
+    Cancelled,
 }
 
 #[contracttype]

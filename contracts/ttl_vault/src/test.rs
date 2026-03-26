@@ -4,7 +4,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{self, StellarAssetClient},
-    Address, Env,
+    vec, Address, Env,
 };
 
 fn setup() -> (
@@ -116,4 +116,60 @@ fn test_paused_blocks_check_in_withdraw_and_trigger_release() {
         client.get_release_status(&vault_id),
         ReleaseStatus::Released
     );
+}
+
+#[test]
+fn test_get_vaults_by_owner_tracks_multiple_vaults() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64);
+
+    assert_eq!(
+        client.get_vaults_by_owner(&owner),
+        vec![&env, vault_id_1, vault_id_2]
+    );
+}
+
+#[test]
+fn test_update_check_in_interval() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    client.update_check_in_interval(&vault_id, &300u64);
+    assert_eq!(client.get_vault(&vault_id).check_in_interval, 300u64);
+
+    assert!(client.try_update_check_in_interval(&vault_id, &0u64).is_err());
+}
+
+#[test]
+fn test_transfer_ownership_updates_owner_and_owner_index() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    assert_eq!(client.get_vaults_by_owner(&owner), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_owner(&new_owner), vec![&env]);
+
+    client.transfer_ownership(&vault_id, &new_owner);
+
+    assert_eq!(client.get_vault(&vault_id).owner, new_owner);
+    assert_eq!(client.get_vaults_by_owner(&owner), vec![&env]);
+    assert_eq!(client.get_vaults_by_owner(&new_owner), vec![&env, vault_id]);
+}
+
+#[test]
+fn test_cancel_vault_refunds_owner_and_marks_cancelled() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    let token_client = token::Client::new(&env, &token_address);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    client.deposit(&vault_id, &owner, &400i128);
+    assert_eq!(token_client.balance(&owner), 999_600i128);
+
+    client.cancel_vault(&vault_id);
+    assert_eq!(token_client.balance(&owner), 1_000_000i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Cancelled);
 }
