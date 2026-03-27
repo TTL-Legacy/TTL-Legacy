@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, panic_with_error, symbol_short, token, Address, Env,
-    String, Vec,
+    contract, contracterror, contractimpl, panic_with_error, symbol_short, token, Address,
+    BytesN, Env, String, Vec,
 };
 
 mod types;
@@ -33,12 +33,11 @@ pub enum ContractError {
     InsufficientBalance = 8,
     NotAdmin = 9,
     Paused = 10,
-feat/ttl-vault-admin-transfer
     NoPendingAdmin = 11,
-
-    InvalidBps = 11,
-    NotExpiringSoon = 12,
- main
+    InvalidBps = 12,
+    NotExpiringSoon = 13,
+    IntervalTooLow = 14,
+    IntervalTooHigh = 15,
 }
 
 #[contract]
@@ -71,6 +70,36 @@ impl TtlVaultContract {
         env.storage().instance().set(&DataKey::Paused, &false);
     }
 
+    pub fn set_min_check_in_interval(env: Env, min_interval: u64) {
+        Self::require_admin(&env);
+        if min_interval == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        env.storage().instance().set(&DataKey::MinCheckInInterval, &min_interval);
+    }
+
+    pub fn set_max_check_in_interval(env: Env, max_interval: u64) {
+        Self::require_admin(&env);
+        if max_interval == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        env.storage().instance().set(&DataKey::MaxCheckInInterval, &max_interval);
+    }
+
+    pub fn get_min_check_in_interval(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::MinCheckInInterval)
+    }
+
+    pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::MaxCheckInInterval)
+    }
+
+    /// Admin-only. Upgrades the contract to a new WASM hash.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::require_admin(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
     pub fn is_paused(env: Env) -> bool {
         Self::load_paused(&env)
     }
@@ -94,6 +123,7 @@ impl TtlVaultContract {
         if check_in_interval == 0 {
             panic_with_error!(&env, ContractError::InvalidInterval);
         }
+        Self::assert_interval_in_bounds(&env, check_in_interval);
         let vault_id = Self::vault_count(env.clone()) + 1;
         let vault = Vault {
             owner: owner.clone(),
@@ -107,6 +137,7 @@ impl TtlVaultContract {
         };
         Self::save_vault(&env, vault_id, &vault);
         Self::add_owner_vault_id(&env, &owner, vault_id);
+        Self::add_beneficiary_vault_id(&env, &beneficiary, vault_id);
         env.storage().instance().set(&DataKey::VaultCount, &vault_id);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
@@ -353,6 +384,10 @@ impl TtlVaultContract {
         Self::load_owner_vault_ids(&env, &owner)
     }
 
+    pub fn get_vaults_by_beneficiary(env: Env, beneficiary: Address) -> Vec<u64> {
+        Self::load_beneficiary_vault_ids(&env, &beneficiary)
+    }
+
     pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
         let vault: Vault = env.storage().persistent().get(&DataKey::Vault(vault_id))?;
         let deadline = vault.last_check_in + vault.check_in_interval;
@@ -393,6 +428,7 @@ impl TtlVaultContract {
         if new_interval == 0 {
             return Err(ContractError::InvalidInterval);
         }
+        Self::assert_interval_in_bounds(&env, new_interval);
         let mut vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
         if vault.status != ReleaseStatus::Locked {
@@ -516,5 +552,37 @@ impl TtlVaultContract {
         let key = DataKey::Vault(vault_id);
         env.storage().persistent().set(&key, vault);
         env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+    }
+
+    fn load_beneficiary_vault_ids(env: &Env, beneficiary: &Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BeneficiaryVaults(beneficiary.clone()))
+            .unwrap_or(Vec::new(env))
+    }
+
+    fn save_beneficiary_vault_ids(env: &Env, beneficiary: &Address, vault_ids: &Vec<u64>) {
+        let key = DataKey::BeneficiaryVaults(beneficiary.clone());
+        env.storage().persistent().set(&key, vault_ids);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+    }
+
+    fn add_beneficiary_vault_id(env: &Env, beneficiary: &Address, vault_id: u64) {
+        let mut vault_ids = Self::load_beneficiary_vault_ids(env, beneficiary);
+        vault_ids.push_back(vault_id);
+        Self::save_beneficiary_vault_ids(env, beneficiary, &vault_ids);
+    }
+
+    fn assert_interval_in_bounds(env: &Env, interval: u64) {
+        if let Some(min) = env.storage().instance().get::<DataKey, u64>(&DataKey::MinCheckInInterval) {
+            if interval < min {
+                panic_with_error!(env, ContractError::IntervalTooLow);
+            }
+        }
+        if let Some(max) = env.storage().instance().get::<DataKey, u64>(&DataKey::MaxCheckInInterval) {
+            if interval > max {
+                panic_with_error!(env, ContractError::IntervalTooHigh);
+            }
+        }
     }
 }

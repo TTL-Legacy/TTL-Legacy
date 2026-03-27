@@ -12,11 +12,14 @@ pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 pub enum DataKey {
     Vault(u64),
     OwnerVaults(Address),
+    BeneficiaryVaults(Address),
     VaultCount,
     TokenAddress,
     Admin,
     Paused,
     PendingAdmin,
+    MinCheckInInterval,
+    MaxCheckInInterval,
 }
 
 #[contracttype]
