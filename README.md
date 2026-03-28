@@ -1,5 +1,7 @@
 # TTL-Legacy — Micro-Endowment Check-In Vault on Stellar
 
+[![CI](https://github.com/success-OG/TTL-Legacy/actions/workflows/ci.yml/badge.svg)](https://github.com/success-OG/TTL-Legacy/actions/workflows/ci.yml)
+
 A decentralized "Dead Man's Switch" built on Stellar/Soroban smart contracts.
 
 TTL-Legacy is a time-capsule vault where funds (XLM or tokenized assets) are released to a beneficiary only if the owner fails to "check in" via a Passkey-powered interface. It leverages Soroban's State Archival and TTL (Time to Live) features to automate asset inheritance — no seed phrase complexity required.
