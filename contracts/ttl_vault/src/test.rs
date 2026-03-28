@@ -399,6 +399,19 @@ fn test_create_vault_zero_interval_fails() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_create_vault_long_interval_remains_accessible() {
+    // 30-day check-in interval: vault storage TTL must outlive the interval.
+    // vault_ttl_ledgers(2_592_000) = 2_592_000 * 2 / 5 = 1_036_800 ledgers (~60 days).
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let thirty_days: u64 = 30 * 24 * 3600; // 2_592_000 seconds
+    let vault_id = client.create_vault(&owner, &beneficiary, &thirty_days);
+    // Advance just under the interval — vault must still be readable.
+    env.ledger().with_mut(|l| l.timestamp += thirty_days - 1);
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.check_in_interval, thirty_days);
+}
+
 // ---- Issue 1: get_vaults_by_beneficiary ----
 
 #[test]

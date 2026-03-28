@@ -19,6 +19,21 @@ pub const VAULT_TTL_LEDGERS: u32 = 200_000;
 pub const INSTANCE_TTL_THRESHOLD: u32 = 1000;
 pub const INSTANCE_TTL_LEDGERS: u32 = 200_000;
 
+/// Approximate ledger close time in seconds (Stellar mainnet ~5s).
+const LEDGER_SECOND: u32 = 5;
+/// Soroban maximum persistent entry TTL in ledgers (~180 days at 5s/ledger).
+const MAX_PERSISTENT_TTL: u32 = 3_110_400;
+
+/// Compute a persistent storage TTL (in ledgers) for a vault with the given
+/// check-in interval. Applies a 2× safety buffer so storage outlives the
+/// interval, capped at the Soroban maximum.
+fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
+    let ledgers = (check_in_interval as u32)
+        .saturating_mul(2)
+        .saturating_div(LEDGER_SECOND);
+    ledgers.max(VAULT_TTL_LEDGERS).min(MAX_PERSISTENT_TTL)
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -988,8 +1003,9 @@ impl TtlVaultContract {
 
     fn save_vault(env: &Env, vault_id: u64, vault: &Vault) {
         let key = DataKey::Vault(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, vault);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
     }
 
     fn load_beneficiary_vault_ids(env: &Env, beneficiary: &Address) -> Vec<u64> {
