@@ -509,3 +509,27 @@ fn test_min_and_max_both_enforced() {
     let vault_id = client.create_vault(&owner, &beneficiary, &1_800u64);
     assert_eq!(client.get_vault(&vault_id).check_in_interval, 1_800u64);
 }
+
+#[test]
+fn test_withdraw_rejects_zero_amount() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // zero amount should return InvalidAmount (#5)
+    let result = client.try_withdraw(&vault_id, &0i128);
+    assert!(result.is_err(), "expected error for zero-amount withdrawal");
+}
+
+#[test]
+fn test_withdraw_rejects_negative_amount() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // negative amount should also return InvalidAmount (#5)
+    let result = client.try_withdraw(&vault_id, &-1i128);
+    assert!(result.is_err(), "expected error for negative-amount withdrawal");
+}
