@@ -55,6 +55,17 @@ fn test_initialize_guard_against_double_init() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #18)")]
+fn test_initialize_rejects_same_xlm_token_and_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let addr = Address::generate(&env);
+    let contract_address = env.register_contract(None, TtlVaultContract);
+    let client = TtlVaultContractClient::new(&env, &contract_address);
+    client.initialize(&addr, &addr);
+}
+
+#[test]
 fn test_vault_count_view() {
     let (_, owner, beneficiary, _, _, client) = setup();
 
@@ -265,6 +276,15 @@ fn test_admin_transfer_full_flow() {
 fn test_create_vault_rejects_owner_as_beneficiary() {
     let (_, owner, _, _, _, client) = setup();
     client.create_vault(&owner, &owner, &1000);
+}
+
+#[test]
+fn test_vault_count_consistent_after_creation() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    assert_eq!(client.vault_count(), 0);
+    let id = client.create_vault(&owner, &beneficiary, &1000);
+    assert_eq!(id, 1);
+    assert_eq!(client.vault_count(), 1);
 }
 
 #[test]

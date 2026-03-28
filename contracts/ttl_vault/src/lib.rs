@@ -57,6 +57,7 @@ pub enum ContractError {
     InvalidBeneficiary = 11,
     BalanceOverflow = 12,
     VaultExpired = 17,
+    InvalidAdmin = 18,
 }
 
 #[contract]
@@ -83,6 +84,9 @@ impl TtlVaultContract {
             || env.storage().instance().has(&DataKey::Admin)
         {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
+        }
+        if xlm_token == admin {
+            panic_with_error!(&env, ContractError::InvalidAdmin);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::TokenAddress, &xlm_token);
@@ -249,8 +253,6 @@ impl TtlVaultContract {
         }
 
         let vault_id = Self::vault_count(env.clone()) + 1;
-
-        let vault_id = Self::vault_count(env.clone()) + 1;
         let vault = Vault {
             owner: owner.clone(),
             beneficiary: beneficiary.clone(),
@@ -264,6 +266,9 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         Self::add_owner_vault_id(&env, &owner, vault_id);
         Self::add_beneficiary_vault_id(&env, &beneficiary, vault_id);
+        // VaultCount is updated only after all vault data is written. If any
+        // prior storage call panics, the count is not advanced, keeping it
+        // consistent with the number of successfully persisted vaults.
         env.storage().instance().set(&DataKey::VaultCount, &vault_id);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
