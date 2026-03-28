@@ -579,3 +579,29 @@ fn test_withdraw_emits_event() {
 
     assert!(withdraw_event.is_some(), "withdraw event not emitted");
 }
+
+#[test]
+fn test_trigger_release_emits_event_with_zero_balance() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // create vault but never deposit — balance stays 0
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // should succeed and emit a release event with amount: 0
+    client.trigger_release(&vault_id);
+
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+
+    let events = env.events().all();
+    let release_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 1 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("release")).unwrap_or(false)
+    });
+
+    assert!(release_event.is_some(), "release event not emitted for zero-balance vault");
+}
