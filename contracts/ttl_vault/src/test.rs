@@ -718,6 +718,25 @@ fn test_trigger_release_emits_event_with_zero_balance() {
     assert!(release_event.is_some(), "release event not emitted for zero-balance vault");
 }
 
+// ---- Issue #105: set_beneficiaries owner-as-beneficiary guard ----
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_set_beneficiaries_rejects_owner_as_beneficiary() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+
+    // owner sneaks themselves into the multi-split list
+    client.set_beneficiaries(
+        &vault_id,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: owner.clone(), bps: 5_000 },
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
+        ],
+    );
+}
+
 #[test]
 fn test_deposit_rejects_balance_overflow() {
     let (env, owner, beneficiary, _, token_address, client) = setup();
