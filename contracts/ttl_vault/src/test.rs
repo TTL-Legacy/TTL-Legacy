@@ -732,3 +732,44 @@ fn test_pending_admin_cleared_after_accept() {
     assert_eq!(client.get_pending_admin(), None);
     assert_eq!(client.get_admin(), new_admin);
 }
+
+// ---- set_beneficiaries tests ----
+
+#[test]
+fn test_set_beneficiaries_rejects_empty_list() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    let result = client.try_set_beneficiaries(&vault_id, &vec![&env]);
+    assert!(result.is_err(), "empty beneficiaries list must be rejected");
+}
+
+#[test]
+fn test_set_beneficiaries_rejects_invalid_bps_sum() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    let other = Address::generate(&env);
+
+    // BPS sums to 5_000, not 10_000
+    let result = client.try_set_beneficiaries(
+        &vault_id,
+        &vec![&env, BeneficiaryEntry { address: other, bps: 5_000 }],
+    );
+    assert!(result.is_err(), "BPS sum != 10_000 must be rejected");
+}
+
+#[test]
+fn test_set_beneficiaries_accepts_valid_single_entry() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    let sole = Address::generate(&env);
+
+    client.set_beneficiaries(
+        &vault_id,
+        &vec![&env, BeneficiaryEntry { address: sole.clone(), bps: 10_000 }],
+    );
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.beneficiaries.len(), 1);
+    assert_eq!(vault.beneficiaries.get(0).unwrap().address, sole);
+}

@@ -647,6 +647,9 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
+        if beneficiaries.is_empty() {
+            return Err(ContractError::InvalidBps);
+        }
         let total_bps: u32 = beneficiaries.iter().map(|e| e.bps).sum();
         if total_bps != 10_000 {
             return Err(ContractError::InvalidBps);
