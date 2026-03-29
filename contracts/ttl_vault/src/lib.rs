@@ -967,6 +967,7 @@ impl TtlVaultContract {
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
@@ -975,12 +976,15 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn cancel_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+    pub fn cancel_vault(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
+        caller.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }

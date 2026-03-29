@@ -305,9 +305,19 @@ fn test_cancel_vault_refunds_owner_and_marks_cancelled() {
     client.deposit(&vault_id, &owner, &400i128);
     assert_eq!(token_client.balance(&owner), 999_600i128);
 
-    client.cancel_vault(&vault_id);
+    client.cancel_vault(&vault_id, &owner);
     assert_eq!(token_client.balance(&owner), 1_000_000i128);
     assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_vault_requires_auth_before_load() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let other = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // other is not the owner, should fail with NotOwner
+    assert!(client.try_cancel_vault(&vault_id, &other).is_err());
 }
 
 #[test]
