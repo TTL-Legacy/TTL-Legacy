@@ -2,7 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{storage::Instance as _, Address as _, Events, Ledger},
     token::{self, StellarAssetClient},
     vec, Address, BytesN, Env, IntoVal, TryIntoVal,
 };
@@ -55,7 +55,7 @@ fn test_initialize_guard_against_double_init() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #18)")]
+#[should_panic(expected = "Error(Contract, #20)")]
 fn test_initialize_rejects_same_xlm_token_and_admin() {
     let env = Env::default();
     env.mock_all_auths();
@@ -286,13 +286,13 @@ fn test_transfer_ownership_preserves_beneficiary_index() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
 
     // beneficiary index contains the vault before transfer
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 
     client.transfer_ownership(&vault_id, &new_owner);
 
     // vault.beneficiary is unchanged — index must still be intact
     assert_eq!(client.get_vault(&vault_id).beneficiary, beneficiary);
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 }
 
 #[test]
@@ -843,13 +843,109 @@ fn test_update_beneficiary_updates_index() {
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64);
 
     // old beneficiary sees the vault, new one does not
-    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary), vec![&env, vault_id]);
-    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env]);
 
     client.update_beneficiary(&vault_id, &new_beneficiary);
 
     // old beneficiary no longer sees the vault
-    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env]);
     // new beneficiary now sees the vault
-    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+}
+
+#[test]
+fn test_state_mutating_calls_extend_instance_ttl() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let contract_id = client.address.clone();
+    let interval: u64 = 1_000;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval);
+    client.deposit(&vault_id, &owner, &100_000);
+
+    let get_ttl = || env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+
+    // check_in
+    client.check_in(&vault_id, &owner);
+    assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
+
+    // deposit
+    client.deposit(&vault_id, &owner, &1_000);
+    assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
+
+    // withdraw
+    client.withdraw(&vault_id, &1_000);
+    assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
+
+    // partial_release
+    client.partial_release(&vault_id, &1_000);
+    assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
+
+    // trigger_release: advance time past expiry first
+    env.ledger().with_mut(|l| l.timestamp += interval + 1);
+    client.trigger_release(&vault_id);
+    assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
+}
+
+#[test]
+fn test_check_in_extends_owner_index_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let contract_id = client.address.clone();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1_000u64);
+
+    client.check_in(&vault_id, &owner);
+
+    let ttl = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&DataKey::OwnerVaults(owner.clone()))
+    });
+    assert!(ttl >= VAULT_TTL_THRESHOLD as u32);
+}
+
+#[test]
+fn test_get_active_vaults_by_beneficiary_excludes_released() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // before release: active list contains the vault
+    assert_eq!(
+        client.get_active_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
+        vec![&env, vault_id]
+    );
+    // historical list also contains it
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
+        vec![&env, vault_id]
+    );
+
+    // expire and release
+    env.ledger().with_mut(|l| l.timestamp += 101);
+    client.trigger_release(&vault_id);
+
+    // active list is now empty
+    assert_eq!(
+        client.get_active_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
+        vec![&env]
+    );
+    // historical list still contains the released vault
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
+        vec![&env, vault_id]
+    );
+}
+
+#[test]
+fn test_cancel_vault_removes_from_owner_and_beneficiary_indexes() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+
+    client.cancel_vault(&vault_id);
+
+    assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env]);
 }
