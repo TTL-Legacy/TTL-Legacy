@@ -856,3 +856,40 @@ fn test_update_beneficiary_updates_index() {
     // new beneficiary now sees the vault
     assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
 }
+
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_create_vault_before_initialize_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let contract_address = env.register_contract(None, TtlVaultContract);
+    let client = TtlVaultContractClient::new(&env, &contract_address);
+    // Call create_vault without initialize
+    client.create_vault(&owner, &beneficiary, &100u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_deposit_before_initialize_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let owner = Address::generate(&env);
+    let contract_address = env.register_contract(None, TtlVaultContract);
+    let client = TtlVaultContractClient::new(&env, &contract_address);
+    // Call deposit without initialize
+    client.deposit(&1u64, &owner, &100i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_get_admin_before_initialize_returns_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_address = env.register_contract(None, TtlVaultContract);
+    let client = TtlVaultContractClient::new(&env, &contract_address);
+    // Call get_admin without initialize
+    client.get_admin();
+}

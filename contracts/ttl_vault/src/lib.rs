@@ -58,6 +58,7 @@ pub enum ContractError {
     InvalidBeneficiary = 17,
     BalanceOverflow = 18,
     VaultExpired = 19,
+    NotInitialized = 20,
 }
 
 #[contract]
@@ -1077,11 +1078,11 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(env, ContractError::VaultNotFound))
+            .unwrap_or_else(|| panic_with_error!(env, ContractError::NotInitialized))
     }
 
     fn load_token(env: &Env) -> Address {
-        env.storage().instance().get(&DataKey::TokenAddress).unwrap_or_else(|| panic_with_error!(env, ContractError::VaultNotFound))
+        env.storage().instance().get(&DataKey::TokenAddress).unwrap_or_else(|| panic_with_error!(env, ContractError::NotInitialized))
     }
 
     fn load_vault(env: &Env, vault_id: u64) -> Vault {
