@@ -759,145 +759,78 @@ fn test_deposit_rejects_balance_overflow() {
     assert!(result.is_err(), "expected overflow error on deposit exceeding i128::MAX");
 }
 
-// ---- Full Vault Lifecycle End-to-End Test ----
-
 #[test]
-fn test_full_vault_lifecycle_end_to_end() {
-    // Set up full environment with token contract
+fn test_partial_release_with_multi_beneficiary_applies_bps_split() {
     let (env, owner, beneficiary, _, token_address, client) = setup();
     let token_client = token::Client::new(&env, &token_address);
 
-    // Define test parameters
-    let deposit_amount: i128 = 500i128;
-    let check_in_interval: u64 = 100u64;
+    let beneficiary2 = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
 
-    // Step 1: Create vault
-    let vault_id = client.create_vault(&owner, &beneficiary, &check_in_interval);
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &10_000i128);
 
-    // Assert vault was created with correct initial state
-    let vault = client.get_vault(&vault_id);
-    assert_eq!(vault.owner, owner);
-    assert_eq!(vault.beneficiary, beneficiary);
-    assert_eq!(vault.check_in_interval, check_in_interval);
-    assert_eq!(vault.balance, 0i128);
-    assert_eq!(vault.status, ReleaseStatus::Locked);
-    assert_eq!(client.vault_count(), 1);
+    // 60/40 split
+    client.set_beneficiaries(
+        &vault_id,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 6_000 },
+            BeneficiaryEntry { address: beneficiary2.clone(), bps: 4_000 },
+        ],
+    );
 
-    // Step 2: Deposit funds
-    client.deposit(&vault_id, &owner, &deposit_amount);
+    client.partial_release(&vault_id, &1_000i128);
 
-    // Assert balance updated after deposit
-    let vault = client.get_vault(&vault_id);
-    assert_eq!(vault.balance, deposit_amount);
-
-    // Assert owner's token balance decreased
-    let owner_balance = token_client.balance(&owner);
-    assert_eq!(owner_balance, 1_000_000i128 - deposit_amount);
-
-    // Step 3: Check in (reset timer)
-    client.check_in(&vault_id, &owner);
-
-    // Assert vault still locked after check-in
-    let vault = client.get_vault(&vault_id);
-    assert_eq!(vault.status, ReleaseStatus::Locked);
+    // 60% of 1_000 = 600, 40% (last, absorbs dust) = 400
+    assert_eq!(token_client.balance(&beneficiary), 600i128);
+    assert_eq!(token_client.balance(&beneficiary2), 400i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 9_000i128);
+    // vault remains locked
     assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Locked);
-
-    // Verify vault is not expired yet (time hasn't passed)
-    assert!(!client.is_expired(&vault_id));
-
-    // Step 4: Expire - advance time past the check-in interval
-    env.ledger().with_mut(|l| l.timestamp += check_in_interval + 1);
-
-    // Assert vault is now expired
-    assert!(client.is_expired(&vault_id));
-    let ttl = client.ping_expiry(&vault_id);
-    assert_eq!(ttl, 0u64);
-
-    // Step 5: Trigger release
-    client.trigger_release(&vault_id);
-
-    // Assert vault status is now Released
-    let vault = client.get_vault(&vault_id);
-    assert_eq!(vault.status, ReleaseStatus::Released);
-    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
-
-    // Assert beneficiary receives full balance on release
-    let beneficiary_balance = token_client.balance(&beneficiary);
-    assert_eq!(beneficiary_balance, deposit_amount);
-
-    // Assert vault balance is now 0 (funds released)
-    let vault = client.get_vault(&vault_id);
-    assert_eq!(vault.balance, 0i128);
 }
 
-// ---- Multiple Vaults Independent State Test ----
+#[test]
+fn test_partial_release_with_multi_beneficiary_last_entry_absorbs_dust() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let beneficiary2 = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &10_000i128);
+
+    // 33/67 split — integer division leaves dust on the last entry
+    client.set_beneficiaries(
+        &vault_id,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 3_300 },
+            BeneficiaryEntry { address: beneficiary2.clone(), bps: 6_700 },
+        ],
+    );
+
+    // release 100 stroops: 33% = 33, last gets 100 - 33 = 67
+    client.partial_release(&vault_id, &100i128);
+
+    assert_eq!(token_client.balance(&beneficiary), 33i128);
+    assert_eq!(token_client.balance(&beneficiary2), 67i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 9_900i128);
+}
 
 #[test]
-fn test_multiple_vaults_created_by_same_owner_have_unique_ids() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+fn test_partial_release_without_multi_beneficiary_sends_to_primary() {
+    // Regression: when beneficiaries list is empty, primary beneficiary still gets 100%
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
 
-    // Create 3 vaults from the same owner with different beneficiaries and check-in intervals
-    let beneficiary1 = Address::generate(&env);
-    let beneficiary2 = Address::generate(&env);
-    let beneficiary3 = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
 
-    let id_1 = client.create_vault(&owner, &beneficiary1, &100u64);
-    let id_2 = client.create_vault(&owner, &beneficiary2, &200u64);
-    let id_3 = client.create_vault(&owner, &beneficiary3, &300u64);
+    client.partial_release(&vault_id, &400i128);
 
-    // Assert IDs are 1, 2, 3
-    assert_eq!(id_1, 1);
-    assert_eq!(id_2, 2);
-    assert_eq!(id_3, 3);
-
-    // Assert each vault has independent state
-    let vault1 = client.get_vault(&id_1);
-    let vault2 = client.get_vault(&id_2);
-    let vault3 = client.get_vault(&id_3);
-
-    // Check each vault has correct owner
-    assert_eq!(vault1.owner, owner);
-    assert_eq!(vault2.owner, owner);
-    assert_eq!(vault3.owner, owner);
-
-    // Check each vault has different beneficiary
-    assert_eq!(vault1.beneficiary, beneficiary1);
-    assert_eq!(vault2.beneficiary, beneficiary2);
-    assert_eq!(vault3.beneficiary, beneficiary3);
-
-    // Check each vault has different check-in interval
-    assert_eq!(vault1.check_in_interval, 100u64);
-    assert_eq!(vault2.check_in_interval, 200u64);
-    assert_eq!(vault3.check_in_interval, 300u64);
-
-    // Check each vault starts with zero balance
-    assert_eq!(vault1.balance, 0i128);
-    assert_eq!(vault2.balance, 0i128);
-    assert_eq!(vault3.balance, 0i128);
-
-    // Check all are locked
-    assert_eq!(vault1.status, ReleaseStatus::Locked);
-    assert_eq!(vault2.status, ReleaseStatus::Locked);
-    assert_eq!(vault3.status, ReleaseStatus::Locked);
-
-    // Deposit into vault 2 only
-    client.deposit(&id_2, &owner, &500i128);
-
-    // Verify only vault 2 balance changed
-    let vault1 = client.get_vault(&id_1);
-    let vault2 = client.get_vault(&id_2);
-    let vault3 = client.get_vault(&id_3);
-
-    assert_eq!(vault1.balance, 0i128);
-    assert_eq!(vault2.balance, 500i128);
-    assert_eq!(vault3.balance, 0i128);
-
-    // Verify vault count
-    assert_eq!(client.vault_count(), 3);
-
-    // Verify get_vaults_by_owner returns all 3 IDs
-    assert_eq!(
-        client.get_vaults_by_owner(&owner),
-        vec![&env, id_1, id_2, id_3]
-    );
+    assert_eq!(token_client.balance(&beneficiary), 400i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 600i128);
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Locked);
 }

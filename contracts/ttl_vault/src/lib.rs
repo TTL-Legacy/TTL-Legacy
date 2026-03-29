@@ -576,10 +576,15 @@ impl TtlVaultContract {
 
     // --- Task 2: partial_release ---
 
-    /// Transfers a partial amount to the beneficiary without releasing the vault.
+    /// Transfers a partial amount to the beneficiary (or beneficiaries) without releasing the vault.
     ///
     /// This allows the owner to distribute funds gradually while keeping the vault
     /// in Locked status. The vault can still be checked in and released later.
+    ///
+    /// When a multi-beneficiary split has been configured via `set_beneficiaries`, the
+    /// `amount` is distributed proportionally according to each entry's BPS allocation,
+    /// using the same rounding logic as `trigger_release` (last entry absorbs dust).
+    /// When no split is configured, the full `amount` goes to the primary beneficiary.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -609,14 +614,37 @@ impl TtlVaultContract {
             return Err(ContractError::InsufficientBalance);
         }
         let xlm = token::Client::new(&env, &Self::load_token(&env));
-        xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
+
+        if vault.beneficiaries.is_empty() {
+            // Single-beneficiary path: send full amount to primary beneficiary.
+            xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
+            env.events().publish(
+                (symbol_short!("partial"), vault_id),
+                (vault.beneficiary.clone(), amount),
+            );
+        } else {
+            // Multi-beneficiary path: split `amount` by BPS, last entry absorbs dust.
+            let mut distributed: i128 = 0;
+            let last_idx = vault.beneficiaries.len() - 1;
+            for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                let share = if i as u32 == last_idx {
+                    amount - distributed
+                } else {
+                    amount * (entry.bps as i128) / 10_000
+                };
+                if share > 0 {
+                    xlm.transfer(&env.current_contract_address(), &entry.address, &share);
+                }
+                distributed += share;
+                env.events().publish(
+                    (symbol_short!("partial"), vault_id),
+                    (entry.address.clone(), share),
+                );
+            }
+        }
+
         vault.balance -= amount;
         Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish(
-            (symbol_short!("partial"), vault_id),
-            (vault.beneficiary, amount),
-        );
         Ok(())
     }
 
