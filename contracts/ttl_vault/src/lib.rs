@@ -104,6 +104,7 @@ impl TtlVaultContract {
     pub fn pause(env: Env) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Unpauses the contract, allowing all operations to resume.
@@ -118,6 +119,7 @@ impl TtlVaultContract {
     pub fn unpause(env: Env) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Sets the minimum allowed check-in interval for vaults.
@@ -137,6 +139,7 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::InvalidInterval);
         }
         env.storage().instance().set(&DataKey::MinCheckInInterval, &min_interval);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Sets the maximum allowed check-in interval for vaults.
@@ -156,6 +159,7 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::InvalidInterval);
         }
         env.storage().instance().set(&DataKey::MaxCheckInInterval, &max_interval);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Returns the minimum check-in interval if set.
@@ -184,6 +188,7 @@ impl TtlVaultContract {
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         Self::require_admin(&env);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Returns whether the contract is currently paused.
@@ -304,6 +309,7 @@ impl TtlVaultContract {
         }
         vault.last_check_in = env.ledger().timestamp();
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((symbol_short!("check_in"), vault_id), vault.last_check_in);
         Ok(())
     }
@@ -345,6 +351,7 @@ impl TtlVaultContract {
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (DEPOSIT_TOPIC, vault_id),
             (amount, vault.balance),
@@ -404,6 +411,7 @@ impl TtlVaultContract {
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
             Self::save_vault(&env, vault_id, &vault);
         }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Owner withdraws from the vault.
@@ -441,6 +449,7 @@ impl TtlVaultContract {
         xlm.transfer(&env.current_contract_address(), &vault.owner, &amount);
         vault.balance -= amount;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (WITHDRAW_TOPIC, vault_id),
             (amount, vault.balance),
@@ -506,6 +515,7 @@ impl TtlVaultContract {
         vault.balance = 0;
         vault.status = ReleaseStatus::Released;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     // --- Task 1: ping_expiry ---
@@ -571,6 +581,7 @@ impl TtlVaultContract {
         xlm.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
         vault.balance -= amount;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (symbol_short!("partial"), vault_id),
             (vault.beneficiary, amount),
@@ -613,6 +624,7 @@ impl TtlVaultContract {
         }
         vault.beneficiaries = beneficiaries;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
@@ -641,6 +653,7 @@ impl TtlVaultContract {
         }
         vault.metadata = metadata;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
@@ -800,6 +813,7 @@ impl TtlVaultContract {
 
         vault.beneficiary = new_beneficiary;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
     /// Updates the check-in interval for a vault.
@@ -840,6 +854,7 @@ impl TtlVaultContract {
         }
         vault.check_in_interval = new_interval;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
@@ -876,6 +891,7 @@ impl TtlVaultContract {
         vault.balance = 0;
         vault.status = ReleaseStatus::Cancelled;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
@@ -916,6 +932,7 @@ impl TtlVaultContract {
         }
         vault.owner = new_owner;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
