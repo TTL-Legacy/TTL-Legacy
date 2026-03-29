@@ -95,6 +95,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -468,7 +469,7 @@
                       "val": {
                         "vec": [
                           {
-                            "symbol": "Locked"
+                            "symbol": "Released"
                           }
                         ]
                       }
@@ -1142,7 +1143,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000006"
               },
               {
-                "symbol": "ping_expiry"
+                "symbol": "trigger_release"
               }
             ],
             "data": {
@@ -1162,14 +1163,39 @@
           "v0": {
             "topics": [
               {
-                "symbol": "ping_exp"
-              },
-              {
-                "u64": 1
+                "symbol": "release"
               }
             ],
             "data": {
-              "u64": 0
+              "map": [
+                {
+                  "key": {
+                    "symbol": "amount"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 0
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "beneficiary"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "vault_id"
+                  },
+                  "val": {
+                    "u64": 1
+                  }
+                }
+              ]
             }
           }
         }
@@ -1188,11 +1214,62 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "ping_expiry"
+                "symbol": "trigger_release"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000006"
+              },
+              {
+                "symbol": "get_release_status"
               }
             ],
             "data": {
-              "u64": 0
+              "u64": 1
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000006",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "get_release_status"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "symbol": "Released"
+                }
+              ]
             }
           }
         }

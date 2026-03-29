@@ -1142,34 +1142,11 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000006"
               },
               {
-                "symbol": "ping_expiry"
+                "symbol": "get_ttl_remaining"
               }
             ],
             "data": {
               "u64": 1
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000006",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "ping_exp"
-              },
-              {
-                "u64": 1
-              }
-            ],
-            "data": {
-              "u64": 0
             }
           }
         }
@@ -1188,12 +1165,10 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "ping_expiry"
+                "symbol": "get_ttl_remaining"
               }
             ],
-            "data": {
-              "u64": 0
-            }
+            "data": "void"
           }
         }
       },
