@@ -1199,3 +1199,16 @@ fn test_transfer_ownership_updates_owner_index_and_blocks_old_owner() {
     assert!(client.try_check_in(&vault_id, &owner).is_err());
 }
 }
+
+// Regression test for #96: create_vault must assign sequential, non-duplicate vault IDs.
+#[test]
+fn test_create_vault_assigns_sequential_ids() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let b2 = Address::generate(&env);
+
+    let id1 = client.create_vault(&owner, &beneficiary, &100u64);
+    let id2 = client.create_vault(&owner, &b2, &100u64);
+
+    assert_eq!(id1, 1, "first vault must have id 1");
+    assert_eq!(id2, 2, "second vault must have id 2 (sequential, no duplicate assignment)");
+}
