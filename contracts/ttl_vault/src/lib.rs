@@ -58,7 +58,7 @@ pub enum ContractError {
     InvalidBeneficiary = 17,
     BalanceOverflow = 18,
     VaultExpired = 19,
-    NotInitialized = 20,
+    InvalidAdmin = 20,
 }
 
 #[contract]
@@ -357,6 +357,8 @@ impl TtlVaultContract {
         }
         vault.last_check_in = env.ledger().timestamp();
         Self::save_vault(&env, vault_id, &vault);
+        let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
+        Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
         Ok(())
@@ -681,6 +683,7 @@ impl TtlVaultContract {
 
         vault.balance -= amount;
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
@@ -853,6 +856,8 @@ impl TtlVaultContract {
     /// * `status_filter` - Optional status filter (None returns all vaults, Some(status) returns only vaults with that status)
     /// * `page` - Zero-based page index
     /// * `page_size` - Number of items per page
+    /// Returns all vault IDs associated with a beneficiary, including released and cancelled vaults.
+    /// Use `get_active_vaults_by_beneficiary` to retrieve only locked (active) vaults.
     ///
     /// # Returns
     /// A vector of vault IDs for the requested page
@@ -872,6 +877,20 @@ impl TtlVaultContract {
             all
         };
         Self::paginate(&env, filtered, page, page_size)
+    }
+
+    /// Returns only active (Locked) vault IDs for a beneficiary, excluding released and cancelled vaults.
+    pub fn get_active_vaults_by_beneficiary(env: Env, beneficiary: Address, page: u32, page_size: u32) -> Vec<u64> {
+        let all = Self::load_beneficiary_vault_ids(&env, &beneficiary);
+        let mut active = Vec::new(&env);
+        for id in all.iter() {
+            if let Some(v) = Self::try_load_vault(&env, id) {
+                if v.status == ReleaseStatus::Locked {
+                    active.push_back(id);
+                }
+            }
+        }
+        Self::paginate(&env, active, page, page_size)
     }
 
     /// Returns the remaining time-to-live (TTL) for a vault in seconds.
@@ -1061,7 +1080,8 @@ impl TtlVaultContract {
         vault.balance = 0;
         vault.status = ReleaseStatus::Cancelled;
         Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Self::remove_owner_vault_id(&env, &vault.owner, vault_id);
+        Self::remove_beneficiary_vault_id(&env, &vault.beneficiary, vault_id);
         env.events().publish((CANCEL_TOPIC, vault_id), (vault.owner, refund_amount));
         Ok(())
     }

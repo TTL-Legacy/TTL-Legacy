@@ -50,3 +50,9 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --package ttl-vault -- -D warnings
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
