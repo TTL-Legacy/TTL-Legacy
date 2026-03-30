@@ -34,6 +34,11 @@ impl ZkVerifierContract {
         if claim.is_empty() {
             panic_with_error!(&env, VerifierError::EmptyClaim);
         }
+        // STUB: a single 0x00 byte is treated as a known-invalid proof sentinel.
+        // Real ZK verification would replace this with cryptographic validation.
+        if proof.len() == 1 && proof.get(0) == Some(0x00) {
+            return false;
+        }
         true
     }
 }

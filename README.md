@@ -1,6 +1,6 @@
 # TTL-Legacy — Micro-Endowment Check-In Vault on Stellar
 
-[![CI](https://github.com/success-OG/TTL-Legacy/actions/workflows/ci.yml/badge.svg)](https://github.com/success-OG/TTL-Legacy/actions/workflows/ci.yml)
+[![CI](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg)](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml)
 
 A decentralized "Dead Man's Switch" built on Stellar/Soroban smart contracts.
 
@@ -98,6 +98,28 @@ stellar keys generate deployer --network testnet
 # Deploy
 ./scripts/deploy_testnet.sh
 ```
+
+### Deploy to Mainnet
+
+Required environment variables before running:
+
+| Variable | Description |
+|---|---|
+| `STELLAR_MAINNET_RPC_URL` | Mainnet RPC endpoint (e.g. `https://mainnet.sorobanrpc.com`) |
+| `DEPLOYER_IDENTITY` | Stellar CLI key name to sign the deployment (default: `deployer-mainnet`) |
+
+```bash
+# Configure your mainnet identity first
+stellar keys generate deployer-mainnet --network mainnet
+
+# Set required env var
+export STELLAR_MAINNET_RPC_URL=https://mainnet.sorobanrpc.com
+
+# Deploy (will prompt for confirmation)
+./scripts/deploy_mainnet.sh
+```
+
+The script will display the target network and identity, then require you to type `mainnet` before proceeding.
 
 ## 📖 Documentation
 
