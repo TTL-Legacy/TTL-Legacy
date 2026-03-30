@@ -1133,3 +1133,25 @@ fn test_withdraw_rejected_on_released_vault() {
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
 }
+
+#[test]
+fn test_cancel_vault_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    env.mock_all_auths();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &400i128);
+    client.cancel_vault(&vault_id, &owner);
+
+    let events = env.events().all();
+    let cancel_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 2 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("cancel")).unwrap_or(false)
+    });
+
+    assert!(cancel_event.is_some(), "cancel event not emitted");
+}
