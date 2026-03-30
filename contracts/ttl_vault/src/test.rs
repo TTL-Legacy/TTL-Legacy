@@ -1235,7 +1235,6 @@ fn test_transfer_ownership_updates_owner_index_and_blocks_old_owner() {
     // old owner cannot call check_in
     assert!(client.try_check_in(&vault_id, &owner).is_err());
 }
-}
 
 // Regression test for #96: create_vault must assign sequential, non-duplicate vault IDs.
 #[test]
@@ -1275,4 +1274,12 @@ fn test_create_vault_returns_interval_too_high_error() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(15));
+}
+
+#[test]
+fn test_get_version_returns_correct_version() {
+    let (_, _, _, _, _, client) = setup();
+
+    let version = client.get_version();
+    assert_eq!(version, String::from_str(&Env::default(), "0.1.0"));
 }

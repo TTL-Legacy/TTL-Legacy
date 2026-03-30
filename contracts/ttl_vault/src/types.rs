@@ -28,6 +28,7 @@ pub enum DataKey {
     PendingAdmin,
     MinCheckInInterval,
     MaxCheckInInterval,
+    Version,
 }
 
 #[contracttype]

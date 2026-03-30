@@ -19,6 +19,7 @@ pub const VAULT_TTL_THRESHOLD: u32 = 1000;
 pub const VAULT_TTL_LEDGERS: u32 = 200_000;
 pub const INSTANCE_TTL_THRESHOLD: u32 = 1000;
 pub const INSTANCE_TTL_LEDGERS: u32 = 200_000;
+pub const CONTRACT_VERSION: &str = "0.1.0";
 
 /// Approximate ledger close time in seconds (Stellar mainnet ~5s).
 const LEDGER_SECOND: u32 = 5;
@@ -93,6 +94,7 @@ impl TtlVaultContract {
         env.storage().instance().set(&DataKey::TokenAddress, &xlm_token);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::Version, &String::from_str(&env, CONTRACT_VERSION));
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
@@ -197,6 +199,20 @@ impl TtlVaultContract {
     /// `Some(seconds)` with the maximum interval, or `None` if not set
     pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
         env.storage().instance().get(&DataKey::MaxCheckInInterval)
+    }
+
+    /// Returns the contract version as a semver string.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// The contract version string (e.g., "0.1.0")
+    pub fn get_version(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::Version)
+            .unwrap_or_else(|| String::from_str(&env, "0.0.0"))
     }
 
     /// Admin-only. Upgrades the contract to a new WASM hash.
