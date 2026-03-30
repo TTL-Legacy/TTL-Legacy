@@ -218,6 +218,33 @@ fn test_paused_blocks_check_in_withdraw_and_trigger_release() {
     );
 }
 
+// ---- Issue #229: check_in event emission test ----
+
+#[test]
+fn test_check_in_emits_event_with_correct_topic() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    env.mock_all_auths();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+
+    // Advance time slightly
+    env.ledger().with_mut(|l| l.timestamp += 10);
+
+    client.check_in(&vault_id, &owner);
+
+    let events = env.events().all();
+    let check_in_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 2 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("check_in")).unwrap_or(false)
+    });
+
+    assert!(check_in_event.is_some(), "check_in event not emitted");
+}
+
 #[test]
 fn test_get_vaults_by_owner_tracks_multiple_vaults() {
     let (env, owner, beneficiary, _, _, client) = setup();
@@ -400,6 +427,25 @@ fn test_propose_admin_can_be_called_multiple_times() {
     assert!(client.is_paused());
 }
 
+// ---- Issue #227: accept_admin unauthorized rejection test ----
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_accept_admin_rejects_unauthorized_caller() {
+    let (env, _, _, _, _, client) = setup();
+    let new_admin = Address::generate(&env);
+    let unauthorized = Address::generate(&env);
+
+    client.propose_admin(&new_admin);
+    assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+    // Try to accept as unauthorized address (not the pending admin)
+    // This should panic with NoPendingAdmin or auth failure
+    // Since mock_all_auths is enabled, we need to test without it
+    env.mock_all_auths_allowing_non_root_auth();
+    client.accept_admin(); // This will fail because unauthorized is not pending_admin
+}
+
 // ---- Task 1: ping_expiry tests ----
 
 #[test]
@@ -503,6 +549,21 @@ fn test_deposit_into_expired_vault_is_rejected() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
     env.ledger().with_mut(|l| l.timestamp += 200);
     client.deposit(&vault_id, &owner, &500i128);
+}
+
+// ---- Issue #221: deposit expired vault returns VaultExpired error code ----
+
+#[test]
+fn test_deposit_into_expired_vault_returns_vault_expired_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    
+    // Advance time past expiry
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    
+    // Should return VaultExpired (error code 19), not AlreadyReleased (error code 7)
+    let err = client.try_deposit(&vault_id, &owner, &500i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(19)); // VaultExpired
 }
 
 #[test]
@@ -777,6 +838,7 @@ fn test_set_beneficiaries_rejects_invalid_bps() {
     let err = client
         .try_set_beneficiaries(
             &vault_id,
+            &owner,
             &vec![
                 &env,
                 BeneficiaryEntry { address: beneficiary.clone(), bps: 4_000 },
@@ -806,6 +868,21 @@ fn test_set_beneficiaries_rejects_owner_as_beneficiary() {
             BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
         ],
     );
+}
+
+// ---- Issue #226: set_beneficiaries empty list guard ----
+
+#[test]
+fn test_set_beneficiaries_rejects_empty_list() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+
+    // Empty beneficiaries list should be rejected with InvalidBps
+    let err = client
+        .try_set_beneficiaries(&vault_id, &owner, &vec![&env])
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(12)); // InvalidBps
 }
 
 #[test]

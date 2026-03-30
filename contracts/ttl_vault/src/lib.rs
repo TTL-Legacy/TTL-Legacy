@@ -709,6 +709,9 @@ impl TtlVaultContract {
             beneficiaries: Vec<BeneficiaryEntry>,
         ) -> Result<(), ContractError> {
             caller.require_auth();
+            if beneficiaries.is_empty() {
+                return Err(ContractError::InvalidBps);
+            }
             let mut vault = Self::load_vault(&env, vault_id);
             if caller != vault.owner {
                 return Err(ContractError::NotOwner);
