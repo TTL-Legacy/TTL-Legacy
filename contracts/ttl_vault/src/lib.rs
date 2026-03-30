@@ -59,6 +59,7 @@ pub enum ContractError {
     BalanceOverflow = 18,
     VaultExpired = 19,
     InvalidAdmin = 20,
+    NotInitialized = 21,
 }
 
 #[contract]
