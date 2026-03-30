@@ -1036,3 +1036,66 @@ fn test_cancel_vault_removes_from_owner_and_beneficiary_indexes() {
     assert_eq!(client.get_vaults_by_owner(&owner, &0u32, &10u32), vec![&env]);
     assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env]);
 }
+
+// ---- Pagination tests ----
+
+#[test]
+fn test_get_vaults_by_owner_pagination() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let ids: Vec<u64> = (0..5).map(|_| client.create_vault(&owner, &beneficiary, &100u64)).collect();
+
+    // page 0 of size 2 → first two
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &0u32, &2u32),
+        vec![&env, ids[0], ids[1]]
+    );
+    // page 1 of size 2 → next two
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &1u32, &2u32),
+        vec![&env, ids[2], ids[3]]
+    );
+    // page 2 of size 2 → last one
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &2u32, &2u32),
+        vec![&env, ids[4]]
+    );
+    // out-of-range page → empty
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &10u32, &2u32),
+        vec![&env]
+    );
+    // page_size 0 → empty
+    assert_eq!(
+        client.get_vaults_by_owner(&owner, &None, &0u32, &0u32),
+        vec![&env]
+    );
+}
+
+#[test]
+fn test_get_vaults_by_beneficiary_pagination() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let ids: Vec<u64> = (0..5).map(|_| client.create_vault(&owner, &beneficiary, &100u64)).collect();
+
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &2u32),
+        vec![&env, ids[0], ids[1]]
+    );
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &1u32, &2u32),
+        vec![&env, ids[2], ids[3]]
+    );
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &2u32, &2u32),
+        vec![&env, ids[4]]
+    );
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &10u32, &2u32),
+        vec![&env]
+    );
+    assert_eq!(
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &0u32),
+        vec![&env]
+    );
+}
