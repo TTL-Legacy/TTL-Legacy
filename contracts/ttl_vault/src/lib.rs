@@ -32,7 +32,7 @@ fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
     let ledgers = (check_in_interval as u32)
         .saturating_mul(2)
         .saturating_div(LEDGER_SECOND);
-    ledgers.max(VAULT_TTL_LEDGERS).min(MAX_PERSISTENT_TTL)
+    ledgers.clamp(VAULT_TTL_LEDGERS, MAX_PERSISTENT_TTL)
 }
 
 #[contracterror]
