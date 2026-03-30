@@ -472,6 +472,11 @@ impl TtlVaultContract {
 
     /// Owner withdraws from the vault.
     ///
+    /// This function is owner-only and is unaffected by any multi-beneficiary
+    /// split configured via `set_beneficiaries`. Beneficiary splits only apply
+    /// during `trigger_release` and `partial_release`; `withdraw` always sends
+    /// funds directly back to the vault owner regardless of the beneficiaries list.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault

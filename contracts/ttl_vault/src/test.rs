@@ -1196,3 +1196,36 @@ fn test_withdraw_rejected_on_released_vault() {
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
 }
+
+// ---- Issue #233: withdraw is unaffected by multi-beneficiary split ----
+
+#[test]
+fn test_withdraw_succeeds_when_beneficiaries_are_set() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+
+    let b2 = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // configure a multi-beneficiary split
+    client.set_beneficiaries(
+        &vault_id,
+        &owner,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
+            BeneficiaryEntry { address: b2.clone(), bps: 5_000 },
+        ],
+    );
+
+    // owner can still withdraw — beneficiary split is irrelevant to withdraw
+    client.withdraw(&vault_id, &owner, &400i128);
+
+    assert_eq!(client.get_vault(&vault_id).balance, 600i128);
+    // funds went to owner, not to any beneficiary
+    assert_eq!(token_client.balance(&owner), 1_000_000i128 - 1_000i128 + 400i128);
+    assert_eq!(token_client.balance(&beneficiary), 0i128);
+    assert_eq!(token_client.balance(&b2), 0i128);
+}
