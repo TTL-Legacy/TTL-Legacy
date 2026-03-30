@@ -785,7 +785,7 @@ fn test_set_beneficiaries_rejects_invalid_bps() {
         )
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(12));
+    assert_eq!(err, ContractError::InvalidBps);
 }
 
 // ---- Issue #105: set_beneficiaries owner-as-beneficiary guard ----
@@ -1119,7 +1119,7 @@ fn test_withdraw_rejected_on_cancelled_vault() {
         .try_withdraw(&vault_id, &owner, &1i128)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
+    assert_eq!(err, ContractError::AlreadyReleased);
 }
 
 #[test]
@@ -1137,7 +1137,7 @@ fn test_withdraw_rejected_on_released_vault() {
         .try_withdraw(&vault_id, &owner, &1i128)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
+    assert_eq!(err, ContractError::AlreadyReleased);
 }
 
 #[test]
