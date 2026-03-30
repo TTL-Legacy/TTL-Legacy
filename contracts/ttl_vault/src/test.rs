@@ -310,13 +310,13 @@ fn test_transfer_ownership_preserves_beneficiary_index() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
 
     // beneficiary index contains the vault before transfer
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &10u32), vec![&env, vault_id]);
 
     client.transfer_ownership(&vault_id, &owner, &new_owner);
 
     // vault.beneficiary is unchanged — index must still be intact
     assert_eq!(client.get_vault(&vault_id).beneficiary, beneficiary);
-    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &10u32), vec![&env, vault_id]);
 }
 
 #[test]
@@ -776,6 +776,7 @@ fn test_set_beneficiaries_rejects_invalid_bps() {
     let err = client
         .try_set_beneficiaries(
             &vault_id,
+            &owner,
             &vec![
                 &env,
                 BeneficiaryEntry { address: beneficiary.clone(), bps: 4_000 },
@@ -929,15 +930,15 @@ fn test_update_beneficiary_updates_index() {
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64);
 
     // old beneficiary sees the vault, new one does not
-    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
-    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &None, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &None, &0u32, &10u32), vec![&env]);
 
     client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
 
     // old beneficiary no longer sees the vault
-    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &0u32, &10u32), vec![&env]);
+    assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &None, &0u32, &10u32), vec![&env]);
     // new beneficiary now sees the vault
-    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &0u32, &10u32), vec![&env, vault_id]);
+    assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &None, &0u32, &10u32), vec![&env, vault_id]);
 }
 
 #[test]
@@ -1002,7 +1003,7 @@ fn test_get_active_vaults_by_beneficiary_excludes_released() {
     );
     // historical list also contains it
     assert_eq!(
-        client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &10u32),
         vec![&env, vault_id]
     );
 
@@ -1017,7 +1018,7 @@ fn test_get_active_vaults_by_beneficiary_excludes_released() {
     );
     // historical list still contains the released vault
     assert_eq!(
-        client.get_vaults_by_beneficiary(&beneficiary, &0u32, &10u32),
+        client.get_vaults_by_beneficiary(&beneficiary, &None, &0u32, &10u32),
         vec![&env, vault_id]
     );
 }
