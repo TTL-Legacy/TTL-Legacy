@@ -1276,3 +1276,37 @@ fn test_create_vault_returns_interval_too_high_error() {
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(15));
 }
+
+#[test]
+fn test_withdraw_rejected_on_cancelled_vault() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    // cancel_vault refunds and marks status = Cancelled
+    client.cancel_vault(&vault_id, &owner);
+
+    // Any withdraw attempt on a Cancelled vault must return AlreadyReleased (#7)
+    let err = client
+        .try_withdraw(&vault_id, &owner, &1i128)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
+}
+
+#[test]
+fn test_withdraw_rejected_on_released_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64);
+    client.deposit(&vault_id, &owner, &500i128);
+    // advance past check-in interval to expire the vault
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // Any withdraw attempt on a Released vault must return AlreadyReleased (#7)
+    let err = client
+        .try_withdraw(&vault_id, &owner, &1i128)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(7));
+}
