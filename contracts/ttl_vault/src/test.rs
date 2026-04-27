@@ -2777,3 +2777,156 @@ fn test_beneficiary_assigned_event_emitted() {
     
     assert!(has_beneficiary_event);
 }
+
+// --- Issue #403: Deposit Limits Tests ---
+
+#[test]
+fn test_set_max_deposit_limit() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.set_max_deposit(&vault_id, &owner, &Some(500i128));
+    assert_eq!(client.get_max_deposit(&vault_id), Some(500i128));
+}
+
+#[test]
+fn test_deposit_respects_max_limit() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.set_max_deposit(&vault_id, &owner, &Some(300i128));
+    
+    // Deposit within limit should succeed
+    client.deposit(&vault_id, &owner, &200i128);
+    assert_eq!(client.get_vault(&vault_id).balance, 200i128);
+
+    // Deposit exceeding limit should fail
+    assert!(client.try_deposit(&vault_id, &owner, &150i128).is_err());
+}
+
+#[test]
+fn test_remove_deposit_limit() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.set_max_deposit(&vault_id, &owner, &Some(300i128));
+    client.set_max_deposit(&vault_id, &owner, &None);
+    
+    assert_eq!(client.get_max_deposit(&vault_id), None);
+}
+
+// --- Issue #404: Withdrawal Approval Flow Tests ---
+
+#[test]
+fn test_request_withdrawal() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    let request_id = client.request_withdrawal(&vault_id, &100i128, &owner);
+    assert_eq!(request_id, 1u64);
+
+    let request = client.get_withdrawal_request(&vault_id, &request_id).unwrap();
+    assert_eq!(request.amount, 100i128);
+    assert!(!request.approved);
+}
+
+#[test]
+fn test_approve_withdrawal() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    let request_id = client.request_withdrawal(&vault_id, &100i128, &owner);
+    client.approve_withdrawal(&vault_id, &request_id, &beneficiary);
+
+    let request = client.get_withdrawal_request(&vault_id, &request_id).unwrap();
+    assert!(request.approved);
+}
+
+#[test]
+fn test_withdrawal_blocked_without_approval() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    client.set_withdrawal_approval_threshold(&vault_id, &owner, &Some(100i128));
+
+    // Withdrawal above threshold should fail
+    assert!(client.try_withdraw(&vault_id, &owner, &150i128).is_err());
+
+    // Withdrawal below threshold should succeed
+    assert!(client.try_withdraw(&vault_id, &owner, &50i128).is_ok());
+}
+
+// --- Issue #405: Deposit Proof Tests ---
+
+#[test]
+fn test_verify_deposit_proof() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let proof_hash = BytesN::<32>::from_array(&env, &[0u8; 32]);
+    client.verify_deposit_proof(&vault_id, &500i128, &proof_hash, &owner);
+
+    let proof = client.get_deposit_proof(&vault_id).unwrap();
+    assert_eq!(proof.amount, 500i128);
+    assert_eq!(proof.vault_id, vault_id);
+}
+
+#[test]
+fn test_deposit_proof_only_by_owner() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let proof_hash = BytesN::<32>::from_array(&env, &[0u8; 32]);
+    
+    // Non-owner should not be able to verify proof
+    assert!(client.try_verify_deposit_proof(&vault_id, &500i128, &proof_hash, &beneficiary).is_err());
+}
+
+// --- Issue #406: Partial Withdrawal Tests ---
+
+#[test]
+fn test_trigger_partial_release() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1000i128);
+
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Partial release of 300
+    client.trigger_partial_release(&vault_id, &Some(300i128));
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.balance, 700i128);
+    assert_eq!(vault.status, ReleaseStatus::Locked);
+}
+
+#[test]
+fn test_trigger_full_release_with_none() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1000i128);
+
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Full release with None
+    client.trigger_partial_release(&vault_id, &None);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.balance, 0i128);
+    assert_eq!(vault.status, ReleaseStatus::Released);
+}
+
+#[test]
+fn test_partial_release_invalid_amount() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1000i128);
+
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Amount exceeding balance should fail
+    assert!(client.try_trigger_partial_release(&vault_id, &Some(1500i128)).is_err());
+}

@@ -69,6 +69,9 @@ pub enum DataKey {
     ParentVault(u64),
     VaultPasskeys(u64),
     BackupCodes(u64),
+    WithdrawalRequest(u64, u64), // (vault_id, request_id)
+    WithdrawalRequestCount(u64), // vault_id
+    DepositProof(u64),           // vault_id
 }
 
 /// A vesting schedule attached to a vault.
@@ -148,6 +151,26 @@ pub struct BackupCode {
     pub used: bool,
 }
 
+/// Withdrawal approval request - Issue #404
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawalRequest {
+    pub request_id: u64,
+    pub amount: i128,
+    pub requested_at: u64,
+    pub approved: bool,
+}
+
+/// Deposit proof - Issue #405
+#[contracttype]
+#[derive(Clone)]
+pub struct DepositProof {
+    pub vault_id: u64,
+    pub amount: i128,
+    pub timestamp: u64,
+    pub proof_hash: BytesN<32>,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct Vault {
@@ -176,6 +199,10 @@ pub struct Vault {
     pub parent_vault_id: Option<u64>,
     /// Primary passkey hash for backwards compatibility - Issue #392, #394
     pub passkey_hash: Option<BytesN<32>>,
+    /// Maximum deposit amount - Issue #403
+    pub max_deposit_amount: Option<i128>,
+    /// Withdrawal approval threshold - Issue #404
+    pub withdrawal_approval_threshold: Option<i128>,
 }
 
 /// Passkey usage entry for tracking check-ins - Issue #395

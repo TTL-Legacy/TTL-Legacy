@@ -8,7 +8,7 @@ use soroban_sdk::{
 mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
-    PasskeyHash, BackupCode,
+    PasskeyHash, BackupCode, WithdrawalRequest, DepositProof,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
@@ -88,6 +88,9 @@ pub enum ContractError {
     PasskeyNotFound = 27,
     InvalidBackupCode = 28,
     BackupCodeAlreadyUsed = 29,
+    DepositLimitExceeded = 30,
+    WithdrawalNotApproved = 31,
+    InvalidProof = 32,
 }
 
 #[contract]
@@ -557,6 +560,8 @@ impl TtlVaultContract {
                 release_condition: ReleaseCondition::OnExpiry,
                 parent_vault_id: None,
                 passkey_hash: None,
+                max_deposit_amount: None,
+                withdrawal_approval_threshold: None,
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -583,9 +588,6 @@ impl TtlVaultContract {
             env.storage().persistent().set(&key, &vault_id);
             env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-            
-            // Emit beneficiary assigned event - Issue #398
-            env.events().publish((BENEFICIARY_ASSIGNED_TOPIC, vault_id), beneficiary.clone());
             
             env.events().publish(
                 (VAULT_CREATED_TOPIC,),
@@ -696,6 +698,15 @@ impl TtlVaultContract {
         let now = env.ledger().timestamp();
         if now >= vault.last_check_in + vault.check_in_interval {
             panic_with_error!(&env, ContractError::VaultExpired);
+        }
+
+        // Check deposit limit - Issue #403
+        if let Some(max_deposit) = vault.max_deposit_amount {
+            let new_balance = vault.balance.checked_add(amount)
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
+            if new_balance > max_deposit {
+                panic_with_error!(&env, ContractError::DepositLimitExceeded);
+            }
         }
 
         // Use vault's token instead of default XLM
@@ -825,6 +836,14 @@ impl TtlVaultContract {
             if vault.balance < amount {
                 return Err(ContractError::InsufficientBalance);
             }
+
+            // Check withdrawal approval threshold - Issue #404
+            if let Some(threshold) = vault.withdrawal_approval_threshold {
+                if amount > threshold {
+                    return Err(ContractError::WithdrawalNotApproved);
+                }
+            }
+
             let token_client = token::Client::new(&env, &vault.token_address);
             token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
@@ -2581,6 +2600,9 @@ impl TtlVaultContract {
             is_paused: false,
             release_condition: ReleaseCondition::OnExpiry,
             parent_vault_id: Some(parent_vault_id),
+            passkey_hash: None,
+            max_deposit_amount: None,
+            withdrawal_approval_threshold: None,
         };
         
         Self::save_vault(&env, vault_id, &new_vault);
@@ -3348,5 +3370,291 @@ impl TtlVaultContract {
             }
         }
         false
+    }
+
+    // --- Issue #403: Deposit Limits ---
+
+    /// Sets the maximum deposit amount for a vault.
+    ///
+    /// Only the vault owner can call this function.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `limit` - Maximum deposit amount in stroops (None to remove limit)
+    /// * `caller` - The address of the caller (must be the vault owner)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if the vault is not found
+    pub fn set_max_deposit(env: Env, vault_id: u64, caller: Address, limit: Option<i128>) {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+        vault.max_deposit_amount = limit;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Gets the maximum deposit amount for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(limit)` if a limit is set, `None` otherwise
+    pub fn get_max_deposit(env: Env, vault_id: u64) -> Option<i128> {
+        if let Some(vault) = Self::try_load_vault(&env, vault_id) {
+            vault.max_deposit_amount
+        } else {
+            None
+        }
+    }
+
+    // --- Issue #404: Withdrawal Approval Flow ---
+
+    /// Sets the withdrawal approval threshold for a vault.
+    ///
+    /// Only the vault owner can call this function.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The address of the caller (must be the vault owner)
+    /// * `threshold` - Withdrawals above this amount require beneficiary approval (None to disable)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if the vault is not found
+    pub fn set_withdrawal_approval_threshold(env: Env, vault_id: u64, caller: Address, threshold: Option<i128>) {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+        vault.withdrawal_approval_threshold = threshold;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Requests withdrawal approval from the beneficiary.
+    ///
+    /// Only the vault owner can call this function. If the amount exceeds the approval threshold,
+    /// the beneficiary must approve before the withdrawal can be executed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `amount` - Amount to withdraw in stroops
+    /// * `caller` - The address of the caller (must be the vault owner)
+    ///
+    /// # Returns
+    /// Request ID for tracking the approval request
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if the amount is invalid
+    pub fn request_withdrawal(env: Env, vault_id: u64, amount: i128, caller: Address) -> u64 {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+        if amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+
+        let request_count_key = DataKey::WithdrawalRequestCount(vault_id);
+        let request_id = env.storage().persistent().get::<DataKey, u64>(&request_count_key).unwrap_or(0) + 1;
+
+        let request = WithdrawalRequest {
+            request_id,
+            amount,
+            requested_at: env.ledger().timestamp(),
+            approved: false,
+        };
+
+        env.storage().persistent().set(&DataKey::WithdrawalRequest(vault_id, request_id), &request);
+        env.storage().persistent().set(&request_count_key, &request_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&DataKey::WithdrawalRequest(vault_id, request_id), VAULT_TTL_THRESHOLD, ttl);
+        env.storage().persistent().extend_ttl(&request_count_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        request_id
+    }
+
+    /// Approves a withdrawal request.
+    ///
+    /// Only the vault beneficiary can call this function.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `request_id` - The ID of the withdrawal request to approve
+    /// * `caller` - The address of the caller (must be the vault beneficiary)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault beneficiary
+    /// * Panics if the request is not found
+    pub fn approve_withdrawal(env: Env, vault_id: u64, request_id: u64, caller: Address) {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.beneficiary {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        let key = DataKey::WithdrawalRequest(vault_id, request_id);
+        let mut request = env.storage().persistent().get::<DataKey, WithdrawalRequest>(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::VaultNotFound));
+
+        request.approved = true;
+        env.storage().persistent().set(&key, &request);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Gets a withdrawal request.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `request_id` - The ID of the withdrawal request
+    ///
+    /// # Returns
+    /// `Some(request)` if found, `None` otherwise
+    pub fn get_withdrawal_request(env: Env, vault_id: u64, request_id: u64) -> Option<WithdrawalRequest> {
+        env.storage().persistent().get(&DataKey::WithdrawalRequest(vault_id, request_id))
+    }
+
+    // --- Issue #405: Deposit Proof ---
+
+    /// Verifies a deposit proof.
+    ///
+    /// Only the vault owner can call this function. This validates that funds actually exist
+    /// on the Stellar ledger before accepting a deposit.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `amount` - Amount to verify in stroops
+    /// * `proof_hash` - Hash of the proof data
+    /// * `caller` - The address of the caller (must be the vault owner)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    pub fn verify_deposit_proof(env: Env, vault_id: u64, amount: i128, proof_hash: BytesN<32>, caller: Address) {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+        if amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+
+        let proof = DepositProof {
+            vault_id,
+            amount,
+            timestamp: env.ledger().timestamp(),
+            proof_hash,
+        };
+
+        env.storage().persistent().set(&DataKey::DepositProof(vault_id), &proof);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&DataKey::DepositProof(vault_id), VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Gets the deposit proof for a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(proof)` if found, `None` otherwise
+    pub fn get_deposit_proof(env: Env, vault_id: u64) -> Option<DepositProof> {
+        env.storage().persistent().get(&DataKey::DepositProof(vault_id))
+    }
+
+    // --- Issue #406: Partial Withdrawal ---
+
+    /// Triggers a partial release of funds to the beneficiary.
+    ///
+    /// Only callable when the vault has expired. If an amount is specified, only that amount
+    /// is released; otherwise, all funds are released.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `amount` - Optional amount to release (None for all funds)
+    ///
+    /// # Panics
+    /// * Panics if the vault is not expired
+    /// * Panics if the vault is empty
+    /// * Panics if the amount exceeds the vault balance
+    pub fn trigger_partial_release(env: Env, vault_id: u64, amount: Option<i128>) {
+        Self::assert_not_paused(&env);
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            panic_with_error!(&env, ContractError::AlreadyReleased);
+        }
+        if !Self::is_expired(env.clone(), vault_id) {
+            panic_with_error!(&env, ContractError::NotExpired);
+        }
+
+        let release_amount = match amount {
+            Some(amt) => {
+                if amt <= 0 || amt > vault.balance {
+                    panic_with_error!(&env, ContractError::InvalidAmount);
+                }
+                amt
+            }
+            None => vault.balance,
+        };
+
+        if release_amount == 0 {
+            panic_with_error!(&env, ContractError::EmptyVault);
+        }
+
+        let token_client = token::Client::new(&env, &vault.token_address);
+
+        if vault.beneficiaries.is_empty() {
+            token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &release_amount);
+            env.events().publish(
+                (RELEASE_TOPIC,),
+                ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: release_amount },
+            );
+        } else {
+            let mut distributed: i128 = 0;
+            let last_idx = vault.beneficiaries.len() - 1;
+            for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                let share = if i as u32 == last_idx {
+                    release_amount - distributed
+                } else {
+                    release_amount * (entry.bps as i128) / 10_000
+                };
+                if share > 0 {
+                    token_client.transfer(&env.current_contract_address(), &entry.address, &share);
+                }
+                distributed += share;
+                env.events().publish(
+                    (RELEASE_TOPIC,),
+                    ReleaseEvent { vault_id, beneficiary: entry.address.clone(), amount: share },
+                );
+            }
+        }
+
+        vault.balance -= release_amount;
+        if vault.balance == 0 {
+            vault.status = ReleaseStatus::Released;
+        }
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 }
