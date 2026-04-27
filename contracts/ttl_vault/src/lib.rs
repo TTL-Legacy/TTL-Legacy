@@ -24,6 +24,9 @@ use types::{
 #[cfg(test)]
 mod test;
 
+#[cfg(test)]
+mod regression_tests;
+
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const VAULT_TTL_THRESHOLD: u32 = 1000;

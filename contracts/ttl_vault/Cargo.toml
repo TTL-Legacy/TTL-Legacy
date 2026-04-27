@@ -11,3 +11,8 @@ soroban-sdk = { version = "21.0.0", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false
