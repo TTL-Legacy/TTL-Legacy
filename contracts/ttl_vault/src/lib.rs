@@ -18,7 +18,7 @@ use types::{
     INHERITANCE_TOPIC, ADD_PASSKEY_TOPIC, REMOVE_PASSKEY_TOPIC, ROTATE_PASSKEY_TOPIC,
     BACKUP_CODE_USED_TOPIC, BACKUP_CODES_GENERATED_TOPIC, DELEGATE_BENEFICIARY_TOPIC,
     DISPUTE_FILED_TOPIC, DISPUTE_RESOLVED_TOPIC, WITHDRAWAL_SCHEDULED_TOPIC, WITHDRAWAL_EXECUTED_TOPIC,
-    CONDITIONS_ACCEPTED_TOPIC,
+    CONDITIONS_ACCEPTED_TOPIC, SET_SPENDING_LIMIT_TOPIC,
 };
 
 #[cfg(test)]
@@ -568,6 +568,7 @@ impl TtlVaultContract {
                 passkey_hash: None,
                 max_deposit_amount: None,
                 withdrawal_approval_threshold: None,
+                spending_limit: None,
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -1052,22 +1053,28 @@ impl TtlVaultContract {
             );
         } else {
             // No vesting: immediate full release
+            // Apply spending limit - Issue #382
+            let release_amount = if let Some(limit) = vault.spending_limit {
+                total.min(limit)
+            } else {
+                total
+            };
             let token_client = token::Client::new(&env, &vault.token_address);
 
             if vault.beneficiaries.is_empty() {
-                token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &total);
+                token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &release_amount);
                 env.events().publish(
                     (RELEASE_TOPIC,),
-                    ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: total },
+                    ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: release_amount },
                 );
             } else {
                 let mut distributed: i128 = 0;
                 let last_idx = vault.beneficiaries.len() - 1;
                 for (i, entry) in vault.beneficiaries.iter().enumerate() {
                     let share = if i as u32 == last_idx {
-                        total - distributed
+                        release_amount - distributed
                     } else {
-                        total * (entry.bps as i128) / 10_000
+                        release_amount * (entry.bps as i128) / 10_000
                     };
                     if share > 0 {
                         token_client.transfer(&env.current_contract_address(), &entry.address, &share);
@@ -1080,8 +1087,10 @@ impl TtlVaultContract {
                 }
             }
 
-            vault.balance = 0;
-            vault.status = ReleaseStatus::Released;
+            vault.balance -= release_amount;
+            if vault.balance == 0 {
+                vault.status = ReleaseStatus::Released;
+            }
             Self::save_vault(&env, vault_id, &vault);
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         }
@@ -1888,6 +1897,68 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id).last_check_in
     }
 
+    /// Returns the balance of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The vault balance in stroops
+    pub fn get_vault_balance(env: Env, vault_id: u64) -> i128 {
+        Self::load_vault(&env, vault_id).balance
+    }
+
+    /// Returns the owner address of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The owner `Address`
+    pub fn get_vault_owner(env: Env, vault_id: u64) -> Address {
+        Self::load_vault(&env, vault_id).owner
+    }
+
+    /// Returns the creation timestamp of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The Unix timestamp when the vault was created
+    pub fn get_vault_created_at(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).created_at
+    }
+
+    /// Sets a spending limit on a vault, capping the amount released per `trigger_release` call.
+    ///
+    /// Owner-only. Pass `None` to remove the limit.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `limit` - `Some(amount)` to set a limit, `None` to remove it
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if `limit` is `Some(0)` or negative
+    pub fn set_spending_limit(env: Env, vault_id: u64, limit: Option<i128>) {
+        let mut vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+        if let Some(l) = limit {
+            if l <= 0 {
+                panic_with_error!(&env, ContractError::InvalidAmount);
+            }
+        }
+        vault.spending_limit = limit;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_SPENDING_LIMIT_TOPIC, vault_id), limit);
+    }
+
     /// Checks if a vault exists.
     ///
     /// # Arguments
@@ -2609,6 +2680,7 @@ impl TtlVaultContract {
             passkey_hash: None,
             max_deposit_amount: None,
             withdrawal_approval_threshold: None,
+            spending_limit: None,
         };
         
         Self::save_vault(&env, vault_id, &new_vault);
