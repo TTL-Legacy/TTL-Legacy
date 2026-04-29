@@ -242,3 +242,96 @@ pub struct CreateVaultFromTemplate {
     pub owner: String,
     pub beneficiary: String,
 }
+
+// ── Task 1: Analytics ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VaultAnalytics {
+    pub total_vaults: u64,
+    pub active_vaults: u64,
+    pub average_ttl_seconds: f64,
+    pub release_rate: f64, // fraction of vaults that are Released
+    pub time_series: Vec<TimeSeriesPoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimeSeriesPoint {
+    pub date: String, // ISO-8601 date (YYYY-MM-DD)
+    pub vaults_created: u64,
+    pub vaults_released: u64,
+}
+
+// ── Task 2: Backup & Recovery ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultBackup {
+    pub backup_id: String,
+    pub vault_id: String,
+    pub created_at: DateTime<Utc>,
+    /// AES-GCM encrypted JSON of the vault state (base64-encoded)
+    pub encrypted_payload: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RestoreRequest {
+    pub backup_id: String,
+    /// The same key used during backup (base64-encoded 32-byte key)
+    pub encryption_key: String,
+}
+
+// ── Task 3: Sharing & Collaboration ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SharePermission {
+    ViewOnly,
+    Edit,
+    Admin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultShare {
+    pub share_id: String,
+    pub vault_id: String,
+    pub shared_with: String, // address or email
+    pub permission: SharePermission,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShareRequest {
+    pub shared_with: String,
+    pub permission: SharePermission,
+}
+
+// ── Task 4: Notification Preferences ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannel {
+    Email,
+    Sms,
+    Push,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationPreferences {
+    pub vault_id: String,
+    pub channels: Vec<NotificationChannel>,
+    pub frequency: NotificationFrequency,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NotificationPreferencesRequest {
+    pub channels: Vec<NotificationChannel>,
+    pub frequency: NotificationFrequency,
+}

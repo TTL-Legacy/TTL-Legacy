@@ -8,6 +8,9 @@ pub const WITHDRAW_TOPIC: Symbol = symbol_short!("withdraw");
 pub const CHECK_IN_TOPIC: Symbol = symbol_short!("check_in");
 pub const CANCEL_TOPIC: Symbol = symbol_short!("cancel");
 pub const OWNERSHIP_TOPIC: Symbol = symbol_short!("own_xfer");
+pub const OWNERSHIP_INITIATED_TOPIC: Symbol = symbol_short!("own_init");
+pub const OWNERSHIP_ACCEPTED_TOPIC: Symbol = symbol_short!("own_acc");
+pub const OWNERSHIP_CANCELLED_TOPIC: Symbol = symbol_short!("own_can");
 pub const BENEFICIARY_UPDATED_TOPIC: Symbol = symbol_short!("ben_upd");
 pub const SET_BENEFICIARIES_TOPIC: Symbol = symbol_short!("set_bens");
 pub const UPDATE_INTERVAL_TOPIC: Symbol = symbol_short!("upd_intv");
@@ -33,6 +36,7 @@ pub const DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("disp_res");
 pub const WITHDRAWAL_SCHEDULED_TOPIC: Symbol = symbol_short!("wd_sch");
 pub const WITHDRAWAL_EXECUTED_TOPIC: Symbol = symbol_short!("wd_exec");
 pub const CONDITIONS_ACCEPTED_TOPIC: Symbol = symbol_short!("cond_acc");
+pub const SET_SPENDING_LIMIT_TOPIC: Symbol = symbol_short!("set_slmt");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -79,6 +83,7 @@ pub enum DataKey {
     WithdrawalSchedule(u64),
     DisputeStatus(u64),
     ConditionalAcceptance(u64),
+    ArchivedVault(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -210,6 +215,8 @@ pub struct Vault {
     pub max_deposit_amount: Option<i128>,
     /// Withdrawal approval threshold - Issue #404
     pub withdrawal_approval_threshold: Option<i128>,
+    /// Maximum amount releasable per trigger_release call - Issue #382
+    pub spending_limit: Option<i128>,
 }
 
 /// Passkey usage entry for tracking check-ins - Issue #395
@@ -253,3 +260,8 @@ pub struct ConditionalAcceptanceEntry {
     pub conditions: String,
     pub approved_by_owner: bool,
 }
+
+/// Archived vault info for restoration - Issue #443
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedVaultInfo(pub Vault);

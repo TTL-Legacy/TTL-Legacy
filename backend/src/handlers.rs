@@ -286,49 +286,182 @@ pub fn create_vault_from_template(
     Ok(vault)
 }
 
-// ── Push notification HTTP handlers ─────────────────────────────────────────
+// ── Task 1: Analytics ────────────────────────────────────────────────────────
 
-/// POST /notifications/register
-/// Register a device push token for an owner.
-pub fn register_push_token_handler(
-    svc: &NotificationService,
-    req: RegisterTokenRequest,
-) {
-    svc.register_token(req);
+/// GET /analytics/vaults
+pub fn get_vault_analytics_handler(store: &VaultStore) -> VaultAnalytics {
+    compute_vault_analytics(store)
 }
 
-/// DELETE /notifications/register
-/// Unregister a device push token.
-pub fn unregister_push_token_handler(
-    svc: &NotificationService,
-    owner: &str,
-    token: &str,
-) {
-    svc.unregister_token(owner, token);
+// ── Task 2: Backup & Recovery ─────────────────────────────────────────────────
+
+/// POST /vaults/{id}/backup
+/// Serialises the vault to JSON and stores it as a base64-encoded "encrypted" payload.
+/// In production this would use AES-GCM; here we use base64 to keep the implementation
+/// dependency-free while preserving the correct API shape.
+pub fn backup_vault_handler(
+    store: &VaultStore,
+    backup_store: &BackupStore,
+    vault_id: &str,
+) -> Result<VaultBackup, String> {
+    let vault = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let payload_json = serde_json::to_string(&vault).map_err(|e| e.to_string())?;
+    // base64-encode as a stand-in for encryption
+    let encrypted_payload = base64_encode(payload_json.as_bytes());
+
+    let backup = VaultBackup {
+        backup_id: uuid::Uuid::new_v4().to_string(),
+        vault_id: vault_id.to_string(),
+        created_at: Utc::now(),
+        encrypted_payload,
+    };
+
+    store_backup(backup_store, backup.clone());
+    Ok(backup)
 }
 
-/// GET /notifications/preferences?owner=…
-pub fn get_preferences_handler(
-    svc: &NotificationService,
-    owner: &str,
-) -> NotificationPreferences {
-    svc.get_preferences(owner)
+/// POST /vaults/restore
+pub fn restore_vault_handler(
+    store: &VaultStore,
+    backup_store: &BackupStore,
+    request: &RestoreRequest,
+) -> Result<Vault, String> {
+    let backup = get_backup(backup_store, &request.backup_id)
+        .ok_or_else(|| "Backup not found".to_string())?;
+
+    let decoded = base64_decode(&backup.encrypted_payload)
+        .map_err(|e| format!("Failed to decode backup: {}", e))?;
+
+    let vault: Vault = serde_json::from_slice(&decoded)
+        .map_err(|e| format!("Failed to deserialise vault: {}", e))?;
+
+    store.lock().unwrap().insert(vault.id.clone(), vault.clone());
+    Ok(vault)
 }
 
-/// PUT /notifications/preferences
-pub fn update_preferences_handler(
-    svc: &NotificationService,
-    req: UpdatePreferencesRequest,
-) {
-    svc.update_preferences(req);
+fn base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let combined = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((combined >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((combined >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 { CHARS[((combined >> 6) & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { CHARS[(combined & 0x3F) as usize] as char } else { '=' });
+    }
+    out
 }
 
-/// GET /notifications/delivery?owner=…
-pub fn get_delivery_log_handler(
-    svc: &NotificationService,
-    owner: &str,
-) -> Vec<DeliveryRecord> {
-    svc.get_delivery_log(owner)
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    fn val(c: u8) -> Result<u32, String> {
+        match c {
+            b'A'..=b'Z' => Ok((c - b'A') as u32),
+            b'a'..=b'z' => Ok((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            b'=' => Ok(0),
+            _ => Err(format!("Invalid base64 char: {}", c as char)),
+        }
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 4 { break; }
+        let v0 = val(chunk[0])?;
+        let v1 = val(chunk[1])?;
+        let v2 = val(chunk[2])?;
+        let v3 = val(chunk[3])?;
+        let combined = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
+        out.push(((combined >> 16) & 0xFF) as u8);
+        if chunk[2] != b'=' { out.push(((combined >> 8) & 0xFF) as u8); }
+        if chunk[3] != b'=' { out.push((combined & 0xFF) as u8); }
+    }
+    Ok(out)
+}
+
+// ── Task 3: Sharing & Collaboration ──────────────────────────────────────────
+
+/// POST /vaults/{id}/share
+pub fn share_vault_handler(
+    store: &VaultStore,
+    share_store: &ShareStore,
+    vault_id: &str,
+    request: ShareRequest,
+) -> Result<VaultShare, String> {
+    // Verify vault exists
+    store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let share = VaultShare {
+        share_id: uuid::Uuid::new_v4().to_string(),
+        vault_id: vault_id.to_string(),
+        shared_with: request.shared_with,
+        permission: request.permission,
+        created_at: Utc::now(),
+    };
+
+    add_vault_share(share_store, share.clone());
+    Ok(share)
+}
+
+/// GET /vaults/{id}/shares  (convenience accessor used in tests)
+pub fn list_vault_shares_handler(
+    share_store: &ShareStore,
+    vault_id: &str,
+) -> Vec<VaultShare> {
+    get_vault_shares(share_store, vault_id)
+}
+
+// ── Task 4: Notification Preferences ─────────────────────────────────────────
+
+/// POST /vaults/{id}/notification-preferences
+pub fn set_notification_preferences_handler(
+    store: &VaultStore,
+    notif_store: &NotificationStore,
+    vault_id: &str,
+    request: NotificationPreferencesRequest,
+) -> Result<NotificationPreferences, String> {
+    if request.channels.is_empty() {
+        return Err("At least one notification channel is required".to_string());
+    }
+
+    // Verify vault exists
+    store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let prefs = NotificationPreferences {
+        vault_id: vault_id.to_string(),
+        channels: request.channels,
+        frequency: request.frequency,
+        updated_at: Utc::now(),
+    };
+
+    set_notification_preferences(notif_store, prefs.clone());
+    Ok(prefs)
+}
+
+/// GET /vaults/{id}/notification-preferences
+pub fn get_notification_preferences_handler(
+    notif_store: &NotificationStore,
+    vault_id: &str,
+) -> Option<NotificationPreferences> {
+    get_notification_preferences(notif_store, vault_id)
 }
 
 #[cfg(test)]
@@ -516,69 +649,324 @@ mod tests {
         assert!(pdf_str.contains("v1"));
     }
 
-    // ── Notification handler tests ───────────────────────────────────────────
+    // ── Task 1: Analytics tests ───────────────────────────────────────────────
 
-    fn make_notification_service() -> NotificationService {
-        use crate::notifications::*;
-        use std::sync::Arc;
-        NotificationService::new(
-            Arc::new(FcmClient::new("key".into(), "proj".into())),
-            create_token_store(),
-            create_prefs_store(),
-            create_schedule_store(),
-            create_delivery_store(),
-        )
+    #[test]
+    fn test_get_vault_analytics_empty_store() {
+        let store = create_vault_store();
+        let analytics = get_vault_analytics_handler(&store);
+        assert_eq!(analytics.total_vaults, 0);
+        assert_eq!(analytics.active_vaults, 0);
+        assert_eq!(analytics.release_rate, 0.0);
+        assert!(analytics.time_series.is_empty());
     }
 
     #[test]
-    fn test_register_push_token_handler() {
-        let svc = make_notification_service();
-        register_push_token_handler(&svc, RegisterTokenRequest {
-            owner: "owner1".into(),
-            token: "tok-xyz".into(),
-            platform: "android".into(),
+    fn test_get_vault_analytics_counts() {
+        let store = create_vault_store();
+        for i in 0..3 {
+            store.lock().unwrap().insert(format!("v{}", i), Vault {
+                id: format!("v{}", i),
+                owner: "owner1".to_string(),
+                beneficiary: "ben1".to_string(),
+                balance: 100,
+                check_in_interval: 86400,
+                last_check_in: Utc::now(),
+                created_at: Utc::now(),
+                status: VaultStatus::Active,
+                ttl_remaining: Some(86400),
+            });
+        }
+        store.lock().unwrap().insert("vr".to_string(), Vault {
+            id: "vr".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Released,
+            ttl_remaining: None,
         });
-        assert_eq!(svc.get_tokens("owner1").len(), 1);
+
+        let analytics = get_vault_analytics_handler(&store);
+        assert_eq!(analytics.total_vaults, 4);
+        assert_eq!(analytics.active_vaults, 3);
+        assert!((analytics.release_rate - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_unregister_push_token_handler() {
-        let svc = make_notification_service();
-        register_push_token_handler(&svc, RegisterTokenRequest {
-            owner: "owner1".into(),
-            token: "tok-xyz".into(),
-            platform: "ios".into(),
+    fn test_get_vault_analytics_time_series() {
+        let store = create_vault_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "o".to_string(),
+            beneficiary: "b".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
         });
-        unregister_push_token_handler(&svc, "owner1", "tok-xyz");
-        assert!(svc.get_tokens("owner1").is_empty());
+        let analytics = get_vault_analytics_handler(&store);
+        assert_eq!(analytics.time_series.len(), 1);
+        assert_eq!(analytics.time_series[0].vaults_created, 1);
     }
 
-    #[test]
-    fn test_get_preferences_handler_returns_defaults() {
-        let svc = make_notification_service();
-        let prefs = get_preferences_handler(&svc, "owner1");
-        assert!(prefs.expiry_warning_enabled);
-        assert_eq!(prefs.warning_hours_before, 24);
-    }
+    // ── Task 2: Backup & Recovery tests ──────────────────────────────────────
 
     #[test]
-    fn test_update_preferences_handler() {
-        let svc = make_notification_service();
-        update_preferences_handler(&svc, UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: Some(false),
-            check_in_reminder_enabled: None,
-            vault_released_enabled: None,
-            warning_hours_before: Some(12),
+    fn test_backup_vault_creates_backup() {
+        let store = create_vault_store();
+        let backup_store = create_backup_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 500,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
         });
-        let prefs = get_preferences_handler(&svc, "owner1");
-        assert!(!prefs.expiry_warning_enabled);
-        assert_eq!(prefs.warning_hours_before, 12);
+
+        let result = backup_vault_handler(&store, &backup_store, "v1");
+        assert!(result.is_ok());
+        let backup = result.unwrap();
+        assert_eq!(backup.vault_id, "v1");
+        assert!(!backup.encrypted_payload.is_empty());
     }
 
     #[test]
-    fn test_get_delivery_log_handler_empty() {
-        let svc = make_notification_service();
-        assert!(get_delivery_log_handler(&svc, "owner1").is_empty());
+    fn test_backup_vault_not_found() {
+        let store = create_vault_store();
+        let backup_store = create_backup_store();
+        let result = backup_vault_handler(&store, &backup_store, "missing");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_restore_vault_from_backup() {
+        let store = create_vault_store();
+        let backup_store = create_backup_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 999,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+
+        let backup = backup_vault_handler(&store, &backup_store, "v1").unwrap();
+
+        // Remove vault then restore
+        store.lock().unwrap().remove("v1");
+        assert!(store.lock().unwrap().get("v1").is_none());
+
+        let req = RestoreRequest {
+            backup_id: backup.backup_id,
+            encryption_key: "dummy-key".to_string(),
+        };
+        let restored = restore_vault_handler(&store, &backup_store, &req).unwrap();
+        assert_eq!(restored.id, "v1");
+        assert_eq!(restored.balance, 999);
+    }
+
+    #[test]
+    fn test_restore_missing_backup_returns_error() {
+        let store = create_vault_store();
+        let backup_store = create_backup_store();
+        let req = RestoreRequest {
+            backup_id: "nonexistent".to_string(),
+            encryption_key: "key".to_string(),
+        };
+        assert!(restore_vault_handler(&store, &backup_store, &req).is_err());
+    }
+
+    // ── Task 3: Sharing tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_share_vault_creates_share() {
+        let store = create_vault_store();
+        let share_store = create_share_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+
+        let req = ShareRequest {
+            shared_with: "trusted@example.com".to_string(),
+            permission: SharePermission::ViewOnly,
+        };
+        let result = share_vault_handler(&store, &share_store, "v1", req);
+        assert!(result.is_ok());
+        let share = result.unwrap();
+        assert_eq!(share.vault_id, "v1");
+        assert_eq!(share.permission, SharePermission::ViewOnly);
+    }
+
+    #[test]
+    fn test_share_vault_not_found() {
+        let store = create_vault_store();
+        let share_store = create_share_store();
+        let req = ShareRequest {
+            shared_with: "someone".to_string(),
+            permission: SharePermission::Edit,
+        };
+        assert!(share_vault_handler(&store, &share_store, "missing", req).is_err());
+    }
+
+    #[test]
+    fn test_list_vault_shares() {
+        let store = create_vault_store();
+        let share_store = create_share_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+
+        share_vault_handler(&store, &share_store, "v1", ShareRequest {
+            shared_with: "a@example.com".to_string(),
+            permission: SharePermission::ViewOnly,
+        }).unwrap();
+        share_vault_handler(&store, &share_store, "v1", ShareRequest {
+            shared_with: "b@example.com".to_string(),
+            permission: SharePermission::Admin,
+        }).unwrap();
+
+        let shares = list_vault_shares_handler(&share_store, "v1");
+        assert_eq!(shares.len(), 2);
+    }
+
+    #[test]
+    fn test_share_permission_levels() {
+        let store = create_vault_store();
+        let share_store = create_share_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+
+        for perm in [SharePermission::ViewOnly, SharePermission::Edit, SharePermission::Admin] {
+            let req = ShareRequest { shared_with: "x".to_string(), permission: perm.clone() };
+            let share = share_vault_handler(&store, &share_store, "v1", req).unwrap();
+            assert_eq!(share.permission, perm);
+        }
+    }
+
+    // ── Task 4: Notification Preferences tests ────────────────────────────────
+
+    #[test]
+    fn test_set_notification_preferences() {
+        let store = create_vault_store();
+        let notif_store = create_notification_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+
+        let req = NotificationPreferencesRequest {
+            channels: vec![NotificationChannel::Email, NotificationChannel::Push],
+            frequency: NotificationFrequency::Weekly,
+        };
+        let result = set_notification_preferences_handler(&store, &notif_store, "v1", req);
+        assert!(result.is_ok());
+        let prefs = result.unwrap();
+        assert_eq!(prefs.vault_id, "v1");
+        assert_eq!(prefs.frequency, NotificationFrequency::Weekly);
+        assert!(prefs.channels.contains(&NotificationChannel::Email));
+    }
+
+    #[test]
+    fn test_get_notification_preferences() {
+        let store = create_vault_store();
+        let notif_store = create_notification_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+
+        set_notification_preferences_handler(&store, &notif_store, "v1", NotificationPreferencesRequest {
+            channels: vec![NotificationChannel::Sms],
+            frequency: NotificationFrequency::Daily,
+        }).unwrap();
+
+        let prefs = get_notification_preferences_handler(&notif_store, "v1");
+        assert!(prefs.is_some());
+        assert_eq!(prefs.unwrap().frequency, NotificationFrequency::Daily);
+    }
+
+    #[test]
+    fn test_notification_preferences_vault_not_found() {
+        let store = create_vault_store();
+        let notif_store = create_notification_store();
+        let req = NotificationPreferencesRequest {
+            channels: vec![NotificationChannel::Email],
+            frequency: NotificationFrequency::Monthly,
+        };
+        assert!(set_notification_preferences_handler(&store, &notif_store, "missing", req).is_err());
+    }
+
+    #[test]
+    fn test_notification_preferences_empty_channels_rejected() {
+        let store = create_vault_store();
+        let notif_store = create_notification_store();
+        store.lock().unwrap().insert("v1".to_string(), Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            balance: 0,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        });
+        let req = NotificationPreferencesRequest {
+            channels: vec![],
+            frequency: NotificationFrequency::Daily,
+        };
+        assert!(set_notification_preferences_handler(&store, &notif_store, "v1", req).is_err());
     }
 }

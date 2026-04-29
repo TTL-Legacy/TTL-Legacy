@@ -9,6 +9,7 @@ mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
     PasskeyHash, BackupCode, DisputeStatus, WithdrawalScheduleEntry, ConditionalAcceptanceEntry,
+    ArchivedVaultInfo,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
@@ -18,7 +19,7 @@ use types::{
     INHERITANCE_TOPIC, ADD_PASSKEY_TOPIC, REMOVE_PASSKEY_TOPIC, ROTATE_PASSKEY_TOPIC,
     BACKUP_CODE_USED_TOPIC, BACKUP_CODES_GENERATED_TOPIC, DELEGATE_BENEFICIARY_TOPIC,
     DISPUTE_FILED_TOPIC, DISPUTE_RESOLVED_TOPIC, WITHDRAWAL_SCHEDULED_TOPIC, WITHDRAWAL_EXECUTED_TOPIC,
-    CONDITIONS_ACCEPTED_TOPIC,
+    CONDITIONS_ACCEPTED_TOPIC, SET_SPENDING_LIMIT_TOPIC,
 };
 
 #[cfg(test)]
@@ -49,6 +50,14 @@ pub const INSTANCE_TTL_LEDGERS: u32 = 200_000;
 const LEDGER_SECOND: u32 = 5;
 /// Soroban maximum persistent entry TTL in ledgers (~180 days at 5s/ledger).
 const MAX_PERSISTENT_TTL: u32 = 3_110_400;
+
+/// Time-lock delay for ownership transfers in seconds (24 hours).
+/// The new owner cannot accept until this many seconds have elapsed after initiation.
+const OWNERSHIP_TRANSFER_TIMELOCK: u64 = 86_400;
+
+/// Expiry window for pending ownership transfer requests in seconds (7 days).
+/// If the new owner does not accept within this window, the request expires.
+const OWNERSHIP_TRANSFER_EXPIRY: u64 = 604_800;
 
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
@@ -97,6 +106,9 @@ pub enum ContractError {
     DisputeFiled = 31,
     NoScheduledWithdrawals = 32,
     ConditionsNotApproved = 33,
+    NoPendingOwnershipTransfer = 34,
+    OwnershipTransferExpired = 35,
+    OwnershipTransferTimeLocked = 36,
 }
 
 #[contract]
@@ -437,6 +449,36 @@ impl TtlVaultContract {
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
+    /// Returns archived vault information if the vault has been archived.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(ArchivedVaultInfo)` containing the archived vault data, or `None` if not archived
+    pub fn get_archived_vault_info(env: Env, vault_id: u64) -> Option<ArchivedVaultInfo> {
+        let key = DataKey::ArchivedVault(vault_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Restores an archived vault to active storage.
+    ///
+    /// Anyone can call this function. If the vault is archived, this restores it
+    /// to persistent storage with extended TTL.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault to restore
+    pub fn restore_vault(env: Env, vault_id: u64) {
+        if let Some(ArchivedVaultInfo(vault)) = Self::get_archived_vault_info(env.clone(), vault_id) {
+            Self::save_vault(&env, vault_id, &vault);
+            let key = DataKey::ArchivedVault(vault_id);
+            env.storage().persistent().remove(&key);
+            Self::extend_vault_ttl(&env, vault_id, vault.check_in_interval);
+        }
+    }
+
     /// Returns whether the contract is currently paused.
     ///
     /// # Arguments
@@ -568,6 +610,7 @@ impl TtlVaultContract {
                 passkey_hash: None,
                 max_deposit_amount: None,
                 withdrawal_approval_threshold: None,
+                spending_limit: None,
             };
             Self::save_vault(&env, vault_id, &vault);
             Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -1017,6 +1060,8 @@ impl TtlVaultContract {
     /// * Panics if the vault balance is zero
     pub fn trigger_release(env: Env, vault_id: u64) {
         Self::assert_not_paused(&env);
+        // Attempt to restore archived vault state before proceeding - Issue #443
+        Self::try_restore_archived_vault(&env, vault_id);
         let mut vault = Self::load_vault(&env, vault_id);
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
@@ -1052,22 +1097,28 @@ impl TtlVaultContract {
             );
         } else {
             // No vesting: immediate full release
+            // Apply spending limit - Issue #382
+            let release_amount = if let Some(limit) = vault.spending_limit {
+                total.min(limit)
+            } else {
+                total
+            };
             let token_client = token::Client::new(&env, &vault.token_address);
 
             if vault.beneficiaries.is_empty() {
-                token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &total);
+                token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &release_amount);
                 env.events().publish(
                     (RELEASE_TOPIC,),
-                    ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: total },
+                    ReleaseEvent { vault_id, beneficiary: vault.beneficiary.clone(), amount: release_amount },
                 );
             } else {
                 let mut distributed: i128 = 0;
                 let last_idx = vault.beneficiaries.len() - 1;
                 for (i, entry) in vault.beneficiaries.iter().enumerate() {
                     let share = if i as u32 == last_idx {
-                        total - distributed
+                        release_amount - distributed
                     } else {
-                        total * (entry.bps as i128) / 10_000
+                        release_amount * (entry.bps as i128) / 10_000
                     };
                     if share > 0 {
                         token_client.transfer(&env.current_contract_address(), &entry.address, &share);
@@ -1080,8 +1131,10 @@ impl TtlVaultContract {
                 }
             }
 
-            vault.balance = 0;
-            vault.status = ReleaseStatus::Released;
+            vault.balance -= release_amount;
+            if vault.balance == 0 {
+                vault.status = ReleaseStatus::Released;
+            }
             Self::save_vault(&env, vault_id, &vault);
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         }
@@ -1888,6 +1941,68 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id).last_check_in
     }
 
+    /// Returns the balance of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The vault balance in stroops
+    pub fn get_vault_balance(env: Env, vault_id: u64) -> i128 {
+        Self::load_vault(&env, vault_id).balance
+    }
+
+    /// Returns the owner address of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The owner `Address`
+    pub fn get_vault_owner(env: Env, vault_id: u64) -> Address {
+        Self::load_vault(&env, vault_id).owner
+    }
+
+    /// Returns the creation timestamp of a vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The Unix timestamp when the vault was created
+    pub fn get_vault_created_at(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).created_at
+    }
+
+    /// Sets a spending limit on a vault, capping the amount released per `trigger_release` call.
+    ///
+    /// Owner-only. Pass `None` to remove the limit.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `limit` - `Some(amount)` to set a limit, `None` to remove it
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if `limit` is `Some(0)` or negative
+    pub fn set_spending_limit(env: Env, vault_id: u64, limit: Option<i128>) {
+        let mut vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+        if let Some(l) = limit {
+            if l <= 0 {
+                panic_with_error!(&env, ContractError::InvalidAmount);
+            }
+        }
+        vault.spending_limit = limit;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_SPENDING_LIMIT_TOPIC, vault_id), limit);
+    }
+
     /// Checks if a vault exists.
     ///
     /// # Arguments
@@ -2298,60 +2413,201 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Transfers ownership of a vault to a new address.
+    /// Initiates a vault ownership transfer to a new address.
     ///
-    /// Both the current owner and new owner must authorize this operation.
-    /// The vault must still be in Locked status.
+    /// This is step 1 of a 2-step ownership transfer with a 24-hour time-lock.
+    /// The new owner must call `accept_ownership_transfer` after the time-lock
+    /// expires to complete the transfer. The request expires after 7 days if
+    /// not accepted.
+    ///
+    /// Only one pending transfer can exist per vault at a time. Calling this
+    /// again replaces any existing pending request.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
-    /// * `new_owner` - The address of the new owner (must authorize)
+    /// * `caller` - The current owner (must authorize)
+    /// * `new_owner` - The proposed new owner address
     ///
     /// # Returns
-    /// `Ok(())` on success, `Err` on failure
+    /// `Ok(unlocks_at)` — the timestamp when the new owner may accept
     ///
     /// # Errors
     /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn transfer_ownership(
-            env: Env,
-            vault_id: u64,
-            caller: Address,
-            new_owner: Address,
-        ) -> Result<(), ContractError> {
-            if Self::load_paused(&env) {
-                return Err(ContractError::Paused);
-            }
-            caller.require_auth();
-            let mut vault = Self::load_vault(&env, vault_id);
-            let old_owner = vault.owner.clone();
-            if caller != old_owner {
-                return Err(ContractError::NotOwner);
-            }
-            if vault.status != ReleaseStatus::Locked {
-                return Err(ContractError::AlreadyReleased);
-            }
-            // Invariant: owner and beneficiary must always be distinct addresses.
-            // BeneficiaryVaults is keyed by beneficiary address. Because ownership
-            // transfer never changes vault.beneficiary, the index requires no update:
-            // the existing entry (beneficiary → vault_id) remains valid. Any other
-            // vaults where new_owner appears as a beneficiary are unrelated entries
-            // in the index and are also unaffected.
-            if new_owner == vault.beneficiary {
-                return Err(ContractError::InvalidBeneficiary);
-            }
-            if old_owner != new_owner {
-                Self::remove_owner_vault_id(&env, &old_owner, vault_id, vault.check_in_interval);
-                Self::add_owner_vault_id(&env, &new_owner, vault_id, vault.check_in_interval);
-            }
-            vault.owner = new_owner.clone();
-            Self::save_vault(&env, vault_id, &vault);
-            Self::log_audit_entry(&env, vault_id, "transfer_ownership", &caller, "");
-            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-            env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
-            Ok(())
+    /// * `ContractError::InvalidBeneficiary` - If new_owner equals the vault beneficiary
+    pub fn initiate_ownership_transfer(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        new_owner: Address,
+    ) -> Result<u64, ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
         }
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if new_owner == vault.beneficiary {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let now = env.ledger().timestamp();
+        let unlocks_at = now + OWNERSHIP_TRANSFER_TIMELOCK;
+        let expires_at = now + OWNERSHIP_TRANSFER_EXPIRY;
+
+        let request = OwnershipTransferRequest {
+            new_owner: new_owner.clone(),
+            unlocks_at,
+            expires_at,
+        };
+        let key = DataKey::PendingOwnership(vault_id);
+        env.storage().persistent().set(&key, &request);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, vault_ttl_ledgers(vault.check_in_interval));
+
+        Self::log_audit_entry(&env, vault_id, "initiate_ownership_transfer", &caller, "");
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((OWNERSHIP_INITIATED_TOPIC, vault_id), (caller, new_owner, unlocks_at));
+        Ok(unlocks_at)
+    }
+
+    /// Accepts a pending ownership transfer (step 2).
+    ///
+    /// The new owner calls this after the 24-hour time-lock has passed.
+    /// On success, vault ownership is transferred immediately.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `new_owner` - The new owner accepting the transfer (must authorize)
+    ///
+    /// # Returns
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::NoPendingOwnershipTransfer` - If no pending request exists
+    /// * `ContractError::NotOwner` - If caller is not the designated new owner
+    /// * `ContractError::OwnershipTransferTimeLocked` - If the time-lock has not yet elapsed
+    /// * `ContractError::OwnershipTransferExpired` - If the request has expired
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn accept_ownership_transfer(
+        env: Env,
+        vault_id: u64,
+        new_owner: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        new_owner.require_auth();
+
+        let key = DataKey::PendingOwnership(vault_id);
+        let request = env
+            .storage()
+            .persistent()
+            .get::<DataKey, OwnershipTransferRequest>(&key)
+            .ok_or(ContractError::NoPendingOwnershipTransfer)?;
+
+        if new_owner != request.new_owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < request.unlocks_at {
+            return Err(ContractError::OwnershipTransferTimeLocked);
+        }
+        if now > request.expires_at {
+            return Err(ContractError::OwnershipTransferExpired);
+        }
+
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let old_owner = vault.owner.clone();
+        if old_owner != new_owner {
+            Self::remove_owner_vault_id(&env, &old_owner, vault_id, vault.check_in_interval);
+            Self::add_owner_vault_id(&env, &new_owner, vault_id, vault.check_in_interval);
+        }
+        vault.owner = new_owner.clone();
+        Self::save_vault(&env, vault_id, &vault);
+
+        // Clear the pending request
+        env.storage().persistent().remove(&key);
+
+        Self::log_audit_entry(&env, vault_id, "accept_ownership_transfer", &new_owner, "");
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((OWNERSHIP_ACCEPTED_TOPIC, vault_id), (old_owner.clone(), new_owner.clone()));
+        // Backwards-compatible event for consumers watching OWNERSHIP_TOPIC
+        env.events().publish((OWNERSHIP_TOPIC, vault_id), (old_owner, new_owner));
+        Ok(())
+    }
+
+    /// Cancels a pending ownership transfer.
+    ///
+    /// Only the current vault owner can cancel. This removes the pending request
+    /// and the proposed new owner can no longer accept.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The current owner (must authorize)
+    ///
+    /// # Returns
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::NoPendingOwnershipTransfer` - If no pending request exists
+    pub fn cancel_ownership_transfer(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let key = DataKey::PendingOwnership(vault_id);
+        if !env.storage().persistent().has(&key) {
+            return Err(ContractError::NoPendingOwnershipTransfer);
+        }
+        let request = env
+            .storage()
+            .persistent()
+            .get::<DataKey, OwnershipTransferRequest>(&key)
+            .unwrap();
+        let cancelled_new_owner = request.new_owner.clone();
+        env.storage().persistent().remove(&key);
+
+        Self::log_audit_entry(&env, vault_id, "cancel_ownership_transfer", &caller, "");
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((OWNERSHIP_CANCELLED_TOPIC, vault_id), (caller, cancelled_new_owner));
+        Ok(())
+    }
+
+    /// Returns the pending ownership transfer request for a vault, if any.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(OwnershipTransferRequest)` if a pending transfer exists, `None` otherwise
+    pub fn get_pending_ownership_transfer(env: Env, vault_id: u64) -> Option<OwnershipTransferRequest> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, OwnershipTransferRequest>(&DataKey::PendingOwnership(vault_id))
+    }
 
     // --- Issue #378: Vault Metadata ---
 
@@ -2609,6 +2865,7 @@ impl TtlVaultContract {
             passkey_hash: None,
             max_deposit_amount: None,
             withdrawal_approval_threshold: None,
+            spending_limit: None,
         };
         
         Self::save_vault(&env, vault_id, &new_vault);
@@ -2640,6 +2897,66 @@ impl TtlVaultContract {
             vault.parent_vault_id
         } else {
             None
+        }
+    }
+
+    // --- Issue #443: Vault Archival and Restoration API ---
+
+    /// Restores an archived vault's persistent storage entry by re-extending its TTL.
+    ///
+    /// Soroban archives persistent entries when their TTL expires. This function
+    /// restores the vault entry so it becomes accessible again. Anyone can call this
+    /// to unblock a beneficiary from triggering release on an archived vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault to restore
+    ///
+    /// # Panics
+    /// Panics if the vault does not exist (was never created or has been permanently deleted)
+    pub fn restore_vault(env: Env, vault_id: u64) {
+        let key = DataKey::Vault(vault_id);
+        // Extending TTL on an archived entry restores it. If the entry no longer
+        // exists at all, load_vault will panic with VaultNotFound.
+        let vault = Self::load_vault(&env, vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        // Clear any stale archived-info snapshot now that the vault is live again.
+        env.storage().persistent().remove(&DataKey::ArchivedVault(vault_id));
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((RESTORE_VAULT_TOPIC, vault_id), vault_id);
+    }
+
+    /// Returns archived vault metadata if a snapshot was saved before archival.
+    ///
+    /// When a vault's TTL is about to lapse, operators can snapshot its state via
+    /// off-chain tooling. This function queries that snapshot. Returns `None` if no
+    /// snapshot exists (vault is live or was never snapshotted).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(ArchivedVaultInfo)` if a snapshot exists, `None` otherwise
+    pub fn get_archived_vault_info(env: Env, vault_id: u64) -> Option<ArchivedVaultInfo> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArchivedVault(vault_id))
+    }
+
+    /// Internal helper: if an archived-info snapshot exists for the vault, restore
+    /// the vault entry's TTL so `load_vault` can succeed in `trigger_release`.
+    fn try_restore_archived_vault(env: &Env, vault_id: u64) {
+        // Only attempt restoration if a snapshot is present (vault may be archived).
+        if env.storage().persistent().has(&DataKey::ArchivedVault(vault_id)) {
+            let key = DataKey::Vault(vault_id);
+            if let Some(vault) = env.storage().persistent().get::<DataKey, Vault>(&key) {
+                let ttl = vault_ttl_ledgers(vault.check_in_interval);
+                env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+                env.storage().persistent().remove(&DataKey::ArchivedVault(vault_id));
+                env.events().publish((RESTORE_VAULT_TOPIC, vault_id), vault_id);
+            }
         }
     }
 
