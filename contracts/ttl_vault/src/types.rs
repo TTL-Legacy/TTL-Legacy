@@ -80,6 +80,7 @@ pub enum DataKey {
     WithdrawalSchedule(u64),
     DisputeStatus(u64),
     ConditionalAcceptance(u64),
+    ArchivedVault(u64),
 }
 
 /// A vesting schedule attached to a vault.
@@ -256,3 +257,8 @@ pub struct ConditionalAcceptanceEntry {
     pub conditions: String,
     pub approved_by_owner: bool,
 }
+
+/// Archived vault info for restoration - Issue #443
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedVaultInfo(pub Vault);

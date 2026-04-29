@@ -9,6 +9,7 @@ mod types;
 use types::{
     BeneficiaryEntry, DataKey, ReleaseEvent, ReleaseStatus, ReleaseCondition, Vault, VestingSchedule,
     PasskeyHash, BackupCode, DisputeStatus, WithdrawalScheduleEntry, ConditionalAcceptanceEntry,
+    ArchivedVaultInfo,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
@@ -435,6 +436,36 @@ impl TtlVaultContract {
         Self::require_admin(&env);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Returns archived vault information if the vault has been archived.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(ArchivedVaultInfo)` containing the archived vault data, or `None` if not archived
+    pub fn get_archived_vault_info(env: Env, vault_id: u64) -> Option<ArchivedVaultInfo> {
+        let key = DataKey::ArchivedVault(vault_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Restores an archived vault to active storage.
+    ///
+    /// Anyone can call this function. If the vault is archived, this restores it
+    /// to persistent storage with extended TTL.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault to restore
+    pub fn restore_vault(env: Env, vault_id: u64) {
+        if let Some(ArchivedVaultInfo(vault)) = Self::get_archived_vault_info(env.clone(), vault_id) {
+            Self::save_vault(&env, vault_id, &vault);
+            let key = DataKey::ArchivedVault(vault_id);
+            env.storage().persistent().remove(&key);
+            Self::extend_vault_ttl(&env, vault_id, vault.check_in_interval);
+        }
     }
 
     /// Returns whether the contract is currently paused.
@@ -1018,6 +1049,8 @@ impl TtlVaultContract {
     /// * Panics if the vault balance is zero
     pub fn trigger_release(env: Env, vault_id: u64) {
         Self::assert_not_paused(&env);
+        // Attempt to restore archived vault state before proceeding - Issue #443
+        Self::try_restore_archived_vault(&env, vault_id);
         let mut vault = Self::load_vault(&env, vault_id);
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
@@ -2712,6 +2745,66 @@ impl TtlVaultContract {
             vault.parent_vault_id
         } else {
             None
+        }
+    }
+
+    // --- Issue #443: Vault Archival and Restoration API ---
+
+    /// Restores an archived vault's persistent storage entry by re-extending its TTL.
+    ///
+    /// Soroban archives persistent entries when their TTL expires. This function
+    /// restores the vault entry so it becomes accessible again. Anyone can call this
+    /// to unblock a beneficiary from triggering release on an archived vault.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault to restore
+    ///
+    /// # Panics
+    /// Panics if the vault does not exist (was never created or has been permanently deleted)
+    pub fn restore_vault(env: Env, vault_id: u64) {
+        let key = DataKey::Vault(vault_id);
+        // Extending TTL on an archived entry restores it. If the entry no longer
+        // exists at all, load_vault will panic with VaultNotFound.
+        let vault = Self::load_vault(&env, vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        // Clear any stale archived-info snapshot now that the vault is live again.
+        env.storage().persistent().remove(&DataKey::ArchivedVault(vault_id));
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((RESTORE_VAULT_TOPIC, vault_id), vault_id);
+    }
+
+    /// Returns archived vault metadata if a snapshot was saved before archival.
+    ///
+    /// When a vault's TTL is about to lapse, operators can snapshot its state via
+    /// off-chain tooling. This function queries that snapshot. Returns `None` if no
+    /// snapshot exists (vault is live or was never snapshotted).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(ArchivedVaultInfo)` if a snapshot exists, `None` otherwise
+    pub fn get_archived_vault_info(env: Env, vault_id: u64) -> Option<ArchivedVaultInfo> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArchivedVault(vault_id))
+    }
+
+    /// Internal helper: if an archived-info snapshot exists for the vault, restore
+    /// the vault entry's TTL so `load_vault` can succeed in `trigger_release`.
+    fn try_restore_archived_vault(env: &Env, vault_id: u64) {
+        // Only attempt restoration if a snapshot is present (vault may be archived).
+        if env.storage().persistent().has(&DataKey::ArchivedVault(vault_id)) {
+            let key = DataKey::Vault(vault_id);
+            if let Some(vault) = env.storage().persistent().get::<DataKey, Vault>(&key) {
+                let ttl = vault_ttl_ledgers(vault.check_in_interval);
+                env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+                env.storage().persistent().remove(&DataKey::ArchivedVault(vault_id));
+                env.events().publish((RESTORE_VAULT_TOPIC, vault_id), vault_id);
+            }
         }
     }
 
