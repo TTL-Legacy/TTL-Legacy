@@ -33,6 +33,7 @@ use types::{
     STATE_TRANSITION_TOPIC, OWNERSHIP_PROOF_TOPIC, INTEGRITY_TOPIC, BATCH_STATUS_TOPIC,
     TtlPool, TTL_POOL_CREATED_TOPIC, TTL_POOL_VAULT_ADDED_TOPIC, TTL_POOL_VAULT_REMOVED_TOPIC,
     TTL_POOL_CHECK_IN_TOPIC,
+    BiometricEntry, BIOMETRIC_REGISTERED_TOPIC, BIOMETRIC_REMOVED_TOPIC, BIOMETRIC_CHECK_IN_TOPIC,
 };
 
 #[cfg(test)]
@@ -5121,5 +5122,181 @@ impl TtlVaultContract {
     /// Returns the pool ID a vault belongs to, if any.
     pub fn get_vault_pool(env: Env, vault_id: u64) -> Option<u64> {
         env.storage().persistent().get(&DataKey::VaultPool(vault_id))
+    }
+
+    // ── Biometric Verification ───────────────────────────────────────────────────────────────────────────────────────
+
+    /// Registers a biometric credential hash (fingerprint or face template
+    /// commitment) for a vault. The raw biometric never leaves the device;
+    /// only the SHA-256 hash is stored on-chain.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault to register the credential for
+    /// * `caller` - Must be the vault owner
+    /// * `credential_hash` - SHA-256 hash of the biometric template
+    ///
+    /// # Errors
+    /// * `NotOwner` - If caller is not the vault owner
+    /// * `AlreadyReleased` - If vault is not Locked
+    /// * `InvalidPasskey` - If the credential hash is already registered
+    pub fn register_biometric(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        credential_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let key = DataKey::VaultBiometrics(vault_id);
+        let mut entries: Vec<BiometricEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        if entries.iter().any(|e| e.credential_hash == credential_hash) {
+            return Err(ContractError::InvalidPasskey);
+        }
+
+        entries.push_back(BiometricEntry {
+            credential_hash: credential_hash.clone(),
+            added_at: env.ledger().timestamp(),
+        });
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &entries);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BIOMETRIC_REGISTERED_TOPIC, vault_id), credential_hash);
+        Ok(())
+    }
+
+    /// Removes a biometric credential from a vault. Owner-only.
+    ///
+    /// # Errors
+    /// * `NotOwner` - If caller is not the vault owner
+    /// * `PasskeyNotFound` - If credential is not registered
+    pub fn remove_biometric(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        credential_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let key = DataKey::VaultBiometrics(vault_id);
+        let entries: Vec<BiometricEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::PasskeyNotFound)?;
+
+        let mut updated = Vec::new(&env);
+        let mut found = false;
+        for e in entries.iter() {
+            if e.credential_hash != credential_hash {
+                updated.push_back(e);
+            } else {
+                found = true;
+            }
+        }
+        if !found {
+            return Err(ContractError::PasskeyNotFound);
+        }
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &updated);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BIOMETRIC_REMOVED_TOPIC, vault_id), credential_hash);
+        Ok(())
+    }
+
+    /// Performs a check-in verified by a biometric credential hash.
+    /// The provided hash must match a registered biometric for the vault.
+    /// On success, `last_check_in` is reset and a `bio_ci` event is emitted.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault to check in
+    /// * `caller` - Must be the vault owner
+    /// * `credential_hash` - Hash of the biometric template presented
+    ///
+    /// # Errors
+    /// * `Paused` - If contract or vault is paused
+    /// * `NotOwner` - If caller is not the vault owner
+    /// * `AlreadyReleased` - If vault is not Locked
+    /// * `InvalidPasskey` - If credential hash is not registered
+    pub fn biometric_check_in(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        credential_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.is_paused {
+            return Err(ContractError::Paused);
+        }
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let key = DataKey::VaultBiometrics(vault_id);
+        let entries: Vec<BiometricEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        if !entries.iter().any(|e| e.credential_hash == credential_hash) {
+            return Err(ContractError::InvalidPasskey);
+        }
+
+        let now = env.ledger().timestamp();
+        vault.last_check_in = now;
+        Self::save_vault(&env, vault_id, &vault);
+        Self::append_activity_log(&env, vault_id, "biometric_check_in", &caller, "");
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BIOMETRIC_CHECK_IN_TOPIC, vault_id), (caller, now));
+        Ok(())
+    }
+
+    /// Returns all registered biometric credentials for a vault.
+    pub fn get_vault_biometrics(env: Env, vault_id: u64) -> Vec<BiometricEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultBiometrics(vault_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Returns `true` if the given credential hash is registered for the vault.
+    pub fn is_valid_biometric(env: Env, vault_id: u64, credential_hash: BytesN<32>) -> bool {
+        let key = DataKey::VaultBiometrics(vault_id);
+        if let Some(entries) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<BiometricEntry>>(&key)
+        {
+            entries.iter().any(|e| e.credential_hash == credential_hash)
+        } else {
+            false
+        }
     }
 }

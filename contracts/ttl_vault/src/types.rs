@@ -75,6 +75,11 @@ pub const TTL_POOL_VAULT_ADDED_TOPIC: Symbol = symbol_short!("pool_add");
 pub const TTL_POOL_VAULT_REMOVED_TOPIC: Symbol = symbol_short!("pool_rm");
 pub const TTL_POOL_CHECK_IN_TOPIC: Symbol = symbol_short!("pool_ci");
 
+// Biometric verification events
+pub const BIOMETRIC_REGISTERED_TOPIC: Symbol = symbol_short!("bio_reg");
+pub const BIOMETRIC_REMOVED_TOPIC: Symbol = symbol_short!("bio_rm");
+pub const BIOMETRIC_CHECK_IN_TOPIC: Symbol = symbol_short!("bio_ci");
+
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 
@@ -140,6 +145,8 @@ pub enum DataKey {
     TtlPoolCount,
     TtlPoolVaults(u64),
     VaultPool(u64),
+    // Biometric verification
+    VaultBiometrics(u64),
     // State transition audit log
     StateTransitionLog(u64),
 }
@@ -463,4 +470,14 @@ pub struct TtlPool {
     pub check_in_interval: u64,
     pub last_check_in: u64,
     pub created_at: u64,
+}
+
+/// A biometric credential entry (fingerprint or face template hash).
+/// The raw biometric data never leaves the device — only the SHA-256
+/// hash commitment is stored on-chain.
+#[contracttype]
+#[derive(Clone)]
+pub struct BiometricEntry {
+    pub credential_hash: BytesN<32>,
+    pub added_at: u64,
 }

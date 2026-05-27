@@ -3942,3 +3942,242 @@ fn test_multiple_vaults_in_pool_all_reset() {
         assert_eq!(client.get_vault(vid).last_check_in, now);
     }
 }
+
+// ── Biometric Verification tests ─────────────────────────────────────────────
+
+#[test]
+fn test_register_biometric_stores_credential() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+
+    let entries = client.get_vault_biometrics(&vault_id);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().credential_hash, cred);
+}
+
+#[test]
+fn test_register_biometric_non_owner_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x01u8; 32]);
+    let other = Address::generate(&env);
+    assert!(client.try_register_biometric(&vault_id, &other, &cred).is_err());
+}
+
+#[test]
+fn test_register_biometric_duplicate_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x02u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(client.try_register_biometric(&vault_id, &owner, &cred).is_err());
+}
+
+#[test]
+fn test_register_biometric_released_vault_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    let cred = BytesN::<32>::from_array(&env, &[0x03u8; 32]);
+    assert!(client.try_register_biometric(&vault_id, &owner, &cred).is_err());
+}
+
+#[test]
+fn test_register_biometric_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x04u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(find_event_by_topic(&env, types::BIOMETRIC_REGISTERED_TOPIC));
+}
+
+#[test]
+fn test_remove_biometric_removes_credential() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x05u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    client.remove_biometric(&vault_id, &owner, &cred).unwrap();
+
+    assert_eq!(client.get_vault_biometrics(&vault_id).len(), 0);
+    assert!(!client.is_valid_biometric(&vault_id, &cred));
+}
+
+#[test]
+fn test_remove_biometric_not_found_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x06u8; 32]);
+    assert!(client.try_remove_biometric(&vault_id, &owner, &cred).is_err());
+}
+
+#[test]
+fn test_remove_biometric_non_owner_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x07u8; 32]);
+    let other = Address::generate(&env);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(client.try_remove_biometric(&vault_id, &other, &cred).is_err());
+}
+
+#[test]
+fn test_remove_biometric_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x08u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    client.remove_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(find_event_by_topic(&env, types::BIOMETRIC_REMOVED_TOPIC));
+}
+
+#[test]
+fn test_biometric_check_in_succeeds_with_valid_credential() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x09u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    let now = env.ledger().timestamp();
+
+    client.biometric_check_in(&vault_id, &owner, &cred).unwrap();
+    assert_eq!(client.get_vault(&vault_id).last_check_in, now);
+}
+
+#[test]
+fn test_biometric_check_in_invalid_credential_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x0Au8; 32]);
+    let wrong = BytesN::<32>::from_array(&env, &[0x0Bu8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(client.try_biometric_check_in(&vault_id, &owner, &wrong).is_err());
+}
+
+#[test]
+fn test_biometric_check_in_no_credentials_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x0Cu8; 32]);
+    assert!(client.try_biometric_check_in(&vault_id, &owner, &cred).is_err());
+}
+
+#[test]
+fn test_biometric_check_in_non_owner_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x0Du8; 32]);
+    let other = Address::generate(&env);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(client.try_biometric_check_in(&vault_id, &other, &cred).is_err());
+}
+
+#[test]
+fn test_biometric_check_in_paused_contract_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x0Eu8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    client.pause();
+    assert!(client.try_biometric_check_in(&vault_id, &owner, &cred).is_err());
+    client.unpause();
+}
+
+#[test]
+fn test_biometric_check_in_released_vault_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x0Fu8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    client.deposit(&vault_id, &owner, &500i128);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    assert!(client.try_biometric_check_in(&vault_id, &owner, &cred).is_err());
+}
+
+#[test]
+fn test_biometric_check_in_extends_vault_ttl() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x10u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 3500);
+    client.biometric_check_in(&vault_id, &owner, &cred).unwrap();
+
+    env.ledger().with_mut(|l| l.timestamp += 3500);
+    assert!(!client.is_expired(&vault_id));
+}
+
+#[test]
+fn test_biometric_check_in_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x11u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    client.biometric_check_in(&vault_id, &owner, &cred).unwrap();
+    assert!(find_event_by_topic(&env, types::BIOMETRIC_CHECK_IN_TOPIC));
+}
+
+#[test]
+fn test_is_valid_biometric_returns_correct_result() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x12u8; 32]);
+    let other = BytesN::<32>::from_array(&env, &[0x13u8; 32]);
+
+    assert!(!client.is_valid_biometric(&vault_id, &cred));
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    assert!(client.is_valid_biometric(&vault_id, &cred));
+    assert!(!client.is_valid_biometric(&vault_id, &other));
+}
+
+#[test]
+fn test_multiple_biometric_credentials_per_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred1 = BytesN::<32>::from_array(&env, &[0x14u8; 32]);
+    let cred2 = BytesN::<32>::from_array(&env, &[0x15u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred1).unwrap();
+    client.register_biometric(&vault_id, &owner, &cred2).unwrap();
+
+    assert_eq!(client.get_vault_biometrics(&vault_id).len(), 2);
+
+    // Either credential should work for check-in
+    client.biometric_check_in(&vault_id, &owner, &cred1).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    client.biometric_check_in(&vault_id, &owner, &cred2).unwrap();
+}
+
+#[test]
+fn test_biometric_check_in_logs_activity() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let cred = BytesN::<32>::from_array(&env, &[0x16u8; 32]);
+
+    client.register_biometric(&vault_id, &owner, &cred).unwrap();
+    client.biometric_check_in(&vault_id, &owner, &cred).unwrap();
+
+    let log = client.get_vault_audit_log(&vault_id);
+    let actions: alloc::vec::Vec<soroban_sdk::String> = log.iter().map(|e| e.action).collect();
+    assert!(actions.iter().any(|a| *a == soroban_sdk::String::from_str(&env, "biometric_check_in")));
+}
