@@ -73,6 +73,9 @@ pub const BATCH_STATUS_TOPIC: Symbol = symbol_short!("bat_stat");
 pub const TTL_BORROW_TOPIC: Symbol = symbol_short!("ttl_bor");
 pub const TTL_REPAY_TOPIC: Symbol = symbol_short!("ttl_rep");
 
+// Issue: Check-in Rate Limiting
+pub const CHECKIN_RATE_LIMITED_TOPIC: Symbol = symbol_short!("ci_rl");
+
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 
@@ -135,6 +138,9 @@ pub enum DataKey {
     OwnerVaultCount(Address),
     // Issue: TTL Borrowing
     TtlBorrow(u64),
+    // Issue: Check-in Rate Limiting
+    LastCheckInTime(u64),
+    MinCheckInCooldown,
     StateTransitionLog(u64),
 }
 

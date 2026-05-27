@@ -106,3 +106,18 @@ get_ttl_borrow(borrower_vault_id) -> Option<TtlBorrowRecord>
 - A `TtlBorrowRecord` is stored on-chain for auditability
 - The borrow can be repaid to restore the lender's TTL
 - Events: `ttl_bor` (borrow created), `ttl_rep` (borrow repaid)
+
+## Check-in Rate Limiting
+
+To prevent storage abuse from excessive check-ins, a minimum cooldown can be enforced:
+
+```rust
+set_min_checkin_cooldown(cooldown_seconds)   // admin-only
+get_min_checkin_cooldown() -> u64
+get_last_checkin_time(vault_id) -> Option<u64>
+```
+
+- Default cooldown: 60 seconds
+- Set to 0 to disable rate limiting
+- Check-ins within the cooldown window return `CheckInTooFrequent` (error 54)
+- Event: `ci_rl` emitted when the cooldown setting is updated

@@ -3841,3 +3841,86 @@ fn test_repay_ttl_borrow_fails_when_no_record() {
     let vault_id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
     assert!(client.try_repay_ttl_borrow(&vault_id, &owner).is_err());
 }
+
+// ============================================================
+// Issue: Check-in Rate Limiting — tests
+// ============================================================
+
+#[test]
+fn test_set_and_get_min_checkin_cooldown() {
+    let (_, _, _, _, _, client) = setup();
+    client.set_min_checkin_cooldown(&300u64);
+    assert_eq!(client.get_min_checkin_cooldown(), 300u64);
+}
+
+#[test]
+fn test_set_min_checkin_cooldown_emits_event() {
+    let (env, _, _, _, _, client) = setup();
+    client.set_min_checkin_cooldown(&120u64);
+    assert!(find_event_by_topic(&env, types::CHECKIN_RATE_LIMITED_TOPIC));
+}
+
+#[test]
+fn test_checkin_rate_limit_blocks_rapid_checkins() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    client.set_min_checkin_cooldown(&300u64);
+    let vault_id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
+    let passkey = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &passkey);
+    // Immediate second check-in must fail
+    assert!(client.try_check_in(&vault_id, &owner, &passkey).is_err());
+}
+
+#[test]
+fn test_checkin_rate_limit_allows_after_cooldown() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    client.set_min_checkin_cooldown(&300u64);
+    let vault_id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
+    let passkey = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &passkey);
+    env.ledger().with_mut(|l| l.timestamp += 301);
+    assert!(client.try_check_in(&vault_id, &owner, &passkey).is_ok());
+}
+
+#[test]
+fn test_checkin_rate_limit_zero_disables_limiting() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    client.set_min_checkin_cooldown(&0u64);
+    let vault_id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
+    let passkey = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &passkey);
+    assert!(client.try_check_in(&vault_id, &owner, &passkey).is_ok());
+}
+
+#[test]
+fn test_get_last_checkin_time_after_checkin() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    client.set_min_checkin_cooldown(&0u64);
+    let vault_id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
+    let passkey = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    env.ledger().with_mut(|l| l.timestamp += 50);
+    let expected = env.ledger().timestamp();
+    client.check_in(&vault_id, &owner, &passkey);
+    assert_eq!(client.get_last_checkin_time(&vault_id), Some(expected));
+}
+
+#[test]
+fn test_get_last_checkin_time_none_before_first_checkin() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
+    assert_eq!(client.get_last_checkin_time(&vault_id), None);
+}
+
+#[test]
+fn test_checkin_rate_limit_admin_only() {
+    let (env, owner, _, _, _, client) = setup();
+    // set_min_checkin_cooldown is admin-only; with mock_all_auths it passes,
+    // but the function internally calls require_admin which checks the admin address.
+    // Verify the value is stored correctly.
+    client.set_min_checkin_cooldown(&600u64);
+    assert_eq!(client.get_min_checkin_cooldown(), 600u64);
+}

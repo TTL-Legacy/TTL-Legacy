@@ -33,6 +33,7 @@ use types::{
     VAULT_CAP_TOPIC,
     STATE_TRANSITION_TOPIC, OWNERSHIP_PROOF_TOPIC, INTEGRITY_TOPIC, BATCH_STATUS_TOPIC,
     TTL_BORROW_TOPIC, TTL_REPAY_TOPIC,
+    CHECKIN_RATE_LIMITED_TOPIC,
 };
 
 #[cfg(test)]
@@ -71,6 +72,9 @@ const OWNERSHIP_TRANSFER_TIMELOCK: u64 = 86_400;
 /// Expiry window for pending ownership transfer requests in seconds (7 days).
 /// If the new owner does not accept within this window, the request expires.
 const OWNERSHIP_TRANSFER_EXPIRY: u64 = 604_800;
+
+/// Minimum seconds between consecutive check-ins (default: 60 seconds).
+const DEFAULT_MIN_CHECKIN_COOLDOWN: u64 = 60;
 
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
@@ -139,6 +143,7 @@ pub enum ContractError {
     IncompatibleVaultStatus = 51,
     TtlBorrowNotFound = 52,
     TtlBorrowAlreadyRepaid = 53,
+    CheckInTooFrequent = 54,
 }
 
 #[contract]
@@ -710,6 +715,22 @@ impl TtlVaultContract {
         let original_last_check_in = vault.last_check_in;
         
         let now = env.ledger().timestamp();
+
+        // Rate limiting: enforce minimum cooldown between check-ins
+        let cooldown: u64 = env
+            .storage().instance()
+            .get(&DataKey::MinCheckInCooldown)
+            .unwrap_or(DEFAULT_MIN_CHECKIN_COOLDOWN);
+        if cooldown > 0 {
+            if let Some(last) = env.storage().persistent()
+                .get::<DataKey, u64>(&DataKey::LastCheckInTime(vault_id))
+            {
+                if now < last + cooldown {
+                    return Err(ContractError::CheckInTooFrequent);
+                }
+            }
+        }
+
         if let Some(expiry) = Self::get_passkey_expiry(env.clone(), vault_id, passkey_hash.clone()) {
             if now > expiry {
                 return Err(ContractError::InvalidAmount); // Reusing error for expired passkey
@@ -735,7 +756,13 @@ impl TtlVaultContract {
         
         // Log passkey usage - Issue #395
         Self::log_passkey_usage(&env, vault_id, &passkey_hash, now);
-        
+
+        // Persist last check-in time for rate limiting
+        let lci_key = DataKey::LastCheckInTime(vault_id);
+        let lci_ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&lci_key, &now);
+        env.storage().persistent().extend_ttl(&lci_key, VAULT_TTL_THRESHOLD, lci_ttl);
+
         // Issue #478: record history for adaptive interval
         Self::record_check_in_history(&env, vault_id, now);
         // Issue #479: update streak
@@ -3193,6 +3220,33 @@ impl TtlVaultContract {
     /// Returns the active TTL borrow record for a vault, if any.
     pub fn get_ttl_borrow(env: Env, borrower_vault_id: u64) -> Option<TtlBorrowRecord> {
         env.storage().persistent().get(&DataKey::TtlBorrow(borrower_vault_id))
+    }
+
+    // ── Issue: Check-in Rate Limiting ─────────────────────────────────────────
+
+    /// Sets the minimum cooldown (seconds) between consecutive check-ins.
+    ///
+    /// Admin-only. Prevents owners from spamming check-ins to waste storage.
+    /// Set to 0 to disable rate limiting entirely.
+    pub fn set_min_checkin_cooldown(env: Env, cooldown_seconds: u64) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::MinCheckInCooldown, &cooldown_seconds);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((CHECKIN_RATE_LIMITED_TOPIC,), cooldown_seconds);
+    }
+
+    /// Returns the configured minimum check-in cooldown in seconds.
+    /// Defaults to `DEFAULT_MIN_CHECKIN_COOLDOWN` (60s) if not set.
+    pub fn get_min_checkin_cooldown(env: Env) -> u64 {
+        env.storage().instance()
+            .get(&DataKey::MinCheckInCooldown)
+            .unwrap_or(DEFAULT_MIN_CHECKIN_COOLDOWN)
+    }
+
+    /// Returns the timestamp of the most recent check-in for a vault.
+    /// Returns `None` if no check-in has been recorded yet.
+    pub fn get_last_checkin_time(env: Env, vault_id: u64) -> Option<u64> {
+        env.storage().persistent().get(&DataKey::LastCheckInTime(vault_id))
     }
 
     fn append_activity_log(env: &Env, vault_id: u64, action: &str, caller: &Address, _details: &str) {
