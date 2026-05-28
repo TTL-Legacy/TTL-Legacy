@@ -139,6 +139,64 @@ client.set_vesting_schedule(&vault_id, &owner, &start, &interval, &4u32);
 client.claim_vested_installment(&vault_id);
 ```
 
+## Vesting Reversal (Issue #548)
+
+The vault owner may configure a reversal grace period on a per-claim basis. Instead of calling `claim_vested_installment` (which transfers immediately), use the 2-phase flow:
+
+1. **`initiate_vesting_claim(vault_id, reversal_window_seconds)`** — calculates the claimable amount and holds it in escrow inside the contract. The schedule counter is advanced to block double-initiation. Returns the escrowed amount.
+
+2. **`reverse_vesting_claim(vault_id, caller)`** (owner only) — cancels the pending claim within the reversal window. The schedule counter is rolled back so the installments become claimable again.
+
+3. **`finalize_vesting_claim(vault_id)`** (anyone) — after the reversal window closes, completes the token transfer to the beneficiary.
+
+### API Reference
+
+```rust
+fn initiate_vesting_claim(env: Env, vault_id: u64, reversal_window_seconds: u64) -> Result<i128, ContractError>
+fn reverse_vesting_claim(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError>
+fn finalize_vesting_claim(env: Env, vault_id: u64) -> Result<i128, ContractError>
+fn get_pending_vesting_claim(env: Env, vault_id: u64) -> Option<VestingPendingClaim>
+```
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `VestingReversalNotFound` | 61 | No pending claim on this vault |
+| `VestingReversalExpired`  | 60 | Reversal window has already closed |
+| `InvalidAmount`           |  5 | A pending claim already exists (call finalize first) |
+
+## Late-Claim Penalty (Issue #547)
+
+The vault owner may attach a penalty config to a vesting schedule. If a beneficiary claims an installment more than `grace_period_seconds` after it unlocked, the payout for that installment is reduced by `penalty_bps` basis points.
+
+### `set_vesting_penalty`
+
+```rust
+fn set_vesting_penalty(
+    env: Env,
+    vault_id: u64,
+    caller: Address,           // must be vault owner
+    penalty_bps: u32,          // 1–10000 (e.g. 500 = 5%)
+    grace_period_seconds: u64, // seconds after unlock before penalty applies
+) -> Result<(), ContractError>
+```
+
+### `get_vesting_penalty`
+
+```rust
+fn get_vesting_penalty(env: Env, vault_id: u64) -> Option<VestingPenaltyConfig>
+```
+
+### Penalty Calculation
+
+For each claimable installment:
+- If `now > unlock_time + grace_period_seconds`, the installment is "late".
+- Late installment payout = `per_installment * (1 - penalty_bps / 10_000)`.
+- On-time installments receive the full `per_installment` amount.
+
+Example: 5% penalty, no grace period, 3 late installments of 100 each:
+- Full payout would be 300.
+- Penalized payout: 300 - 15 = 285.
+
 ## Events
 
 | Topic | Data | Emitted when |

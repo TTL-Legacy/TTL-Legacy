@@ -38,7 +38,6 @@ use types::{
     DELEGATE_CHECKIN_TOPIC, REVOKE_DELEGATE_TOPIC, CHECKIN_POW_TOPIC, TTL_PREDICTED_TOPIC,
     BATCH_CHECKIN_TOPIC,
     STATE_TRANSITION_TOPIC, OWNERSHIP_PROOF_TOPIC, INTEGRITY_TOPIC, BATCH_STATUS_TOPIC,
-    ProofOfLifeEntry, ReleaseVoteEntry,
     PROOF_OF_LIFE_TOPIC, RELEASE_VOTE_TOPIC, RELEASE_VOTE_PASSED_TOPIC,
     HibernationEntry,
     HIBERNATION_ENTERED_TOPIC, HIBERNATION_EXITED_TOPIC,
@@ -757,12 +756,9 @@ impl TtlVaultContract {
             }
         }
 
-        if let Some(expiry) = Self::get_passkey_expiry(env.clone(), vault_id, passkey_hash.clone()) {
-            if now > expiry {
-                return Err(ContractError::InvalidPasskey);
-            }
-        }
-        
+        // Issue #549: enforce passkey registration and expiry.
+        Self::validate_passkey_for_checkin(&env, vault_id, &vault, &passkey_hash, now)?;
+
         vault.last_check_in = now;
         
         // Inactivity penalty: deduct per missed check-in interval
@@ -2116,6 +2112,255 @@ impl TtlVaultContract {
         env.storage().persistent().get(&DataKey::VestingSchedule(vault_id))
     }
 
+    /// Sets a late-claim penalty for a vault's vesting schedule.
+    ///
+    /// If a beneficiary claims an installment more than `grace_period_seconds` after
+    /// it unlocked, the payout is reduced by `penalty_bps` basis points (e.g. 500 = 5%).
+    ///
+    /// # Arguments
+    /// * `vault_id`             - The vault with an attached vesting schedule
+    /// * `caller`               - Must be the vault owner
+    /// * `penalty_bps`          - Penalty in basis points (1–10000)
+    /// * `grace_period_seconds` - Seconds after unlock before the penalty applies
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`         - Caller is not the vault owner
+    /// * `ContractError::VestingNotFound`  - No vesting schedule exists
+    /// * `ContractError::InvalidBps`       - penalty_bps is 0 or > 10000
+    pub fn set_vesting_penalty(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        penalty_bps: u32,
+        grace_period_seconds: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if !env.storage().persistent().has(&DataKey::VestingSchedule(vault_id)) {
+            return Err(ContractError::VestingNotFound);
+        }
+        if penalty_bps == 0 || penalty_bps > 10_000 {
+            return Err(ContractError::InvalidBps);
+        }
+        let config = VestingPenaltyConfig { penalty_bps, grace_period_seconds };
+        let key = DataKey::VestingPenalty(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &config);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((VESTING_PENALTY_TOPIC, vault_id), (penalty_bps, grace_period_seconds));
+        Ok(())
+    }
+
+    /// Returns the vesting penalty config for a vault, if one has been set.
+    pub fn get_vesting_penalty(env: Env, vault_id: u64) -> Option<VestingPenaltyConfig> {
+        env.storage().persistent().get(&DataKey::VestingPenalty(vault_id))
+    }
+
+    // --- Issue #548: Vesting Reversal ---
+
+    /// Initiates a reversible vesting claim, holding tokens in escrow for a grace period.
+    ///
+    /// Unlike `claim_vested_installment` (which transfers immediately), this function
+    /// calculates the claimable amount and stores a `VestingPendingClaim` record without
+    /// transferring any tokens. The vault owner may call `reverse_vesting_claim` within
+    /// `reversal_window_seconds` to cancel. After the window, anyone may call
+    /// `finalize_vesting_claim` to complete the transfer.
+    ///
+    /// Only one pending claim may exist per vault at a time; subsequent calls fail until
+    /// the pending claim is finalized or reversed.
+    ///
+    /// # Arguments
+    /// * `vault_id`               - The released vault with a vesting schedule
+    /// * `reversal_window_seconds`- Grace period in seconds (must be > 0)
+    ///
+    /// # Returns
+    /// The escrowed amount (not yet transferred).
+    ///
+    /// # Errors
+    /// * `ContractError::Paused`              - Contract is paused
+    /// * `ContractError::VestingNotFound`     - No schedule on this vault
+    /// * `ContractError::NothingToClaimYet`   - No installments available
+    /// * `ContractError::VestingAlreadyComplete` - All installments claimed
+    /// * `ContractError::InvalidInterval`     - reversal_window_seconds is 0
+    /// * `ContractError::InvalidAmount`       - A pending claim already exists
+    pub fn initiate_vesting_claim(
+        env: Env,
+        vault_id: u64,
+        reversal_window_seconds: u64,
+    ) -> Result<i128, ContractError> {
+        Self::assert_not_paused(&env);
+        if reversal_window_seconds == 0 {
+            return Err(ContractError::InvalidInterval);
+        }
+        // Block if a pending claim already exists.
+        if env.storage().persistent().has(&DataKey::VestingPendingClaim(vault_id)) {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Released {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let mut schedule: VestingSchedule = env
+            .storage().persistent()
+            .get(&DataKey::VestingSchedule(vault_id))
+            .ok_or(ContractError::VestingNotFound)?;
+
+        if schedule.claimed_installments >= schedule.num_installments {
+            return Err(ContractError::VestingAlreadyComplete);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < schedule.start_time {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        let elapsed = now - schedule.start_time;
+        let unlocked = ((elapsed / schedule.interval) + 1)
+            .min(schedule.num_installments as u64) as u32;
+        let claimable = unlocked.saturating_sub(schedule.claimed_installments);
+        if claimable == 0 {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        let per_installment = schedule.total_amount / schedule.num_installments as i128;
+        let amount = if unlocked >= schedule.num_installments {
+            vault.balance
+        } else {
+            per_installment * claimable as i128
+        };
+
+        let beneficiary = if vault.beneficiaries.is_empty() {
+            vault.beneficiary.clone()
+        } else {
+            vault.beneficiaries.get(0).unwrap().address.clone()
+        };
+
+        let prev_installments_claimed = schedule.claimed_installments;
+
+        // Advance the schedule counter so a second call is blocked until this claim
+        // is finalized or reversed.
+        schedule.claimed_installments = unlocked;
+        let sched_key = DataKey::VestingSchedule(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage().persistent().extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+
+        let pending = VestingPendingClaim {
+            amount,
+            beneficiary,
+            initiated_at: now,
+            reversal_deadline: now + reversal_window_seconds,
+            new_installments_claimed: unlocked,
+            prev_installments_claimed,
+        };
+        let pk = DataKey::VestingPendingClaim(vault_id);
+        env.storage().persistent().set(&pk, &pending);
+        env.storage().persistent().extend_ttl(&pk, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(amount)
+    }
+
+    /// Reverses a pending vesting claim within the reversal window.
+    ///
+    /// Only the vault owner may call this. The pending claim record is cleared and
+    /// the schedule counter is rolled back so the installments become claimable again.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`            - Caller is not the vault owner
+    /// * `ContractError::VestingReversalNotFound` - No pending claim on this vault
+    /// * `ContractError::VestingReversalExpired`  - Reversal window has closed
+    pub fn reverse_vesting_claim(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let pk = DataKey::VestingPendingClaim(vault_id);
+        let pending: VestingPendingClaim = env
+            .storage().persistent()
+            .get(&pk)
+            .ok_or(ContractError::VestingReversalNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now > pending.reversal_deadline {
+            return Err(ContractError::VestingReversalExpired);
+        }
+
+        // Roll back the schedule counter so these installments can be claimed again.
+        let sched_key = DataKey::VestingSchedule(vault_id);
+        if let Some(mut schedule) = env.storage().persistent()
+            .get::<DataKey, VestingSchedule>(&sched_key)
+        {
+            schedule.claimed_installments = pending.prev_installments_claimed;
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&sched_key, &schedule);
+            env.storage().persistent().extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+        }
+
+        env.storage().persistent().remove(&pk);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((VESTING_REVERSED_TOPIC, vault_id), pending.amount);
+        Ok(())
+    }
+
+    /// Finalizes a pending vesting claim after the reversal window has closed.
+    ///
+    /// Anyone may call this. Transfers the escrowed amount to the beneficiary and
+    /// clears the pending claim record.
+    ///
+    /// # Errors
+    /// * `ContractError::VestingReversalNotFound` - No pending claim on this vault
+    /// * `ContractError::InvalidInterval`         - Reversal window has not yet closed
+    pub fn finalize_vesting_claim(env: Env, vault_id: u64) -> Result<i128, ContractError> {
+        Self::assert_not_paused(&env);
+
+        let pk = DataKey::VestingPendingClaim(vault_id);
+        let pending: VestingPendingClaim = env
+            .storage().persistent()
+            .get(&pk)
+            .ok_or(ContractError::VestingReversalNotFound)?;
+
+        let now = env.ledger().timestamp();
+        if now <= pending.reversal_deadline {
+            return Err(ContractError::InvalidInterval);
+        }
+
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.balance < pending.amount {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        let token_client = token::Client::new(&env, &vault.token_address);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &pending.beneficiary,
+            &pending.amount,
+        );
+
+        vault.balance -= pending.amount;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().persistent().remove(&pk);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((VESTING_FINALIZED_TOPIC, vault_id), pending.amount);
+        Ok(pending.amount)
+    }
+
+    /// Returns the pending vesting claim for a vault, if one exists.
+    pub fn get_pending_vesting_claim(env: Env, vault_id: u64) -> Option<VestingPendingClaim> {
+        env.storage().persistent().get(&DataKey::VestingPendingClaim(vault_id))
+    }
+
     /// Claims all vested installments that have become available since the last claim.
     ///
     /// The vault must have been released (trigger_release called) and a vesting schedule
@@ -2184,11 +2429,44 @@ impl TtlVaultContract {
         // Calculate payout: each installment = total / num_installments,
         // last installment absorbs remainder.
         let per_installment = schedule.total_amount / schedule.num_installments as i128;
-        let amount = if unlocked >= schedule.num_installments {
-            // Final batch: pay out everything remaining in the vault
+        let base_amount = if unlocked >= schedule.num_installments {
             vault.balance
         } else {
             per_installment * claimable as i128
+        };
+
+        // Issue #547: apply late-claim penalty to installments claimed after grace period.
+        let amount = if let Some(penalty_cfg) = env.storage().persistent()
+            .get::<DataKey, VestingPenaltyConfig>(&DataKey::VestingPenalty(vault_id))
+        {
+            // Count how many of the claimable installments are "late".
+            // Installment i (1-based) unlocks at start_time + (i-1)*interval.
+            let late_cutoff = now.saturating_sub(penalty_cfg.grace_period_seconds);
+            let mut late_count = 0u32;
+            for i in (schedule.claimed_installments + 1)..=unlocked {
+                let unlock_time = schedule.start_time
+                    .saturating_add((i as u64 - 1).saturating_mul(schedule.interval));
+                if unlock_time < late_cutoff {
+                    late_count += 1;
+                }
+            }
+            if late_count > 0 {
+                let on_time_count = claimable.saturating_sub(late_count);
+                let on_time_amount = per_installment * on_time_count as i128;
+                let late_amount = per_installment * late_count as i128;
+                let penalty = late_amount * penalty_cfg.penalty_bps as i128 / 10_000;
+                let penalized = on_time_amount + late_amount - penalty;
+                // For the final batch keep vault.balance as ceiling to avoid dust mismatch.
+                if unlocked >= schedule.num_installments {
+                    penalized.min(vault.balance)
+                } else {
+                    penalized
+                }
+            } else {
+                base_amount
+            }
+        } else {
+            base_amount
         };
 
         if vault.balance < amount {
@@ -2226,6 +2504,14 @@ impl TtlVaultContract {
         vault.balance -= amount;
         schedule.claimed_installments = unlocked;
         Self::save_vault(&env, vault_id, &vault);
+
+        // Emit penalty event if the payout was reduced.
+        if amount < base_amount {
+            env.events().publish(
+                (VESTING_PENALTY_TOPIC, vault_id),
+                (base_amount - amount, amount),
+            );
+        }
 
         let sched_key = DataKey::VestingSchedule(vault_id);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
@@ -3551,12 +3837,6 @@ impl TtlVaultContract {
         env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
     }
 
-    /// Stub: records check-in timestamp for adaptive interval logic.
-    fn record_check_in_history(_env: &Env, _vault_id: u64, _timestamp: u64) {}
-
-    /// Stub: updates check-in streak counter.
-    fn update_check_in_streak(_env: &Env, _vault_id: u64, _vault: &Vault, _now: u64) {}
-
     /// Returns the vault activity log (alias for get_vault_audit_log).
     pub fn get_vault_activity_log(env: Env, vault_id: u64) -> Vec<AuditEntry> {
         Self::get_vault_audit_log(env, vault_id)
@@ -4072,21 +4352,191 @@ impl TtlVaultContract {
         }
     }
 
+    // --- Issue #550: Passkey Compromise Detection ---
+
+    /// Reports a passkey as compromised. Subsequent check-ins using that hash
+    /// will be rejected with `PasskeyCompromised`.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - Caller is not the vault owner
+    pub fn report_passkey_compromise(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let key = DataKey::CompromisedPasskeys(vault_id);
+        let mut set: Vec<BytesN<32>> = env
+            .storage().persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        // Idempotent — don't add duplicates.
+        if !set.iter().any(|h| h == passkey_hash) {
+            set.push_back(passkey_hash.clone());
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&key, &set);
+            env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        }
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((PASSKEY_COMPROMISED_TOPIC, vault_id), passkey_hash);
+        Ok(())
+    }
+
+    /// Clears a previously reported passkey compromise, allowing the passkey to be used again.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - Caller is not the vault owner
+    pub fn clear_passkey_compromise(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let key = DataKey::CompromisedPasskeys(vault_id);
+        let set: Vec<BytesN<32>> = env
+            .storage().persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut new_set: Vec<BytesN<32>> = Vec::new(&env);
+        for h in set.iter() {
+            if h != passkey_hash {
+                new_set.push_back(h);
+            }
+        }
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &new_set);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Returns whether a passkey has been flagged as compromised for a vault.
+    pub fn is_passkey_compromised(env: Env, vault_id: u64, passkey_hash: BytesN<32>) -> bool {
+        let key = DataKey::CompromisedPasskeys(vault_id);
+        let set: Vec<BytesN<32>> = env
+            .storage().persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        set.iter().any(|h| h == passkey_hash)
+    }
+
+    /// Inspects the recent passkey usage log and emits a `pk_comp` advisory event
+    /// if 3 or more of the last 5 entries used different passkey hashes.
+    fn detect_passkey_anomaly(env: &Env, vault_id: u64, current_hash: &BytesN<32>) {
+        let usage: Vec<PasskeyUsageEntry> = env
+            .storage().persistent()
+            .get(&DataKey::PasskeyUsage(vault_id))
+            .unwrap_or_else(|| Vec::new(env));
+        if usage.len() < 3 {
+            return;
+        }
+        let window_start = usage.len().saturating_sub(5);
+        let mut distinct = 0u32;
+        let mut prev: Option<BytesN<32>> = None;
+        for i in window_start..usage.len() {
+            let entry = usage.get(i as u32).unwrap();
+            if prev.as_ref() != Some(&entry.passkey_hash) {
+                distinct += 1;
+                prev = Some(entry.passkey_hash.clone());
+            }
+        }
+        if distinct >= 3 {
+            env.events().publish((PASSKEY_COMPROMISED_TOPIC, vault_id), current_hash.clone());
+        }
+    }
+
+    // --- Issue #549: Passkey Expiry Enforcement ---
+
+    /// Validates that `passkey_hash` is registered for `vault_id` and not expired.
+    ///
+    /// Registration rules (backwards-compatible):
+    /// - If `VaultPasskeys` list is non-empty, the hash must appear in that list.
+    /// - If the list is empty AND `vault.passkey_hash` is Some, the hash must match it.
+    /// - If both are empty/None, any passkey is accepted (no passkey configured yet).
+    ///
+    /// Expiry: if `PasskeyExpiry` is stored for this hash, it must not be in the past.
+    fn validate_passkey_for_checkin(
+        env: &Env,
+        vault_id: u64,
+        vault: &Vault,
+        passkey_hash: &BytesN<32>,
+        now: u64,
+    ) -> Result<(), ContractError> {
+        let pk_key = DataKey::VaultPasskeys(vault_id);
+        let passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&pk_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        if !passkeys.is_empty() {
+            // Multi-passkey list is configured — hash must be in it.
+            let registered = passkeys.iter().any(|p| &p.hash == passkey_hash);
+            if !registered {
+                return Err(ContractError::InvalidPasskey);
+            }
+        } else if let Some(ref primary) = vault.passkey_hash {
+            // Fallback: single primary passkey on vault struct.
+            if primary != passkey_hash {
+                return Err(ContractError::InvalidPasskey);
+            }
+        }
+        // else: no passkey configured — any hash accepted for backwards compat.
+
+        // Issue #550: block check-in if passkey is flagged as compromised.
+        {
+            let comp_key = DataKey::CompromisedPasskeys(vault_id);
+            let compromised: Vec<BytesN<32>> = env
+                .storage().persistent()
+                .get(&comp_key)
+                .unwrap_or_else(|| Vec::new(env));
+            if compromised.iter().any(|h| &h == passkey_hash) {
+                env.events().publish((PASSKEY_COMPROMISED_TOPIC, vault_id), passkey_hash.clone());
+                return Err(ContractError::PasskeyCompromised);
+            }
+        }
+
+        // Expiry check — applies regardless of registration path.
+        if let Some(expiry) = env.storage().persistent()
+            .get::<DataKey, u64>(&DataKey::PasskeyExpiry(vault_id, passkey_hash.clone()))
+        {
+            if now > expiry {
+                env.events().publish((PASSKEY_EXPIRED_TOPIC, vault_id), passkey_hash.clone());
+                return Err(ContractError::PasskeyExpired);
+            }
+        }
+
+        Ok(())
+    }
+
     // --- Issue #395: Passkey Usage Analytics ---
 
-    /// Logs a passkey usage entry for a vault check-in
+    /// Logs a passkey usage entry for a vault check-in and runs anomaly detection.
     fn log_passkey_usage(env: &Env, vault_id: u64, passkey_hash: &BytesN<32>, timestamp: u64) {
         let mut usage: Vec<PasskeyUsageEntry> = env
             .storage()
             .persistent()
             .get(&DataKey::PasskeyUsage(vault_id))
             .unwrap_or(Vec::new(env));
-        
+
+        // Issue #550: detect anomalous passkey switching before appending this entry.
+        Self::detect_passkey_anomaly(env, vault_id, passkey_hash);
+
         usage.push_back(PasskeyUsageEntry {
             passkey_hash: passkey_hash.clone(),
             timestamp,
         });
-        
+
         let key = DataKey::PasskeyUsage(vault_id);
         env.storage().persistent().set(&key, &usage);
         let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
@@ -4843,6 +5293,18 @@ impl TtlVaultContract {
                 v.push_back(vault.beneficiary);
                 v
             })
+    }
+
+    /// Returns the current active delegate (last in the chain) or None if no delegation.
+    fn get_delegated_beneficiary(env: Env, vault_id: u64) -> Option<Address> {
+        let chain: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BeneficiaryDelegationChain(vault_id))?;
+        if chain.len() <= 1 {
+            return None;
+        }
+        chain.get(chain.len() - 1)
     }
 
     // --- Issue #402: Withdrawal Scheduling ---
@@ -6081,12 +6543,9 @@ impl TtlVaultContract {
             if vault.status != ReleaseStatus::Locked {
                 return Err(ContractError::AlreadyReleased);
             }
-            // Passkey expiry check
-            if let Some(expiry) = Self::get_passkey_expiry(env.clone(), vault_id, passkey_hash.clone()) {
-                if now > expiry {
-                    return Err(ContractError::InvalidPasskey);
-                }
-            }
+            // Issue #549: enforce passkey registration and expiry.
+            let vault_inner = Self::load_vault(&env, vault_id);
+            Self::validate_passkey_for_checkin(&env, vault_id, &vault_inner, &passkey_hash, now)?;
             // TTL cap check
             let deadline = now + vault.check_in_interval;
             let max_deadline = now + max_ttl;
@@ -6196,12 +6655,8 @@ impl TtlVaultContract {
 
         let now = env.ledger().timestamp();
 
-        // Passkey expiry check
-        if let Some(expiry) = Self::get_passkey_expiry(env.clone(), vault_id, passkey_hash.clone()) {
-            if now > expiry {
-                return Err(ContractError::InvalidPasskey);
-            }
-        }
+        // Issue #549: enforce passkey registration and expiry.
+        Self::validate_passkey_for_checkin(&env, vault_id, &vault, &passkey_hash, now)?;
 
         // Proof-of-work: hash(vault_id || last_check_in || nonce) must have `difficulty` leading zero bits
         let difficulty = difficulty.min(20); // cap at 20 bits

@@ -94,11 +94,15 @@ pub const RELEASE_VOTE_PASSED_TOPIC: Symbol = symbol_short!("vote_ok");
 pub const HIBERNATION_ENTERED_TOPIC: Symbol = symbol_short!("hib_ent");
 pub const HIBERNATION_EXITED_TOPIC: Symbol = symbol_short!("hib_ext");
 
-// Previously missing — used by lib.rs internal helpers
-pub const STATE_TRANSITION_TOPIC: Symbol = symbol_short!("st_trans");
-pub const OWNERSHIP_PROOF_TOPIC: Symbol = symbol_short!("own_prf");
-pub const INTEGRITY_TOPIC: Symbol = symbol_short!("integ");
-pub const BATCH_STATUS_TOPIC: Symbol = symbol_short!("bat_stat");
+// Issue #547: vesting penalty applied
+pub const VESTING_PENALTY_TOPIC: Symbol = symbol_short!("vest_pen");
+// Issue #548: vesting claim reversed / finalized
+pub const VESTING_REVERSED_TOPIC: Symbol = symbol_short!("vest_rev");
+pub const VESTING_FINALIZED_TOPIC: Symbol = symbol_short!("vest_fin");
+// Issue #549: passkey expired during check-in
+pub const PASSKEY_EXPIRED_TOPIC: Symbol = symbol_short!("pk_expd");
+// Issue #550: passkey compromise detected or reported
+pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
 
 // Issue: TTL Borrowing
 pub const TTL_BORROW_TOPIC: Symbol = symbol_short!("ttl_bor");

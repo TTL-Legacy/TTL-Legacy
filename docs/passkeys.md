@@ -67,3 +67,82 @@ is_valid_biometric(vault_id: u64, credential_hash: BytesN<32>) -> bool
 - Biometric check-in respects contract and vault pause state
 - Raw biometric data is never stored on-chain — only the hash commitment
 - Check-in on a Released vault is rejected with `AlreadyReleased`
+
+## Passkey Expiry Enforcement (Issue #549)
+
+Every call to `check_in`, `check_in_with_pow`, and `batch_check_in_v2` now
+enforces two sequential validations before updating `last_check_in`:
+
+### 1. Registration Check
+
+| Passkey state | Behaviour |
+|---|---|
+| `VaultPasskeys` list non-empty | Hash **must** appear in the list; otherwise `InvalidPasskey` |
+| List empty, `vault.passkey_hash` is `Some` | Hash **must** match the primary passkey; otherwise `InvalidPasskey` |
+| Both empty/None | Any hash accepted (no passkey configured — backwards compatible) |
+
+### 2. Expiry Check
+
+If `extend_passkey_expiry` was previously called for this hash, the stored expiry
+timestamp is compared with the current ledger time.  If `now > expiry`:
+
+- A `pk_expd` event is emitted with the passkey hash.
+- The call returns `PasskeyExpired` (error code 59) — distinct from `InvalidPasskey`.
+
+### Errors
+
+| Code | Name | Meaning |
+|------|------|---------|
+| 26 | `InvalidPasskey` | Passkey not registered for this vault |
+| 59 | `PasskeyExpired`  | Passkey registration has expired |
+
+## Passkey Compromise Detection (Issue #550)
+
+See the dedicated compromise detection section below.
+
+### `report_passkey_compromise`
+
+```rust
+fn report_passkey_compromise(
+    env: Env,
+    vault_id: u64,
+    caller: Address,    // must be vault owner
+    passkey_hash: BytesN<32>,
+) -> Result<(), ContractError>
+```
+
+Manually flags a passkey as compromised. Subsequent `check_in` calls using that
+hash return `PasskeyCompromised` (error 62).
+
+### `clear_passkey_compromise`
+
+```rust
+fn clear_passkey_compromise(
+    env: Env,
+    vault_id: u64,
+    caller: Address,    // must be vault owner
+    passkey_hash: BytesN<32>,
+) -> Result<(), ContractError>
+```
+
+Removes the compromise flag, allowing the passkey to be used again.
+
+### `is_passkey_compromised`
+
+```rust
+fn is_passkey_compromised(env: Env, vault_id: u64, passkey_hash: BytesN<32>) -> bool
+```
+
+### Automatic Detection
+
+During every `check_in`, the contract inspects the last 5 passkey usage entries.
+If 3 or more **consecutive** entries used **different** passkey hashes, a
+`pk_comp` event is emitted as an advisory alert (the check-in is not blocked).
+Owners should monitor for this event and rotate or revoke suspected passkeys.
+
+### Events
+
+| Topic | Data | Emitted when |
+|---|---|---|
+| `pk_expd` | `passkey_hash` | Expired passkey used in check-in |
+| `pk_comp` | `(vault_id, passkey_hash)` | Compromise detected or reported |
