@@ -107,6 +107,23 @@ pub const TTL_ACCELERATE_TOPIC: Symbol = symbol_short!("ttl_acc");
 // Issue: Geographic Check-in Tracking
 pub const CHECKIN_GEO_TOPIC: Symbol = symbol_short!("ci_geo");
 
+// Issue #494: Beneficiary Succession Planning
+pub const SUCCESSION_SET_TOPIC: Symbol = symbol_short!("suc_set");
+pub const SUCCESSION_ACTIVATED_TOPIC: Symbol = symbol_short!("suc_act");
+
+// Issue #495: Beneficiary Escrow
+pub const ESCROW_CREATED_TOPIC: Symbol = symbol_short!("esc_cre");
+pub const ESCROW_ACCEPTED_TOPIC: Symbol = symbol_short!("esc_acc");
+pub const ESCROW_REJECTED_TOPIC: Symbol = symbol_short!("esc_rej");
+pub const ESCROW_EXPIRED_TOPIC: Symbol = symbol_short!("esc_exp");
+
+// Issue #496: Dispute Arbitration
+pub const ARBITRATOR_SET_TOPIC: Symbol = symbol_short!("arb_set");
+pub const ARBITRATION_RULED_TOPIC: Symbol = symbol_short!("arb_rul");
+
+// Issue #497: Beneficiary Notification
+pub const VAULT_NOTIFY_TOPIC: Symbol = symbol_short!("v_notif");
+
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 

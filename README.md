@@ -131,6 +131,7 @@ The script will display the target network and identity, then require you to typ
 - [Security Policy & Vulnerability Disclosure](SECURITY.md)
 - [Roadmap](docs/roadmap.md)
 - [Vesting Schedules](docs/vesting-schedules.md)
+- [Beneficiary Advanced Features](docs/beneficiary-advanced-features.md)
 
 ## 🎓 Smart Contract API
 
