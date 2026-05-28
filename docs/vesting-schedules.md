@@ -15,22 +15,24 @@ Vesting schedules allow vault funds to be released to beneficiaries in equal ins
 let vault_id = client.create_vault(&owner, &beneficiary, &check_in_interval);
 client.deposit(&vault_id, &owner, &1_000_000_000); // 100 XLM in stroops
 
-// 2. Attach vesting schedule
-//    start_time: Unix timestamp of first claimable installment
-//    interval:   seconds between installments (1 year ≈ 31_536_000 s)
+// 2. Attach vesting schedule with a 1-year cliff
+//    start_time:       Unix timestamp of first claimable installment
+//    interval:         seconds between installments (1 year ≈ 31_536_000 s)
 //    num_installments: 4
+//    cliff_period:     seconds after start_time before any claim is allowed (1 year)
 client.set_vesting_schedule(
     &vault_id,
     &owner,
     &start_time,          // e.g. env.ledger().timestamp() + 31_536_000
     &31_536_000u64,       // 1 year in seconds
     &4u32,
+    &31_536_000u64,       // 1-year cliff
 );
 
 // 3. After vault expires, anyone triggers release (no funds move yet)
 client.trigger_release(&vault_id);
 
-// 4. Beneficiary claims each year
+// 4. Beneficiary claims each year (first claim only possible after cliff)
 client.claim_vested_installment(&vault_id); // year 1: 250 XLM
 // ... one year later ...
 client.claim_vested_installment(&vault_id); // year 2: 250 XLM
@@ -48,6 +50,7 @@ fn set_vesting_schedule(
     start_time: u64,      // Unix timestamp of first claimable installment
     interval: u64,        // seconds between installments (must be > 0)
     num_installments: u32 // total number of tranches (must be > 0)
+    cliff_period: u64,    // seconds after start_time before any claim is allowed (0 = no cliff)
 ) -> Result<(), ContractError>
 ```
 
@@ -57,6 +60,7 @@ Constraints:
 - `interval` and `num_installments` must both be > 0.
 - Vault balance must be > 0.
 - Replaces any previously set schedule (claimed_installments resets to 0).
+- `cliff_period` may be 0 (disables cliff enforcement).
 
 ### `get_vesting_schedule`
 
@@ -86,6 +90,29 @@ Errors:
 | 22 | `VestingNotFound` | No schedule attached to this vault |
 | 23 | `NothingToClaimYet` | No new installments available (before `start_time` or between windows) |
 | 24 | `VestingAlreadyComplete` | All installments have been claimed |
+| 55 | `CliffNotReached` | Current time is before `start_time + cliff_period` |
+
+## Cliff Periods
+
+A cliff period prevents any installment from being claimed until a minimum duration has elapsed since `start_time`. This is useful for enforcing a lock-up before vesting begins.
+
+- Set `cliff_period > 0` in `set_vesting_schedule` to enable.
+- Set `cliff_period = 0` to disable (default behaviour, no lock-up).
+- Attempting to claim before `start_time + cliff_period` returns `CliffNotReached` (error 55).
+- A `clif_rch` event is emitted on the **first successful claim** after the cliff (only once per schedule).
+
+### Example: 1-year cliff, then quarterly vesting
+
+```rust
+// Cliff of 1 year, then 4 quarterly installments
+client.set_vesting_schedule(
+    &vault_id, &owner,
+    &start_time,
+    &7_884_000u64,   // ~91 days per installment
+    &4u32,
+    &31_536_000u64,  // 1-year cliff
+);
+```
 
 ## Installment Calculation
 
@@ -116,5 +143,6 @@ client.claim_vested_installment(&vault_id);
 
 | Topic | Data | Emitted when |
 |-------|------|--------------|
-| `set_vest` | `(start_time, interval, num_installments, total_amount)` | Schedule attached |
+| `set_vest` | `(start_time, interval, num_installments, total_amount, cliff_period)` | Schedule attached |
 | `clm_vest` | `(beneficiary, amount, installments_unlocked)` | Installment claimed (one event per beneficiary) |
+| `clif_rch` | `(timestamp,)` | First claim after cliff period is reached (emitted once per schedule) |

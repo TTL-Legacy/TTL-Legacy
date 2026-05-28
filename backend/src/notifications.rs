@@ -5,8 +5,9 @@
 ///   NotificationStore  — in-memory stores (tokens, prefs, schedule, delivery log)
 ///   NotificationService — orchestrates scheduling + delivery
 use crate::models::{
-    DeliveryRecord, DeliveryStatus, DeviceToken, NotificationPreferences, NotificationType,
-    RegisterTokenRequest, ScheduledNotification, UpdatePreferencesRequest, Vault,
+    DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken, NotificationPreferences,
+    NotificationType, RegisterTokenRequest, ReminderDeliveryLog, ScheduledNotification,
+    UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -20,6 +21,8 @@ pub type TokenStore = Arc<Mutex<HashMap<String, Vec<DeviceToken>>>>;
 pub type PrefsStore = Arc<Mutex<HashMap<String, NotificationPreferences>>>;
 pub type ScheduleStore = Arc<Mutex<Vec<ScheduledNotification>>>;
 pub type DeliveryStore = Arc<Mutex<Vec<DeliveryRecord>>>;
+/// Keyed by notification_id.
+pub type RetryStore = Arc<Mutex<HashMap<String, ReminderDeliveryLog>>>;
 
 pub fn create_token_store() -> TokenStore {
     Arc::new(Mutex::new(HashMap::new()))
@@ -33,6 +36,12 @@ pub fn create_schedule_store() -> ScheduleStore {
 pub fn create_delivery_store() -> DeliveryStore {
     Arc::new(Mutex::new(Vec::new()))
 }
+pub fn create_retry_store() -> RetryStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Exponential backoff delays in seconds: 1 min, 5 min, 15 min, 1 hr, 6 hr.
+const RETRY_DELAYS_SECS: [u64; 5] = [60, 300, 900, 3_600, 21_600];
 
 // ── FCM HTTP v1 client ───────────────────────────────────────────────────────
 
@@ -145,6 +154,7 @@ pub struct NotificationService {
     pub prefs: PrefsStore,
     pub schedule: ScheduleStore,
     pub delivery: DeliveryStore,
+    pub retry_log: RetryStore,
 }
 
 impl NotificationService {
@@ -155,7 +165,7 @@ impl NotificationService {
         schedule: ScheduleStore,
         delivery: DeliveryStore,
     ) -> Self {
-        Self { fcm, tokens, prefs, schedule, delivery }
+        Self { fcm, tokens, prefs, schedule, delivery, retry_log: create_retry_store() }
     }
 
     // ── Token management ─────────────────────────────────────────────────────
@@ -291,11 +301,43 @@ impl NotificationService {
         }
     }
 
+    /// Retry any Retrying notifications whose next_retry_at has passed.
+    pub async fn flush_retries(&self) {
+        let now = Utc::now();
+        let due: Vec<ReminderDeliveryLog> = self
+            .retry_log
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|l| {
+                l.status == DeliveryStatus::Retrying
+                    && l.next_retry_at.map_or(false, |t| t <= now)
+            })
+            .cloned()
+            .collect();
+
+        for log in due {
+            // Reconstruct a minimal ScheduledNotification for delivery
+            let notif = {
+                let sched = self.schedule.lock().unwrap();
+                sched.iter().find(|n| n.id == log.notification_id).cloned()
+            };
+            if let Some(notif) = notif {
+                self.deliver_with_retry(&notif, log.attempts.len() as u32).await;
+            }
+        }
+    }
+
     async fn deliver(&self, notif: &ScheduledNotification) {
+        self.deliver_with_retry(notif, 0).await;
+    }
+
+    async fn deliver_with_retry(&self, notif: &ScheduledNotification, attempt: u32) {
         let tokens = self.get_tokens(&notif.owner);
         if tokens.is_empty() {
             self.record(notif, DeliveryStatus::Failed, "no_tokens_registered");
             self.mark_sent(&notif.id, DeliveryStatus::Failed);
+            self.update_retry_log(notif, attempt, DeliveryStatus::Failed, "no_tokens_registered");
             return;
         }
 
@@ -316,11 +358,70 @@ impl NotificationService {
             }
         }
 
-        let final_status = if any_ok { DeliveryStatus::Sent } else { DeliveryStatus::Failed };
-        if !any_ok {
-            self.record(notif, DeliveryStatus::Failed, &last_err);
+        if any_ok {
+            self.mark_sent(&notif.id, DeliveryStatus::Sent);
+            self.update_retry_log(notif, attempt, DeliveryStatus::Sent, "");
+        } else {
+            let next_attempt = attempt + 1;
+            if (next_attempt as usize) < RETRY_DELAYS_SECS.len() {
+                // Schedule next retry
+                let delay = RETRY_DELAYS_SECS[next_attempt as usize];
+                let next_at = Utc::now() + chrono::Duration::seconds(delay as i64);
+                self.record(notif, DeliveryStatus::Retrying, &last_err);
+                self.mark_sent(&notif.id, DeliveryStatus::Retrying);
+                self.update_retry_log_with_next(notif, attempt, DeliveryStatus::Retrying, &last_err, Some(next_at));
+            } else {
+                // All retries exhausted
+                self.record(notif, DeliveryStatus::Failed, &last_err);
+                self.mark_sent(&notif.id, DeliveryStatus::Failed);
+                self.update_retry_log(notif, attempt, DeliveryStatus::Failed, &last_err);
+                log::error!(
+                    "[ALERT] Reminder delivery permanently failed after {} attempts: vault={} owner={} error={}",
+                    next_attempt, notif.vault_id, notif.owner, last_err
+                );
+            }
         }
-        self.mark_sent(&notif.id, final_status);
+    }
+
+    fn update_retry_log(&self, notif: &ScheduledNotification, attempt: u32, status: DeliveryStatus, error: &str) {
+        self.update_retry_log_with_next(notif, attempt, status, error, None);
+    }
+
+    fn update_retry_log_with_next(
+        &self,
+        notif: &ScheduledNotification,
+        attempt: u32,
+        status: DeliveryStatus,
+        error: &str,
+        next_retry_at: Option<chrono::DateTime<Utc>>,
+    ) {
+        let mut store = self.retry_log.lock().unwrap();
+        let entry = store.entry(notif.id.clone()).or_insert_with(|| ReminderDeliveryLog {
+            notification_id: notif.id.clone(),
+            vault_id: notif.vault_id.clone(),
+            owner: notif.owner.clone(),
+            status: DeliveryStatus::Pending,
+            attempts: Vec::new(),
+            next_retry_at: None,
+        });
+        entry.attempts.push(DeliveryAttempt {
+            attempt,
+            attempted_at: Utc::now(),
+            error: error.to_string(),
+        });
+        entry.status = status;
+        entry.next_retry_at = next_retry_at;
+    }
+
+    /// Returns the current delivery status for a vault's most recent reminder.
+    pub fn get_reminder_delivery_status(&self, vault_id: &str) -> Option<ReminderDeliveryLog> {
+        self.retry_log
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|l| l.vault_id == vault_id)
+            .max_by_key(|l| l.attempts.last().map(|a| a.attempted_at))
+            .cloned()
     }
 
     fn record(&self, notif: &ScheduledNotification, status: DeliveryStatus, response: &str) {
@@ -355,13 +456,14 @@ impl NotificationService {
 
 // ── Background scheduler loop ────────────────────────────────────────────────
 
-/// Spawns a tokio task that flushes pending notifications every `interval_secs`.
+/// Spawns a tokio task that flushes pending notifications and retries every `interval_secs`.
 pub fn start_scheduler(service: Arc<NotificationService>, interval_secs: u64) {
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(interval_secs);
         loop {
             tokio::time::sleep(interval).await;
             service.flush_pending().await;
+            service.flush_retries().await;
         }
     });
 }
@@ -589,5 +691,60 @@ mod tests {
         assert!(title.contains("Released"));
         assert!(body.contains("beneficiary"));
         assert_eq!(data["type"], "vault_released");
+    }
+
+    // Retry logic
+
+    #[tokio::test]
+    async fn no_tokens_sets_retry_log_to_failed() {
+        let svc = make_service();
+        svc.schedule_immediate("v1", "owner1", NotificationType::CheckInReminder);
+        svc.flush_pending().await;
+        let status = svc.get_reminder_delivery_status("v1").unwrap();
+        assert_eq!(status.status, DeliveryStatus::Failed);
+        assert_eq!(status.attempts.len(), 1);
+        assert_eq!(status.attempts[0].attempt, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_log_records_attempt_count() {
+        let svc = make_service();
+        svc.schedule_immediate("v1", "owner1", NotificationType::CheckInReminder);
+        // First flush: attempt 0 → no tokens → Failed (no retries possible without tokens)
+        svc.flush_pending().await;
+        let log = svc.get_reminder_delivery_status("v1").unwrap();
+        assert_eq!(log.attempts.len(), 1);
+        assert_eq!(log.attempts[0].error, "no_tokens_registered");
+    }
+
+    #[tokio::test]
+    async fn get_reminder_delivery_status_returns_none_for_unknown_vault() {
+        let svc = make_service();
+        assert!(svc.get_reminder_delivery_status("unknown-vault").is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_log_vault_id_matches() {
+        let svc = make_service();
+        svc.schedule_immediate("vault-xyz", "owner1", NotificationType::CheckInReminder);
+        svc.flush_pending().await;
+        let log = svc.get_reminder_delivery_status("vault-xyz").unwrap();
+        assert_eq!(log.vault_id, "vault-xyz");
+        assert_eq!(log.owner, "owner1");
+    }
+
+    #[test]
+    fn retry_delays_are_ascending() {
+        let delays = RETRY_DELAYS_SECS;
+        for i in 1..delays.len() {
+            assert!(delays[i] > delays[i - 1], "delay[{i}] should be > delay[{}]", i - 1);
+        }
+        assert_eq!(delays.len(), 5);
+    }
+
+    #[test]
+    fn retry_delays_match_spec() {
+        // 1 min, 5 min, 15 min, 1 hr, 6 hr
+        assert_eq!(RETRY_DELAYS_SECS, [60, 300, 900, 3_600, 21_600]);
     }
 }

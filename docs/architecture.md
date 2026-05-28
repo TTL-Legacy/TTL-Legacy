@@ -16,6 +16,22 @@ Passkey-based authentication, vault dashboard, check-in interface.
 
 Encrypted reminders, TTL monitoring, event indexing.
 
+#### Reminder Retry Policy
+
+The reminder service uses exponential backoff for failed deliveries. Each notification tracks a `ReminderDeliveryLog` with per-attempt records and a `DeliveryStatus` of `Pending | Sent | Failed | Retrying`.
+
+Retry schedule after a failed attempt:
+
+| Attempt | Delay   |
+|---------|---------|
+| 1       | 1 min   |
+| 2       | 5 min   |
+| 3       | 15 min  |
+| 4       | 1 hour  |
+| 5       | 6 hours |
+
+After all 5 retries are exhausted the status is set to `Failed` and an `[ALERT]` log line is emitted for external monitoring. The background scheduler calls `flush_retries()` on every tick alongside `flush_pending()`.
+
 ## Data Flow
 
 ```

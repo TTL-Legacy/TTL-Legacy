@@ -20,6 +20,27 @@ pub enum DeliveryStatus {
     Pending,
     Sent,
     Failed,
+    Retrying,
+}
+
+/// A single attempt entry within a reminder delivery log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryAttempt {
+    pub attempt: u32,
+    pub attempted_at: DateTime<Utc>,
+    pub error: String,
+}
+
+/// Per-notification retry log stored by notification ID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderDeliveryLog {
+    pub notification_id: String,
+    pub vault_id: String,
+    pub owner: String,
+    pub status: DeliveryStatus,
+    pub attempts: Vec<DeliveryAttempt>,
+    /// When the next retry should fire (None if not retrying).
+    pub next_retry_at: Option<DateTime<Utc>>,
 }
 
 /// A registered device push token.

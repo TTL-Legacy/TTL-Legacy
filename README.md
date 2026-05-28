@@ -127,6 +127,7 @@ The script will display the target network and identity, then require you to typ
 
 - [Architecture Overview](docs/architecture.md)
 - [TTL & State Archival Logic](docs/ttl-logic.md)
+- [Vault Hibernation](docs/hibernation.md)
 - [Passkey Integration](docs/passkeys.md)
 - [Beneficiary Conditional Acceptance](docs/beneficiary-conditional-acceptance.md)
 - [Beneficiary Conflict Resolution](docs/beneficiary-conflict-resolution.md)
@@ -134,6 +135,7 @@ The script will display the target network and identity, then require you to typ
 - [Security Policy & Vulnerability Disclosure](SECURITY.md)
 - [Roadmap](docs/roadmap.md)
 - [Vesting Schedules](docs/vesting-schedules.md)
+- [Beneficiary Advanced Features](docs/beneficiary-advanced-features.md)
 
 ## 🎓 Smart Contract API
 
@@ -160,6 +162,14 @@ update_beneficiary(vault_id: u64, new_beneficiary: Address)
 trigger_release(vault_id: u64)
 is_expired(vault_id: u64) -> bool
 get_release_status(vault_id: u64) -> ReleaseStatus
+```
+
+### Hibernation
+
+```rust
+enter_hibernation(vault_id: u64, caller: Address, duration_seconds: u64)
+exit_hibernation(vault_id: u64, caller: Address)
+get_hibernation(vault_id: u64) -> Option<HibernationEntry>
 ```
 
 ## 🧪 Testing
