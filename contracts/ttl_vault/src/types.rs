@@ -84,6 +84,8 @@ pub const PROOF_OF_LIFE_TOPIC: Symbol = symbol_short!("pol_sub");
 // Issue #499: beneficiary voting
 pub const RELEASE_VOTE_TOPIC: Symbol = symbol_short!("rel_vote");
 pub const RELEASE_VOTE_PASSED_TOPIC: Symbol = symbol_short!("vote_ok");
+// Duplicate vault detection
+pub const DUPLICATE_VAULT_TOPIC: Symbol = symbol_short!("dup_vlt");
 
 // Previously missing — used by lib.rs internal helpers
 pub const STATE_TRANSITION_TOPIC: Symbol = symbol_short!("st_trans");
@@ -180,6 +182,8 @@ pub enum DataKey {
     // Issue #499: beneficiary release votes
     ReleaseVotes(u64),
     ReleaseVoteThreshold(u64),
+    // Duplicate vault fingerprint: hash of (owner, beneficiary, check_in_interval)
+    VaultFingerprint(BytesN<32>),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482

@@ -4082,3 +4082,71 @@ fn test_get_release_votes_empty_by_default() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
     assert_eq!(client.get_release_votes(&id).len(), 0);
 }
+
+// ── Duplicate vault detection ─────────────────────────────────────────────────
+
+#[test]
+fn test_duplicate_vault_same_params_rejected() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let err = client.try_create_vault(&owner, &beneficiary, &3600u64, &None).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // DuplicateVault
+}
+
+#[test]
+fn test_different_interval_is_not_duplicate() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.create_vault(&owner, &beneficiary, &7200u64, &None);
+}
+
+#[test]
+fn test_different_beneficiary_is_not_duplicate() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let other_ben = Address::generate(&env);
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.create_vault(&owner, &other_ben, &3600u64, &None);
+}
+
+#[test]
+fn test_different_owner_is_not_duplicate() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let other_owner = Address::generate(&env);
+    let token_address = client.get_contract_token();
+    StellarAssetClient::new(&env, &token_address).mint(&other_owner, &1_000_000);
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.create_vault(&other_owner, &beneficiary, &3600u64, &None);
+}
+
+#[test]
+fn test_duplicate_allowed_after_cancel() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.cancel_vault(&id, &owner).unwrap();
+    // Fingerprint removed — same params should succeed now
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+}
+
+#[test]
+fn test_duplicate_vault_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let _ = client.try_create_vault(&owner, &beneficiary, &3600u64, &None);
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.try_into_val(&env).unwrap_or_else(|_| soroban_sdk::Vec::new(&env));
+        if topics.is_empty() { return false; }
+        let first: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        first.map(|s| s == soroban_sdk::Symbol::new(&env, "dup_vlt")).unwrap_or(false)
+    });
+    assert!(found, "dup_vlt event not emitted");
+}
+
+#[test]
+fn test_vault_count_not_incremented_on_duplicate() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let count_before = client.vault_count();
+    let _ = client.try_create_vault(&owner, &beneficiary, &3600u64, &None);
+    assert_eq!(client.vault_count(), count_before);
+}

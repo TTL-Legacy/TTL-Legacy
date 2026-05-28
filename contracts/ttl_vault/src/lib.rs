@@ -38,6 +38,7 @@ use types::{
     STATE_TRANSITION_TOPIC, OWNERSHIP_PROOF_TOPIC, INTEGRITY_TOPIC, BATCH_STATUS_TOPIC,
     ProofOfLifeEntry, ReleaseVoteEntry,
     PROOF_OF_LIFE_TOPIC, RELEASE_VOTE_TOPIC, RELEASE_VOTE_PASSED_TOPIC,
+    DUPLICATE_VAULT_TOPIC,
 };
 
 #[cfg(test)]
@@ -148,6 +149,7 @@ pub enum ContractError {
     ProofOfLifeExpired = 52,
     AlreadyVoted = 53,
     VotingNotEnabled = 54,
+    DuplicateVault = 55,
 }
 
 #[contract]
@@ -602,6 +604,15 @@ impl TtlVaultContract {
                 panic_with_error!(&env, ContractError::InvalidBeneficiary);
             }
 
+            // Detect duplicate: same (owner, beneficiary, check_in_interval) already Locked
+            let fingerprint = Self::vault_fingerprint(&env, &owner, &beneficiary, check_in_interval);
+            let fp_key = DataKey::VaultFingerprint(fingerprint.clone());
+            if env.storage().persistent().has(&fp_key) {
+                let existing_id: u64 = env.storage().persistent().get(&fp_key).unwrap();
+                env.events().publish((DUPLICATE_VAULT_TOPIC,), (owner, beneficiary, check_in_interval, existing_id));
+                panic_with_error!(&env, ContractError::DuplicateVault);
+            }
+
             // Issue #470: enforce per-owner vault capacity limit
             let limit: u32 = env.storage()
                 .instance()
@@ -675,6 +686,9 @@ impl TtlVaultContract {
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             
             Self::append_activity_log(&env, vault_id, "create_vault", &owner, "");
+            // Store fingerprint to prevent duplicate creation
+            env.storage().persistent().set(&fp_key, &vault_id);
+            env.storage().persistent().extend_ttl(&fp_key, VAULT_TTL_THRESHOLD, vault_ttl_ledgers(check_in_interval));
             env.events().publish(
                 (VAULT_CREATED_TOPIC,),
                 (vault_id, owner, beneficiary, check_in_interval, timestamp),
@@ -1257,6 +1271,9 @@ impl TtlVaultContract {
                 let arch_key = DataKey::ArchivedVault(vault_id);
                 env.storage().persistent().set(&arch_key, &ArchivedVaultInfo(vault.clone()));
                 env.storage().persistent().extend_ttl(&arch_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+                // Remove fingerprint so the same parameters can be reused
+                let fp = Self::vault_fingerprint(&env, &vault.owner, &vault.beneficiary, vault.check_in_interval);
+                env.storage().persistent().remove(&DataKey::VaultFingerprint(fp));
                 env.events().publish((VAULT_ARCHIVED_TOPIC, vault_id), (vault_id, ReleaseStatus::Released));
             }
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -2579,6 +2596,9 @@ impl TtlVaultContract {
         Self::save_vault(&env, vault_id, &vault);
         Self::remove_owner_vault_id(&env, &vault.owner, vault_id, vault.check_in_interval);
         Self::remove_beneficiary_vault_id(&env, &vault.beneficiary, vault_id, vault.check_in_interval);
+        // Remove fingerprint so the same parameters can be reused
+        let fp = Self::vault_fingerprint(&env, &vault.owner, &vault.beneficiary, vault.check_in_interval);
+        env.storage().persistent().remove(&DataKey::VaultFingerprint(fp));
         Self::record_state_transition(&env, vault_id, ReleaseStatus::Locked, ReleaseStatus::Cancelled, &caller);
         Self::log_audit_entry(&env, vault_id, "cancel_vault", &caller, "");
         Self::append_activity_log(&env, vault_id, "cancel_vault", &caller, "");
@@ -3582,6 +3602,18 @@ impl TtlVaultContract {
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, vault);
         env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+    }
+
+    /// Compute a 32-byte fingerprint for (owner, beneficiary, check_in_interval).
+    /// Used to detect duplicate vault creation attempts.
+    fn vault_fingerprint(env: &Env, owner: &Address, beneficiary: &Address, check_in_interval: u64) -> BytesN<32> {
+        let mut buf = Bytes::new(env);
+        buf.append(&owner.clone().to_xdr(env));
+        buf.append(&beneficiary.clone().to_xdr(env));
+        for b in check_in_interval.to_be_bytes().iter() {
+            buf.push_back(*b);
+        }
+        env.crypto().sha256(&buf)
     }
 
     fn load_beneficiary_vault_ids(env: &Env, beneficiary: &Address) -> Vec<u64> {

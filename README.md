@@ -125,6 +125,7 @@ The script will display the target network and identity, then require you to typ
 
 - [Architecture Overview](docs/architecture.md)
 - [TTL & State Archival Logic](docs/ttl-logic.md)
+- [Duplicate Vault Prevention](docs/duplicate-vault-prevention.md)
 - [Passkey Integration](docs/passkeys.md)
 - [Threat Model & Security](docs/security.md)
 - [Security Policy & Vulnerability Disclosure](SECURITY.md)
