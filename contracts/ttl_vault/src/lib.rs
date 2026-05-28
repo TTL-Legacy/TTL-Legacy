@@ -41,6 +41,8 @@ use types::{
     PROOF_OF_LIFE_TOPIC, RELEASE_VOTE_TOPIC, RELEASE_VOTE_PASSED_TOPIC,
     HibernationEntry,
     HIBERNATION_ENTERED_TOPIC, HIBERNATION_EXITED_TOPIC,
+    EncryptedBackupCodes, PasskeyAnalytics, PasskeyUsageStat,
+    BACKUP_CODES_ENCRYPTED_TOPIC, PASSKEY_ANALYTICS_TOPIC,
 };
 
 #[cfg(test)]
@@ -5959,5 +5961,156 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get(&DataKey::Hibernation(vault_id))
+    }
+
+    // ── Issue #553: Passkey Backup Encryption ────────────────────────────────
+
+    /// Generates 10 backup codes and stores them encrypted with the owner's public key.
+    ///
+    /// The `owner_pubkey` is the owner's X25519 public key. The contract stores the
+    /// encrypted payload opaquely — decryption happens client-side. The payload format
+    /// is: `nonce (24 bytes) || NaCl-box ciphertext of the newline-joined codes`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `caller` - The vault owner (must authorize)
+    /// * `owner_pubkey` - Owner's X25519 public key for encryption
+    /// * `encrypted_payload` - Pre-encrypted backup codes (nonce || ciphertext)
+    ///
+    /// # Returns
+    /// `Ok(())` on success
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    pub fn store_encrypted_backup_codes(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        owner_pubkey: BytesN<32>,
+        encrypted_payload: Bytes,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let generated_at = env.ledger().timestamp();
+        let entry = EncryptedBackupCodes {
+            owner_pubkey: owner_pubkey.clone(),
+            encrypted_payload,
+            generated_at,
+        };
+
+        let key = DataKey::EncryptedBackupCodes(vault_id);
+        env.storage().persistent().set(&key, &entry);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (BACKUP_CODES_ENCRYPTED_TOPIC, vault_id),
+            (owner_pubkey, generated_at),
+        );
+        Ok(())
+    }
+
+    /// Returns the encrypted backup codes for a vault, if any have been stored.
+    pub fn get_encrypted_backup_codes(env: Env, vault_id: u64) -> Option<EncryptedBackupCodes> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EncryptedBackupCodes(vault_id))
+    }
+
+    // ── Issue #554: Passkey Usage Analytics ──────────────────────────────────
+
+    /// Returns aggregated analytics for passkey usage on a vault.
+    ///
+    /// Computes total check-ins, unique passkeys used, last-used timestamp, and
+    /// per-passkey use counts from the stored `PasskeyUsageEntry` log.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// A `PasskeyAnalytics` struct with aggregated statistics.
+    pub fn get_passkey_analytics(env: Env, vault_id: u64) -> PasskeyAnalytics {
+        let usage: Vec<PasskeyUsageEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PasskeyUsage(vault_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut total_uses: u32 = 0;
+        let mut last_used: u64 = 0;
+        // Per-passkey stats stored as parallel vecs (no HashMap in no_std Soroban)
+        let mut stat_keys: Vec<BytesN<32>> = Vec::new(&env);
+        let mut stat_counts: Vec<u32> = Vec::new(&env);
+        let mut stat_first: Vec<u64> = Vec::new(&env);
+        let mut stat_last: Vec<u64> = Vec::new(&env);
+
+        for entry in usage.iter() {
+            total_uses = total_uses.saturating_add(1);
+            if entry.timestamp > last_used {
+                last_used = entry.timestamp;
+            }
+
+            // Find existing slot for this passkey
+            let mut found = false;
+            for i in 0..stat_keys.len() {
+                if stat_keys.get(i).unwrap() == entry.passkey_hash {
+                    let count = stat_counts.get(i).unwrap().saturating_add(1);
+                    stat_counts.set(i, count);
+                    let fl = stat_first.get(i).unwrap();
+                    if entry.timestamp < fl {
+                        stat_first.set(i, entry.timestamp);
+                    }
+                    let ll = stat_last.get(i).unwrap();
+                    if entry.timestamp > ll {
+                        stat_last.set(i, entry.timestamp);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                stat_keys.push_back(entry.passkey_hash.clone());
+                stat_counts.push_back(1u32);
+                stat_first.push_back(entry.timestamp);
+                stat_last.push_back(entry.timestamp);
+            }
+        }
+
+        let unique_passkeys = stat_keys.len();
+        let mut per_passkey: Vec<PasskeyUsageStat> = Vec::new(&env);
+        for i in 0..stat_keys.len() {
+            per_passkey.push_back(PasskeyUsageStat {
+                passkey_hash: stat_keys.get(i).unwrap(),
+                use_count: stat_counts.get(i).unwrap(),
+                first_used: stat_first.get(i).unwrap(),
+                last_used: stat_last.get(i).unwrap(),
+            });
+        }
+
+        let analytics = PasskeyAnalytics {
+            vault_id,
+            total_uses,
+            unique_passkeys,
+            last_used,
+            per_passkey,
+        };
+
+        env.events().publish(
+            (PASSKEY_ANALYTICS_TOPIC, vault_id),
+            (total_uses, unique_passkeys),
+        );
+
+        analytics
     }
 }

@@ -185,6 +185,8 @@ pub enum DataKey {
     ReleaseVoteThreshold(u64),
     // Hibernation: temporary suspension of check-in requirement
     Hibernation(u64),
+    // Issue #553: encrypted backup codes
+    EncryptedBackupCodes(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -554,3 +556,45 @@ pub struct HibernationEntry {
     /// How many seconds the hibernation lasts.
     pub duration_seconds: u64,
 }
+
+/// Encrypted backup codes storage - Issue #553
+///
+/// Backup codes are encrypted with the vault owner's public key so only the
+/// owner can decrypt them. The `encrypted_payload` is an XSalsa20-Poly1305
+/// (NaCl box) ciphertext: `nonce (24 bytes) || ciphertext`.
+#[contracttype]
+#[derive(Clone)]
+pub struct EncryptedBackupCodes {
+    /// The owner's X25519 public key used to encrypt the codes.
+    pub owner_pubkey: BytesN<32>,
+    /// Encrypted payload: nonce (24 bytes) || ciphertext.
+    pub encrypted_payload: Bytes,
+    /// Ledger timestamp when the codes were generated.
+    pub generated_at: u64,
+}
+
+/// Per-passkey usage statistics - Issue #554
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyUsageStat {
+    pub passkey_hash: BytesN<32>,
+    pub use_count: u32,
+    pub first_used: u64,
+    pub last_used: u64,
+}
+
+/// Aggregated passkey analytics for a vault - Issue #554
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyAnalytics {
+    pub vault_id: u64,
+    pub total_uses: u32,
+    pub unique_passkeys: u32,
+    pub last_used: u64,
+    pub per_passkey: Vec<PasskeyUsageStat>,
+}
+
+// Issue #553: encrypted backup codes event
+pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bk_enc");
+// Issue #554: passkey analytics query event
+pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_anly");

@@ -4258,3 +4258,234 @@ fn test_get_hibernation_returns_none_when_not_hibernating() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
     assert!(client.get_hibernation(&id).is_none());
 }
+
+// ── Issue #553: Passkey Backup Encryption Tests ──────────────────────────────
+
+#[test]
+fn test_store_encrypted_backup_codes_success() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let owner_pubkey = BytesN::<32>::from_array(&env, &[0xABu8; 32]);
+    // Simulate nonce (24 bytes) || ciphertext
+    let payload_bytes = [0u8; 64];
+    let encrypted_payload = soroban_sdk::Bytes::from_slice(&env, &payload_bytes);
+
+    let result = client.try_store_encrypted_backup_codes(
+        &vault_id,
+        &owner,
+        &owner_pubkey,
+        &encrypted_payload,
+    );
+    assert!(result.is_ok());
+
+    let stored = client.get_encrypted_backup_codes(&vault_id);
+    assert!(stored.is_some());
+    let entry = stored.unwrap();
+    assert_eq!(entry.owner_pubkey, owner_pubkey);
+    assert_eq!(entry.encrypted_payload, encrypted_payload);
+}
+
+#[test]
+fn test_store_encrypted_backup_codes_non_owner_rejected() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let attacker = Address::generate(&env);
+    let owner_pubkey = BytesN::<32>::from_array(&env, &[0x01u8; 32]);
+    let payload_bytes = [0u8; 64];
+    let encrypted_payload = soroban_sdk::Bytes::from_slice(&env, &payload_bytes);
+
+    let result = client.try_store_encrypted_backup_codes(
+        &vault_id,
+        &attacker,
+        &owner_pubkey,
+        &encrypted_payload,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_store_encrypted_backup_codes_overwrites_previous() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let pubkey1 = BytesN::<32>::from_array(&env, &[0x01u8; 32]);
+    let pubkey2 = BytesN::<32>::from_array(&env, &[0x02u8; 32]);
+    let payload1 = soroban_sdk::Bytes::from_slice(&env, &[0xAAu8; 64]);
+    let payload2 = soroban_sdk::Bytes::from_slice(&env, &[0xBBu8; 64]);
+
+    client.store_encrypted_backup_codes(&vault_id, &owner, &pubkey1, &payload1);
+    client.store_encrypted_backup_codes(&vault_id, &owner, &pubkey2, &payload2);
+
+    let stored = client.get_encrypted_backup_codes(&vault_id).unwrap();
+    assert_eq!(stored.owner_pubkey, pubkey2);
+    assert_eq!(stored.encrypted_payload, payload2);
+}
+
+#[test]
+fn test_store_encrypted_backup_codes_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let owner_pubkey = BytesN::<32>::from_array(&env, &[0xCCu8; 32]);
+    let encrypted_payload = soroban_sdk::Bytes::from_slice(&env, &[0u8; 64]);
+
+    client.store_encrypted_backup_codes(&vault_id, &owner, &owner_pubkey, &encrypted_payload);
+
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            e.0.try_into_val(&env).unwrap_or_else(|_| soroban_sdk::Vec::new(&env));
+        if topics.is_empty() {
+            return false;
+        }
+        let first: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        first
+            .map(|s| s == soroban_sdk::Symbol::new(&env, "bk_enc"))
+            .unwrap_or(false)
+    });
+    assert!(found, "bk_enc event not emitted");
+}
+
+#[test]
+fn test_get_encrypted_backup_codes_returns_none_when_not_set() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    assert!(client.get_encrypted_backup_codes(&vault_id).is_none());
+}
+
+// ── Issue #554: Passkey Usage Analytics Tests ─────────────────────────────────
+
+#[test]
+fn test_passkey_analytics_empty_vault() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let analytics = client.get_passkey_analytics(&vault_id);
+    assert_eq!(analytics.vault_id, vault_id);
+    assert_eq!(analytics.total_uses, 0);
+    assert_eq!(analytics.unique_passkeys, 0);
+    assert_eq!(analytics.last_used, 0);
+    assert_eq!(analytics.per_passkey.len(), 0);
+}
+
+#[test]
+fn test_passkey_analytics_single_checkin() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let passkey = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    client.check_in(&vault_id, &owner, &passkey);
+
+    let analytics = client.get_passkey_analytics(&vault_id);
+    assert_eq!(analytics.total_uses, 1);
+    assert_eq!(analytics.unique_passkeys, 1);
+    assert!(analytics.last_used > 0);
+    assert_eq!(analytics.per_passkey.len(), 1);
+    assert_eq!(analytics.per_passkey.get(0).unwrap().use_count, 1);
+    assert_eq!(analytics.per_passkey.get(0).unwrap().passkey_hash, passkey);
+}
+
+#[test]
+fn test_passkey_analytics_multiple_checkins_same_passkey() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let passkey = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &passkey);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.check_in(&vault_id, &owner, &passkey);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.check_in(&vault_id, &owner, &passkey);
+
+    let analytics = client.get_passkey_analytics(&vault_id);
+    assert_eq!(analytics.total_uses, 3);
+    assert_eq!(analytics.unique_passkeys, 1);
+    let stat = analytics.per_passkey.get(0).unwrap();
+    assert_eq!(stat.use_count, 3);
+    assert!(stat.last_used > stat.first_used);
+}
+
+#[test]
+fn test_passkey_analytics_multiple_unique_passkeys() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let pk1 = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    let pk2 = BytesN::<32>::from_array(&env, &[2u8; 32]);
+    let pk3 = BytesN::<32>::from_array(&env, &[3u8; 32]);
+
+    client.check_in(&vault_id, &owner, &pk1);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.check_in(&vault_id, &owner, &pk2);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.check_in(&vault_id, &owner, &pk3);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.check_in(&vault_id, &owner, &pk1);
+
+    let analytics = client.get_passkey_analytics(&vault_id);
+    assert_eq!(analytics.total_uses, 4);
+    assert_eq!(analytics.unique_passkeys, 3);
+
+    // pk1 used twice
+    let pk1_stat = analytics
+        .per_passkey
+        .iter()
+        .find(|s| s.passkey_hash == pk1)
+        .unwrap();
+    assert_eq!(pk1_stat.use_count, 2);
+
+    // pk2 and pk3 used once each
+    let pk2_stat = analytics
+        .per_passkey
+        .iter()
+        .find(|s| s.passkey_hash == pk2)
+        .unwrap();
+    assert_eq!(pk2_stat.use_count, 1);
+}
+
+#[test]
+fn test_passkey_analytics_last_used_is_most_recent() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let pk = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &pk);
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    let ts_before = env.ledger().timestamp();
+    client.check_in(&vault_id, &owner, &pk);
+    let ts_after = env.ledger().timestamp();
+
+    let analytics = client.get_passkey_analytics(&vault_id);
+    assert!(analytics.last_used >= ts_before);
+    assert!(analytics.last_used <= ts_after);
+}
+
+#[test]
+fn test_passkey_analytics_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let pk = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    client.check_in(&vault_id, &owner, &pk);
+
+    // Clear events and call analytics
+    let _ = client.get_passkey_analytics(&vault_id);
+
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            e.0.try_into_val(&env).unwrap_or_else(|_| soroban_sdk::Vec::new(&env));
+        if topics.is_empty() {
+            return false;
+        }
+        let first: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        first
+            .map(|s| s == soroban_sdk::Symbol::new(&env, "pk_anly"))
+            .unwrap_or(false)
+    });
+    assert!(found, "pk_anly event not emitted");
+}
