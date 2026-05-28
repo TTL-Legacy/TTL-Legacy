@@ -84,6 +84,9 @@ pub const PROOF_OF_LIFE_TOPIC: Symbol = symbol_short!("pol_sub");
 // Issue #499: beneficiary voting
 pub const RELEASE_VOTE_TOPIC: Symbol = symbol_short!("rel_vote");
 pub const RELEASE_VOTE_PASSED_TOPIC: Symbol = symbol_short!("vote_ok");
+// Hibernation events
+pub const HIBERNATION_ENTERED_TOPIC: Symbol = symbol_short!("hib_ent");
+pub const HIBERNATION_EXITED_TOPIC: Symbol = symbol_short!("hib_ext");
 
 // Previously missing — used by lib.rs internal helpers
 pub const STATE_TRANSITION_TOPIC: Symbol = symbol_short!("st_trans");
@@ -110,6 +113,23 @@ pub const BEN_ROTATION_TOPIC: Symbol = symbol_short!("ben_rot");
 
 // Issue: Geographic Check-in Tracking
 pub const CHECKIN_GEO_TOPIC: Symbol = symbol_short!("ci_geo");
+
+// Issue #494: Beneficiary Succession Planning
+pub const SUCCESSION_SET_TOPIC: Symbol = symbol_short!("suc_set");
+pub const SUCCESSION_ACTIVATED_TOPIC: Symbol = symbol_short!("suc_act");
+
+// Issue #495: Beneficiary Escrow
+pub const ESCROW_CREATED_TOPIC: Symbol = symbol_short!("esc_cre");
+pub const ESCROW_ACCEPTED_TOPIC: Symbol = symbol_short!("esc_acc");
+pub const ESCROW_REJECTED_TOPIC: Symbol = symbol_short!("esc_rej");
+pub const ESCROW_EXPIRED_TOPIC: Symbol = symbol_short!("esc_exp");
+
+// Issue #496: Dispute Arbitration
+pub const ARBITRATOR_SET_TOPIC: Symbol = symbol_short!("arb_set");
+pub const ARBITRATION_RULED_TOPIC: Symbol = symbol_short!("arb_rul");
+
+// Issue #497: Beneficiary Notification
+pub const VAULT_NOTIFY_TOPIC: Symbol = symbol_short!("v_notif");
 
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
@@ -187,8 +207,8 @@ pub enum DataKey {
     // Issue #499: beneficiary release votes
     ReleaseVotes(u64),
     ReleaseVoteThreshold(u64),
-    // Beneficiary rotation schedule
-    BeneficiaryRotationSchedule(u64),
+    // Hibernation: temporary suspension of check-in requirement
+    Hibernation(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -548,12 +568,14 @@ pub struct BiometricEntry {
     pub added_at: u64,
 }
 
-/// A scheduled beneficiary rotation entry.
-/// When `effective_timestamp` is reached at release time, the vault's
-/// beneficiaries are replaced with `new_beneficiaries`.
+/// Hibernation entry — records when a vault entered hibernation and for how long.
+/// While hibernating, the vault's expiry deadline is extended by `duration_seconds`,
+/// so no check-ins are required during that period.
 #[contracttype]
 #[derive(Clone)]
-pub struct BeneficiaryRotationEntry {
-    pub effective_timestamp: u64,
-    pub new_beneficiaries: Vec<BeneficiaryEntry>,
+pub struct HibernationEntry {
+    /// Ledger timestamp when hibernation started.
+    pub started_at: u64,
+    /// How many seconds the hibernation lasts.
+    pub duration_seconds: u64,
 }

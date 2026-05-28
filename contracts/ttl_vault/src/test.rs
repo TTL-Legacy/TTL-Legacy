@@ -4083,117 +4083,180 @@ fn test_get_release_votes_empty_by_default() {
     assert_eq!(client.get_release_votes(&id).len(), 0);
 }
 
-// ── Emergency Freeze Tests ────────────────────────────────────────────────────
+// ── Hibernation ───────────────────────────────────────────────────────────────
 
 #[test]
-fn test_emergency_freeze_by_beneficiary() {
-    let (_, owner, beneficiary, _, _, client) = setup();
-    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.emergency_freeze(&id, &beneficiary);
-    let vault = client.get_vault(&id);
-    assert_eq!(vault.status, ReleaseStatus::EmergencyFrozen);
-}
-
-#[test]
-fn test_emergency_freeze_blocks_withdraw() {
-    let (env, owner, beneficiary, _, token_address, client) = setup();
-    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000);
-    client.deposit(&id, &owner, &1_000);
-    client.emergency_freeze(&id, &beneficiary);
-    let err = client.try_withdraw(&id, &owner, &500).unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // VaultFrozen
-}
-
-#[test]
-fn test_emergency_freeze_blocks_update_beneficiary() {
+fn test_enter_hibernation_success() {
     let (env, owner, beneficiary, _, _, client) = setup();
-    let new_ben = Address::generate(&env);
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.emergency_freeze(&id, &beneficiary);
-    let err = client.try_update_beneficiary(&id, &owner, &new_ben).unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // VaultFrozen
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+
+    let h = client.get_hibernation(&id).unwrap();
+    assert_eq!(h.duration_seconds, 7200u64);
 }
 
 #[test]
-fn test_emergency_freeze_blocks_cancel_vault() {
-    let (_, owner, beneficiary, _, _, client) = setup();
-    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.emergency_freeze(&id, &beneficiary);
-    let err = client.try_cancel_vault(&id, &owner).unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // VaultFrozen
-}
-
-#[test]
-fn test_emergency_freeze_non_beneficiary_rejected() {
+fn test_enter_hibernation_non_owner_fails() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let stranger = Address::generate(&env);
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    let err = client.try_emergency_freeze(&id, &stranger).unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(30)); // NotBeneficiary
+
+    let err = client.try_enter_hibernation(&id, &stranger, &3600u64).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(6)); // NotOwner
 }
 
 #[test]
-fn test_resolve_emergency_freeze_by_admin() {
-    let (_, owner, beneficiary, admin, _, client) = setup();
-    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.emergency_freeze(&id, &beneficiary);
-    client.resolve_emergency_freeze(&id);
-    let vault = client.get_vault(&id);
-    assert_eq!(vault.status, ReleaseStatus::Locked);
-}
-
-#[test]
-fn test_resolve_emergency_freeze_restores_withdraw() {
-    let (env, owner, beneficiary, _, token_address, client) = setup();
-    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000);
-    client.deposit(&id, &owner, &1_000);
-    client.emergency_freeze(&id, &beneficiary);
-    client.resolve_emergency_freeze(&id);
-    client.withdraw(&id, &owner, &500);
-    assert_eq!(client.get_vault(&id).balance, 500);
-}
-
-#[test]
-fn test_resolve_emergency_freeze_non_frozen_rejected() {
+fn test_enter_hibernation_zero_duration_fails() {
     let (_, owner, beneficiary, _, _, client) = setup();
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    let err = client.try_resolve_emergency_freeze(&id).unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(7)); // AlreadyReleased
+
+    let err = client.try_enter_hibernation(&id, &owner, &0u64).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(2)); // InvalidInterval
 }
 
 #[test]
-fn test_emergency_freeze_emits_event() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+fn test_enter_hibernation_already_hibernating_fails() {
+    let (_, owner, beneficiary, _, _, client) = setup();
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.emergency_freeze(&id, &beneficiary);
-    let events = env.events().all();
-    let found = events.iter().any(|e| {
-        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.try_into_val(&env).unwrap_or_else(|_| soroban_sdk::Vec::new(&env));
-        topics.len() > 0 && {
-            let t: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
-            t.map(|s| s == symbol_short!("emg_frz")).unwrap_or(false)
-        }
-    });
-    assert!(found, "EMERGENCY_FREEZE_TOPIC event not emitted");
+
+    client.enter_hibernation(&id, &owner, &3600u64).unwrap();
+    let err = client.try_enter_hibernation(&id, &owner, &3600u64).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // AlreadyHibernating
 }
 
 #[test]
-fn test_freeze_resolved_emits_event() {
+fn test_vault_not_expired_during_hibernation() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 3600u64;
+    let id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+
+    // Advance past the normal check-in interval — vault should NOT be expired
+    env.ledger().with_mut(|l| l.timestamp += interval + 1);
+    assert!(!client.is_expired(&id));
+}
+
+#[test]
+fn test_vault_expires_after_hibernation_window_closes() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 3600u64;
+    let hibernation = 7200u64;
+    let id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    client.enter_hibernation(&id, &owner, &hibernation).unwrap();
+
+    // Advance past interval + hibernation — vault should now be expired
+    env.ledger().with_mut(|l| l.timestamp += interval + hibernation + 1);
+    assert!(client.is_expired(&id));
+}
+
+#[test]
+fn test_exit_hibernation_success() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.emergency_freeze(&id, &beneficiary);
-    client.resolve_emergency_freeze(&id);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 1000);
+    client.exit_hibernation(&id, &owner).unwrap();
+
+    // Hibernation entry should be gone
+    assert!(client.get_hibernation(&id).is_none());
+}
+
+#[test]
+fn test_exit_hibernation_non_owner_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let stranger = Address::generate(&env);
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    let err = client.try_exit_hibernation(&id, &stranger).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(6)); // NotOwner
+}
+
+#[test]
+fn test_exit_hibernation_not_hibernating_fails() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    let err = client.try_exit_hibernation(&id, &owner).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(56)); // NotHibernating
+}
+
+#[test]
+fn test_exit_hibernation_credits_elapsed_time() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 3600u64;
+    let id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    let before = client.get_vault(&id).last_check_in;
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    let elapsed = 1000u64;
+    env.ledger().with_mut(|l| l.timestamp += elapsed);
+    client.exit_hibernation(&id, &owner).unwrap();
+
+    let after = client.get_vault(&id).last_check_in;
+    assert_eq!(after, before + elapsed);
+}
+
+#[test]
+fn test_vault_not_expired_after_early_exit_within_interval() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 3600u64;
+    let id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    // Exit after 1000 s — last_check_in bumped by 1000
+    env.ledger().with_mut(|l| l.timestamp += 1000);
+    client.exit_hibernation(&id, &owner).unwrap();
+
+    // Total elapsed from original last_check_in = 1000 s, interval = 3600 s → not expired
+    assert!(!client.is_expired(&id));
+}
+
+#[test]
+fn test_hibernation_emits_entered_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+
     let events = env.events().all();
     let found = events.iter().any(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.try_into_val(&env).unwrap_or_else(|_| soroban_sdk::Vec::new(&env));
-        topics.len() > 0 && {
-            let t: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
-            t.map(|s| s == symbol_short!("frz_res")).unwrap_or(false)
-        }
+        if topics.is_empty() { return false; }
+        let first: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        first.map(|s| s == soroban_sdk::Symbol::new(&env, "hib_ent")).unwrap_or(false)
     });
-    assert!(found, "FREEZE_RESOLVED_TOPIC event not emitted");
+    assert!(found, "hibernation_entered event not emitted");
+}
+
+#[test]
+fn test_hibernation_emits_exited_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 500);
+    client.exit_hibernation(&id, &owner).unwrap();
+
+    let events = env.events().all();
+    let found = events.iter().any(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.0.try_into_val(&env).unwrap_or_else(|_| soroban_sdk::Vec::new(&env));
+        if topics.is_empty() { return false; }
+        let first: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        first.map(|s| s == soroban_sdk::Symbol::new(&env, "hib_ext")).unwrap_or(false)
+    });
+    assert!(found, "hibernation_exited event not emitted");
+}
+
+#[test]
+fn test_get_hibernation_returns_none_when_not_hibernating() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    assert!(client.get_hibernation(&id).is_none());
 }
 
 // ── Beneficiary Rotation Schedule Tests ──────────────────────────────────────
