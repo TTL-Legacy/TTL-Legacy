@@ -85,11 +85,15 @@ pub const PROOF_OF_LIFE_TOPIC: Symbol = symbol_short!("pol_sub");
 pub const RELEASE_VOTE_TOPIC: Symbol = symbol_short!("rel_vote");
 pub const RELEASE_VOTE_PASSED_TOPIC: Symbol = symbol_short!("vote_ok");
 
-// Previously missing — used by lib.rs internal helpers
-pub const STATE_TRANSITION_TOPIC: Symbol = symbol_short!("st_trans");
-pub const OWNERSHIP_PROOF_TOPIC: Symbol = symbol_short!("own_prf");
-pub const INTEGRITY_TOPIC: Symbol = symbol_short!("integ");
-pub const BATCH_STATUS_TOPIC: Symbol = symbol_short!("bat_stat");
+// Issue #547: vesting penalty applied
+pub const VESTING_PENALTY_TOPIC: Symbol = symbol_short!("vest_pen");
+// Issue #548: vesting claim reversed / finalized
+pub const VESTING_REVERSED_TOPIC: Symbol = symbol_short!("vest_rev");
+pub const VESTING_FINALIZED_TOPIC: Symbol = symbol_short!("vest_fin");
+// Issue #549: passkey expired during check-in
+pub const PASSKEY_EXPIRED_TOPIC: Symbol = symbol_short!("pk_expd");
+// Issue #550: passkey compromise detected or reported
+pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
 
 // Issue: TTL Borrowing
 pub const TTL_BORROW_TOPIC: Symbol = symbol_short!("ttl_bor");
@@ -180,6 +184,19 @@ pub enum DataKey {
     // Issue #499: beneficiary release votes
     ReleaseVotes(u64),
     ReleaseVoteThreshold(u64),
+    // TTL Borrowing
+    TtlBorrow(u64),
+    // Check-in rate limiting
+    MinCheckInCooldown,
+    LastCheckInTime(u64),
+    // Geographic check-in tracking
+    CheckInGeoLog(u64),
+    // Issue #547: vesting penalty config per vault
+    VestingPenalty(u64),
+    // Issue #548: pending vesting claim awaiting finalization or reversal
+    VestingPendingClaim(u64),
+    // Issue #550: set of passkeys flagged as compromised
+    CompromisedPasskeys(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -536,4 +553,70 @@ pub struct TtlPool {
 pub struct BiometricEntry {
     pub credential_hash: BytesN<32>,
     pub added_at: u64,
+}
+
+/// TTL borrow record — tracks temporary TTL transfers between vaults.
+#[contracttype]
+#[derive(Clone)]
+pub struct TtlBorrowRecord {
+    pub lender_vault_id: u64,
+    pub borrower_vault_id: u64,
+    pub borrowed_seconds: u64,
+    pub borrowed_at: u64,
+    pub repaid: bool,
+}
+
+/// Geographic check-in entry — stores location metadata for a check-in.
+#[contracttype]
+#[derive(Clone)]
+pub struct GeoCheckInEntry {
+    pub latitude_micro: i64,
+    pub longitude_micro: i64,
+    pub country_code: String,
+    pub timestamp: u64,
+}
+
+/// Beneficiary proof-of-life entry — confirms beneficiary is reachable.
+#[contracttype]
+#[derive(Clone)]
+pub struct ProofOfLifeEntry {
+    pub beneficiary: Address,
+    pub submitted_at: u64,
+    pub valid_until: u64,
+}
+
+/// Beneficiary release vote — records an approval or rejection vote.
+#[contracttype]
+#[derive(Clone)]
+pub struct ReleaseVoteEntry {
+    pub voter: Address,
+    pub approve: bool,
+    pub voted_at: u64,
+}
+
+/// Vesting penalty config — Issue #547.
+/// Applied to installments claimed after `grace_period_seconds` past their unlock time.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingPenaltyConfig {
+    /// Penalty in basis points applied to each late installment (e.g. 500 = 5%).
+    pub penalty_bps: u32,
+    /// Seconds after an installment's unlock time before the penalty kicks in.
+    pub grace_period_seconds: u64,
+}
+
+/// Pending vesting claim — Issue #548.
+/// Created by `claim_vested_installment`; tokens remain escrowed until
+/// `finalize_vesting_claim` is called or the owner calls `reverse_vesting_claim`.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingPendingClaim {
+    /// Escrowed token amount (not yet transferred to beneficiary).
+    pub amount: i128,
+    pub beneficiary: Address,
+    pub initiated_at: u64,
+    /// Timestamp after which only finalization is possible (reversal window closed).
+    pub reversal_deadline: u64,
+    /// Schedule counter position at the time of this claim (for idempotency).
+    pub installments_claimed: u32,
 }
