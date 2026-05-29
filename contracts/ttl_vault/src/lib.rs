@@ -1260,12 +1260,35 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
         }
+        // We only block vetoes on trigger before the vault has expired.
+        // Note: release entrypoint is for the Expiry trigger and thus requires expiry,
+        // but manual release can occur at arbitrary times.
+        // Here we keep the existing expiry gate.
         if !Self::is_expired(env.clone(), vault_id) {
             panic_with_error!(&env, ContractError::NotExpired);
         }
+
+        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
+        // The veto is only meaningful before expiry; since `trigger_release*` requires expiry,
+        // veto has already expired in practice. However, for completeness (and for manual release),
+        // we gate on expiry-less times above in the public veto method.
         let total = vault.balance;
         if total == 0 {
             panic_with_error!(&env, ContractError::EmptyVault);
+        }
+
+        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
+        // Block `trigger_release*` only if veto was set and vault has not yet expired.
+        // (This is also harmless for expiry-triggered releases, since those require expiry.)
+        if !Self::is_expired(env.clone(), vault_id) {
+            let vetoed: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::BeneficiaryReleaseConditionVeto(vault_id))
+                .unwrap_or(false);
+            if vetoed {
+                panic_with_error!(&env, ContractError::BeneficiaryVetoReleaseCondition);
+            }
         }
 
         // Check beneficiary acceptance status - Issue #397
@@ -3407,6 +3430,46 @@ impl TtlVaultContract {
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
+    pub fn beneficiary_veto_release_condition(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        // Only primary beneficiary (vault.beneficiary)
+        if caller != vault.beneficiary {
+            return Err(ContractError::NotBeneficiary);
+        }
+        // Only before expiry
+        if Self::is_expired(env.clone(), vault_id) {
+            return Err(ContractError::NotExpired);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::BeneficiaryReleaseConditionVeto(vault_id), &true);
+        // keep storage alive at least as long as the vault
+        env.storage().persistent().extend_ttl(
+            &DataKey::BeneficiaryReleaseConditionVeto(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        Ok(())
+    }
+
+    pub fn revoke_beneficiary_veto_release_condition(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.beneficiary {
+            return Err(ContractError::NotBeneficiary);
+        }
+        env.storage().persistent().remove(&DataKey::BeneficiaryReleaseConditionVeto(vault_id));
+        Ok(())
+    }
+
+    pub fn get_beneficiary_veto_release_condition(env: Env, vault_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BeneficiaryReleaseConditionVeto(vault_id))
+            .unwrap_or(false)
+    }
+
     pub fn accept_beneficiary_role(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
@@ -7931,6 +7994,8 @@ impl TtlVaultContract {
                 (vault_id, entry.address.clone(), share),
             );
         }
+    }
+
     // ── Configurable Countdown Notifications ────────────────────────────────
 
     /// Sets the countdown notification thresholds for a vault.

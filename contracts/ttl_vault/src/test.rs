@@ -3209,8 +3209,115 @@ fn test_release_blocked_when_beneficiary_declined() {
 #[test]
 fn test_release_succeeds_when_beneficiary_accepted() {
     let (env, owner, beneficiary, _, token_address, client) = setup();
-    
+
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit funds
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // Beneficiary accepts
+    client.accept_beneficiary_role(&vault_id, &beneficiary);
+
+    // Advance time past expiry
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Trigger release should succeed
+    client.trigger_release(&vault_id);
+
+    // Verify funds transferred
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 500i128);
+}
+
+#[test]
+fn test_beneficiary_veto_release_condition_blocks_trigger_release_before_expiry() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // Beneficiary vetoes owner-defined release conditions before expiry
+    client.beneficiary_veto_release_condition(&vault_id, &beneficiary).unwrap();
+
+    // Not yet expired — try_trigger_release must fail (NotExpired)
+    // (trigger_release entrypoint still requires expiry; this verifies veto is not incorrectly bypassed)
+    let err = client.try_trigger_release(&vault_id).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(16)); // NotExpired
+
+    // Advance past expiry so trigger_release is allowed
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Now trigger_release should be blocked by veto with our new error
+    let err = client.try_trigger_release(&vault_id).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(64));
+
+    // Funds must not be transferred
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 0i128);
+}
+
+#[test]
+fn test_beneficiary_veto_can_be_revoked_before_expiry() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    client.beneficiary_veto_release_condition(&vault_id, &beneficiary).unwrap();
+    client.revoke_beneficiary_veto_release_condition(&vault_id, &beneficiary).unwrap();
+
+    // Advance past expiry; without veto, release should succeed
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 500i128);
+}
+
+#[test]
+fn test_beneficiary_veto_does_not_apply_after_vault_expired() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // Expire first
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Attempting to veto after expiry should fail
+    let result = client.try_beneficiary_veto_release_condition(&vault_id, &beneficiary);
+    assert!(result.is_err());
+
+    // Release should succeed
+    client.trigger_release(&vault_id);
+    let token_client = token::Client::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 500i128);
+}
+
+#[test]
+fn test_non_primary_beneficiary_cannot_veto() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let other = Address::generate(&env);
+
+    // Create multi-beneficiary vault so there are multiple beneficiaries.
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // Add a second beneficiary
+    client.add_beneficiary(&vault_id, &owner, &other, &5_000u32).unwrap();
+    client.add_beneficiary(&vault_id, &owner, &Address::generate(&env), &5_000u32).unwrap();
+
+    // Non-primary beneficiary veto should be rejected
+    let result = client.try_beneficiary_veto_release_condition(&vault_id, &other);
+    assert!(result.is_err());
+
+    // For sanity, release still works when expired
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+    let token_client = token::Client::new(&env, &token_address);
+    assert!(token_client.balance(&beneficiary) > 0i128);
+}
+
     
     // Deposit funds
     client.deposit(&vault_id, &owner, &500i128);

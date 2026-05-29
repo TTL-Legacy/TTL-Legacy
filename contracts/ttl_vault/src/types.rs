@@ -267,6 +267,8 @@ pub enum DataKey {
     BeneficiaryReleaseTriggers(u64),
     BeneficiaryTierThreshold(u64, Address),
     BeneficiaryStatusEntry(u64, Address),
+    // Issue: beneficiary veto of owner-defined release conditions before expiry
+    BeneficiaryReleaseConditionVeto(u64),
     // Hibernation: temporary suspension of check-in requirement
     Hibernation(u64),
     LastCheckInTime(u64),
@@ -849,7 +851,9 @@ pub struct ReleaseVoteEntry {
 #[derive(Clone)]
 pub struct BeneficiaryRotationEntry {
     pub effective_timestamp: u64,
-    pub new_beneficiaries: Vec<BeneficiaryEntry>,
+pub new_beneficiaries: Vec<BeneficiaryEntry>,
+}
+
 /// Configurable countdown notification thresholds for a vault.
 /// Each threshold (in seconds before expiry) triggers a `cd_notif` event
 /// when `check_countdown` is called and the TTL crosses that boundary.
