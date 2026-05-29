@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Map};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Map, panic_with_error};
 
 pub const MATCH_SET_TOPIC: soroban_sdk::Symbol = symbol_short!("match_set");
 pub const MATCHED_DISTRIBUTION_TOPIC: soroban_sdk::Symbol = symbol_short!("match_dst");
@@ -43,7 +43,7 @@ pub fn set_match(
 ) {
     caller.require_auth();
     if match_bps > 10_000 {
-        panic!("match_bps cannot exceed 10000");
+        panic_with_error!(&env, crate::ContractError::InvalidBps);
     }
 
     let mut matches: Map<Address, MatchPair> = env

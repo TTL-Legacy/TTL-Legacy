@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Map};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Map, panic_with_error};
 
 pub const FLOOR_SET_TOPIC: soroban_sdk::Symbol = symbol_short!("floor_set");
 pub const FLOOR_ENFORCED_TOPIC: soroban_sdk::Symbol = symbol_short!("floor_enf");
@@ -28,7 +28,7 @@ pub enum FloorsKey {
 pub fn set_floor(env: &Env, caller: &Address, beneficiary: Address, floor: i128) {
     caller.require_auth();
     if floor <= 0 {
-        panic!("floor must be positive");
+        panic_with_error!(&env, crate::ContractError::InvalidAmount);
     }
 
     let mut floors: Map<Address, i128> = env

@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Map};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Map, panic_with_error};
 
 pub const CAP_SET_TOPIC: soroban_sdk::Symbol = symbol_short!("cap_set");
 pub const CAP_ENFORCED_TOPIC: soroban_sdk::Symbol = symbol_short!("cap_enf");
@@ -28,7 +28,7 @@ pub enum CapsKey {
 pub fn set_cap(env: &Env, caller: &Address, beneficiary: Address, cap: i128) {
     caller.require_auth();
     if cap <= 0 {
-        panic!("cap must be positive");
+        panic_with_error!(&env, crate::ContractError::InvalidAmount);
     }
 
     let mut caps: Map<Address, i128> = env
