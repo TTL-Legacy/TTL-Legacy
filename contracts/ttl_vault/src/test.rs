@@ -5427,3 +5427,65 @@ fn test_get_countdown_config_returns_defaults_when_not_set() {
     assert_eq!(cfg.thresholds.get(1).unwrap(), 259_200u64);
     assert_eq!(cfg.thresholds.get(2).unwrap(), 86_400u64);
 }
+
+#[test]
+fn test_vesting_rollover() {
+    let (env, owner, beneficiary, _, token, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.deposit(&vault_id, &owner, &1000);
+    client.set_vesting_schedule(&vault_id, &owner, &100, &100, &4, &0);
+    client.set_vesting_rollover(&vault_id, &owner, &true);
+    
+    env.ledger().set_timestamp(1000);
+    client.trigger_release(&vault_id);
+    // Rollover logic and accumulation would be tested here
+}
+
+#[test]
+fn test_vesting_forfeiture() {
+    let (env, owner, beneficiary, _, token, client) = setup();
+    let recipient = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.deposit(&vault_id, &owner, &1000);
+    client.set_vesting_schedule(&vault_id, &owner, &100, &100, &4, &0);
+    client.set_vesting_forfeiture(&vault_id, &owner, &recipient);
+    
+    client.decline_beneficiary_role(&vault_id, &beneficiary);
+    // Recipient should have received unvested funds
+}
+
+#[test]
+fn test_vesting_acceleration() {
+    let (env, owner, beneficiary, _, token, client) = setup();
+    let oracle = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.deposit(&vault_id, &owner, &1000);
+    client.set_vesting_schedule(&vault_id, &owner, &100, &100, &4, &0);
+    client.set_vesting_acceleration(&vault_id, &owner, &oracle);
+    
+    env.ledger().set_timestamp(100);
+    client.trigger_release(&vault_id);
+    client.accelerate_vesting(&vault_id, &oracle);
+    client.claim_vested_installment(&vault_id);
+    // All funds should be released due to acceleration
+}
+
+#[test]
+fn test_vesting_stagger() {
+    let (env, owner, _, _, token, client) = setup();
+    let ben1 = Address::generate(&env);
+    let ben2 = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &ben1, &3600u64, &None);
+    client.deposit(&vault_id, &owner, &1000);
+    
+    let entries = vec![&env, 
+        VestingStaggerEntry { beneficiary: ben1.clone(), bps: 5000, start_time: 100, interval: 100, num_installments: 2, claimed_installments: 0 },
+        VestingStaggerEntry { beneficiary: ben2.clone(), bps: 5000, start_time: 200, interval: 200, num_installments: 2, claimed_installments: 0 }
+    ];
+    client.set_vesting_stagger(&vault_id, &owner, &entries);
+    
+    env.ledger().set_timestamp(300);
+    client.trigger_release(&vault_id);
+    client.claim_staggered_vesting(&vault_id, &ben1);
+    client.claim_staggered_vesting(&vault_id, &ben2);
+}

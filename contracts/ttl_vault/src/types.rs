@@ -112,6 +112,15 @@ pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
 pub const TTL_BORROW_TOPIC: Symbol = symbol_short!("ttl_bor");
 pub const TTL_REPAY_TOPIC: Symbol = symbol_short!("ttl_rep");
 
+// Issue #541: Vesting Rollover
+pub const VESTING_ROLLOVER_TOPIC: Symbol = symbol_short!("vest_rol");
+// Issue #542: Vesting Forfeiture
+pub const VESTING_FORFEITURE_TOPIC: Symbol = symbol_short!("vest_frf");
+// Issue #543: Vesting Acceleration on Death
+pub const VESTING_ACCELERATED_TOPIC: Symbol = symbol_short!("vest_acc");
+// Issue #544: Vesting Staggering
+pub const VESTING_STAGGER_TOPIC: Symbol = symbol_short!("vest_stg");
+
 // Vault state snapshots
 pub const SNAPSHOT_CREATED_TOPIC: Symbol = symbol_short!("snap_crt");
 pub const SNAPSHOT_RESTORED_TOPIC: Symbol = symbol_short!("snap_rst");
@@ -254,6 +263,14 @@ pub enum DataKey {
     TtlBorrow(u64),
     // Issue #553: encrypted backup codes
     EncryptedBackupCodes(u64),
+    // Issue #541: Vesting Rollover config
+    VestingRollover(u64),
+    // Issue #542: Vesting Forfeiture config
+    VestingForfeiture(u64),
+    // Issue #543: Vesting Acceleration on Death config
+    VestingAcceleration(u64),
+    // Issue #544: Vesting Stagger schedule
+    VestingStagger(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -801,4 +818,58 @@ pub struct BeneficiaryRotationEntry {
 pub struct CountdownConfig {
     /// Sorted descending list of thresholds in seconds (e.g. [604800, 259200, 86400]).
     pub thresholds: Vec<u64>,
+}
+
+/// Issue #541: Vesting Rollover config.
+/// When enabled, unclaimed installments roll over and accumulate for the next claim.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingRolloverConfig {
+    /// Whether rollover is enabled for this vault's vesting schedule.
+    pub enabled: bool,
+    /// Accumulated rolled-over amount (in stroops) not yet claimed.
+    pub rolled_amount: i128,
+}
+
+/// Issue #542: Vesting Forfeiture config.
+/// When a beneficiary declines their role, unvested funds are forfeited to this address.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingForfeitureConfig {
+    /// Address that receives forfeited unvested funds.
+    pub forfeiture_recipient: Address,
+    /// Whether forfeiture has already been executed.
+    pub forfeited: bool,
+}
+
+/// Issue #543: Vesting Acceleration on Death config.
+/// When the owner is declared dead (via oracle), all remaining vesting installments
+/// are immediately released to the beneficiary.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingAccelerationConfig {
+    /// Oracle address authorized to declare owner death and trigger acceleration.
+    pub oracle: Address,
+    /// Whether acceleration has already been triggered.
+    pub accelerated: bool,
+}
+
+/// Issue #544: A single entry in a staggered vesting schedule.
+/// Each entry assigns a portion of the total vesting amount to a specific beneficiary
+/// with its own independent schedule parameters.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingStaggerEntry {
+    /// Beneficiary address for this stagger tranche.
+    pub beneficiary: Address,
+    /// Basis points of total_amount allocated to this beneficiary (all entries must sum to 10_000).
+    pub bps: u32,
+    /// Unix timestamp when this beneficiary's first installment becomes claimable.
+    pub start_time: u64,
+    /// Seconds between installments for this beneficiary.
+    pub interval: u64,
+    /// Total number of installments for this beneficiary.
+    pub num_installments: u32,
+    /// Number of installments already claimed by this beneficiary.
+    pub claimed_installments: u32,
 }

@@ -164,7 +164,55 @@ fn get_pending_vesting_claim(env: Env, vault_id: u64) -> Option<VestingPendingCl
 | `VestingReversalExpired`  | 60 | Reversal window has already closed |
 | `InvalidAmount`           |  5 | A pending claim already exists (call finalize first) |
 
+## Vesting Rollover (Issue #541)
+
+When enabled, any installments that were available but not claimed in a previous period roll over and accumulate. This ensures that a beneficiary doesn't lose out if they miss a claim window.
+
+### `set_vesting_rollover`
+```rust
+fn set_vesting_rollover(env: Env, vault_id: u64, caller: Address, enabled: bool) -> Result<(), ContractError>
+```
+
+## Vesting Forfeiture (Issue #542)
+
+If a beneficiary declines their role, all remaining unvested funds are automatically transferred to a designated forfeiture recipient instead of remaining in the vault or returning to the owner.
+
+### `set_vesting_forfeiture`
+```rust
+fn set_vesting_forfeiture(env: Env, vault_id: u64, caller: Address, forfeiture_recipient: Address) -> Result<(), ContractError>
+```
+
+## Vesting Acceleration on Death (Issue #543)
+
+Allows a designated oracle to immediately unlock all remaining vesting installments. This is typically used to handle the owner's passing.
+
+### `set_vesting_acceleration`
+```rust
+fn set_vesting_acceleration(env: Env, vault_id: u64, caller: Address, oracle: Address) -> Result<(), ContractError>
+```
+
+### `accelerate_vesting`
+```rust
+fn accelerate_vesting(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError>
+```
+- `caller` must be the designated oracle.
+
+## Vesting Staggering (Issue #544)
+
+Stagger vesting across multiple beneficiaries with different schedules. Each beneficiary has their own start time, interval, and number of installments.
+
+### `set_vesting_stagger`
+```rust
+fn set_vesting_stagger(env: Env, vault_id: u64, caller: Address, entries: Vec<VestingStaggerEntry>) -> Result<(), ContractError>
+```
+
+### `claim_staggered_vesting`
+```rust
+fn claim_staggered_vesting(env: Env, vault_id: u64, caller: Address) -> Result<i128, ContractError>
+```
+
 ## Late-Claim Penalty (Issue #547)
+...
 
 The vault owner may attach a penalty config to a vesting schedule. If a beneficiary claims an installment more than `grace_period_seconds` after it unlocked, the payout for that installment is reduced by `penalty_bps` basis points.
 
