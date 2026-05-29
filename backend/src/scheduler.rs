@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
+
 use crate::{db::Db, models::Frequency};
+
 
 /// Polls preferences every minute and fires reminders for vaults whose TTL
 /// is within the user-configured window.
@@ -12,6 +15,8 @@ pub async fn run(db: Arc<Db>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
         interval.tick().await;
+
+        // 1) Existing reminder preferences scheduler.
         if let Ok(all_prefs) = db.all() {
             for prefs in all_prefs {
                 let ttl_hours = fetch_ttl_remaining(prefs.vault_id).await;
@@ -30,8 +35,52 @@ pub async fn run(db: Arc<Db>) {
                 }
             }
         }
+
+        // 2) TTL insurance scheduler.
+        extend_ttl_for_inactive_owners(&db).await;
     }
 }
+
+async fn extend_ttl_for_inactive_owners(db: &Arc<Db>) {
+    let Ok(policies) = db.all_enabled_insurance_policies() else { return };
+
+    let now = Utc::now();
+
+    for policy in policies {
+        if !policy.enabled {
+            continue;
+        }
+        // Owner inactivity
+        let Ok(owner_last_active) = db.get_owner_last_active_at(policy.vault_id) else {
+            continue;
+        };
+        let Some(last_active) = owner_last_active else {
+            continue;
+        };
+
+        let inactive_for = now.signed_duration_since(last_active).num_seconds();
+        if inactive_for < policy.inactivity_threshold_seconds as i64 {
+            continue;
+        }
+
+        // Extend TTL (stubbed as we don't have a real on-chain state updater here).
+        tracing::info!(
+            vault_id = policy.vault_id,
+            extension_seconds = policy.extension_seconds,
+            "TTL extended by insurance due to inactivity"
+        );
+
+        let _ = db.upsert_insurance_policy(&crate::models::TtlInsurancePolicy {
+            vault_id: policy.vault_id,
+            extension_seconds: policy.extension_seconds,
+            inactivity_threshold_seconds: policy.inactivity_threshold_seconds,
+            enabled: true,
+            purchased_at: policy.purchased_at,
+            last_extended_at: Some(now),
+        });
+    }
+}
+
 
 /// Stub: returns hours remaining until vault TTL expiry.
 /// Replace with a Stellar RPC call to `get_ttl_remaining`.

@@ -92,7 +92,7 @@ pub struct DeviceToken {
     pub registered_at: DateTime<Utc>,
 }
 
-/// Per-owner notification preferences.
+/// Per-owner notification preferences (used by legacy scheduler/reminder engine).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationPreferences {
     pub owner: String,
@@ -114,6 +114,8 @@ impl Default for NotificationPreferences {
         }
     }
 }
+
+
 
 /// A scheduled notification (pending delivery).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +183,48 @@ pub enum VaultStatus {
     Released,
     Paused,
 }
+
+// ── TTL Insurance models ───────────────────────────────────────────────────
+
+/// TTL insurance policy parameters purchased by a vault owner.
+///
+/// When enabled, the backend scheduler can automatically extend TTL once the
+/// owner is considered inactive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TtlInsurancePolicy {
+    /// Vault id (matches `Vault.id` semantics in this backend).
+    pub vault_id: u64,
+    /// How much TTL to extend when triggered.
+    pub extension_seconds: u64,
+    /// Consider the owner inactive if no proof-of-life/check-in was recorded
+    /// within this window.
+    pub inactivity_threshold_seconds: u64,
+    /// Whether this policy is currently active.
+    pub enabled: bool,
+    pub purchased_at: DateTime<Utc>,
+    pub last_extended_at: Option<DateTime<Utc>>,
+}
+
+/// Persisted owner activity signal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerActivity {
+    pub owner_id: u64,
+    pub last_active_at: DateTime<Utc>,
+}
+
+/// POST body to purchase/enable a TTL insurance policy.
+#[derive(Debug, Deserialize, Clone)]
+pub struct PurchaseTtlInsuranceRequest {
+    pub extension_seconds: u64,
+    pub inactivity_threshold_seconds: u64,
+}
+
+/// POST body to record owner activity (proof-of-life).
+#[derive(Debug, Deserialize, Clone)]
+pub struct RecordOwnerActivityRequest {
+    pub owner_id: u64,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultEvent {
@@ -382,13 +426,40 @@ pub enum NotificationFrequency {
     Monthly,
 }
 
+/// HTTP-layer preferences (matches routes/tests).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultNotificationPreferences {
-    pub vault_id: String,
-    pub channels: Vec<NotificationChannel>,
-    pub frequency: NotificationFrequency,
-    pub updated_at: DateTime<Utc>,
+pub struct ReminderPreferences {
+    pub vault_id: u64,
+    pub channels: Vec<Channel>,
+    pub hours_before_expiry: u32,
+    pub frequency: Frequency,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSetPreferencesRequest {
+    pub channels: Vec<Channel>,
+    pub hours_before_expiry: u32,
+    pub frequency: Frequency,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    Email,
+    Sms,
+    Push,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Frequency {
+    Once,
+    Daily,
+    Weekly,
+    Hourly,
+    Monthly,
+}
+
 
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -396,4 +467,6 @@ pub struct NotificationPreferencesRequest {
     pub channels: Vec<NotificationChannel>,
     pub frequency: NotificationFrequency,
 }
+
+
 

@@ -18,6 +18,7 @@ use types::{
     GeoCheckInEntry,
     ProofOfLifeEntry, ReleaseVoteEntry,
     BeneficiaryRotationEntry,
+    WithdrawalLimit, WithdrawalTracker, WhitelistEntry, WithdrawalReversal,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC, BENEFICIARY_TIER_SET_TOPIC,
     BENEFICIARY_WATERFALL_TOPIC, BENEFICIARY_REBALANCED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     BeneficiaryCommitment,
@@ -48,10 +49,15 @@ use types::{
     HibernationEntry,
     HIBERNATION_ENTERED_TOPIC, HIBERNATION_EXITED_TOPIC,
     INACTIVITY_PENALTY_TOPIC, BEN_ROTATION_TOPIC, CLIFF_REACHED_TOPIC,
+    WITHDRAWAL_AUDIT_TOPIC, WITHDRAWAL_FAILED_TOPIC, WITHDRAWAL_NOTIF_TOPIC,
+    WITHDRAWAL_DISPUTE_FILED_TOPIC, WITHDRAWAL_DISPUTE_RESOLVED_TOPIC,
     TTL_BORROW_TOPIC, TTL_REPAY_TOPIC,
     CHECKIN_RATE_LIMITED_TOPIC, TTL_ACCELERATE_TOPIC, CHECKIN_GEO_TOPIC,
     EncryptedBackupCodes, PasskeyAnalytics, PasskeyUsageStat,
     BACKUP_CODES_ENCRYPTED_TOPIC, PASSKEY_ANALYTICS_TOPIC,
+    WITHDRAWAL_VALIDATION_TOPIC, WITHDRAWAL_LIMIT_SET_TOPIC, WITHDRAWAL_LIMIT_EXCEEDED_TOPIC,
+    WHITELIST_ADDED_TOPIC, WHITELIST_REMOVED_TOPIC, WHITELIST_VIOLATION_TOPIC,
+    WITHDRAWAL_REVERSED_TOPIC, REVERSAL_GRACE_EXPIRED_TOPIC,
 };
 #[cfg(test)]
 mod regression_tests;
@@ -170,7 +176,18 @@ pub enum ContractError {
     InsufficientTtlToAccelerate = 61,
     TtlBorrowNotFound = 62,
     TtlBorrowAlreadyRepaid = 63,
-    BeneficiaryVetoReleaseCondition = 64,
+    // Issue #565: withdrawal scheduling validation
+    OverlappingWithdrawalSchedule = 64,
+    ConflictingWithdrawalSchedule = 65,
+    // Issue #566: withdrawal limits by time
+    DailyWithdrawalLimitExceeded = 66,
+    WeeklyWithdrawalLimitExceeded = 67,
+    MonthlyWithdrawalLimitExceeded = 68,
+    // Issue #567: withdrawal destination whitelist
+    WithdrawalDestinationNotWhitelisted = 69,
+    // Issue #568: withdrawal reversal
+    WithdrawalReversalGracePeriodExpired = 70,
+    WithdrawalAlreadyReversed = 71,
 }
 
 #[contract]
@@ -984,42 +1001,74 @@ impl TtlVaultContract {
     /// * `ContractError::InsufficientBalance` - If vault balance is less than amount
     pub fn withdraw(env: Env, vault_id: u64, caller: Address, amount: i128) -> Result<(), ContractError> {
             if Self::load_paused(&env) {
+                let timestamp = env.ledger().timestamp();
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Contract paused");
                 return Err(ContractError::Paused);
             }
             if amount <= 0 {
+                let timestamp = env.ledger().timestamp();
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Invalid amount");
                 return Err(ContractError::InvalidAmount);
             }
             caller.require_auth();
             let mut vault = Self::load_vault(&env, vault_id);
             if vault.is_paused {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault paused");
                 return Err(ContractError::Paused);
             }
             if caller != vault.owner {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Not owner");
                 return Err(ContractError::NotOwner);
             }
             if vault.status == ReleaseStatus::EmergencyFrozen {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault frozen");
                 return Err(ContractError::VaultFrozen);
             }
             if vault.status != ReleaseStatus::Locked {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault already released");
                 return Err(ContractError::AlreadyReleased);
             }
             if vault.balance < amount {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Insufficient balance");
                 return Err(ContractError::InsufficientBalance);
             }
 
             // Check withdrawal approval threshold - Issue #404
             if let Some(threshold) = vault.withdrawal_approval_threshold {
                 if amount > threshold {
+                    Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Withdrawal not approved");
                     return Err(ContractError::WithdrawalNotApproved);
                 }
+            }
+
+            // Check withdrawal limits - Issue #566
+            Self::check_withdrawal_limits(&env, vault_id, amount)?;
+
+            // Check whitelist - Issue #567
+            if !Self::is_whitelisted(&env, vault_id, &vault.owner) {
+                return Err(ContractError::WithdrawalDestinationNotWhitelisted);
             }
 
             let token_client = token::Client::new(&env, &vault.token_address);
             token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
+            
+            // Record withdrawal for reversal - Issue #568 (grace period: 24 hours)
+            Self::record_withdrawal_for_reversal(&env, vault_id, amount, 86_400);
+            
             Self::save_vault(&env, vault_id, &vault);
             Self::log_audit_entry(&env, vault_id, "withdraw", &caller, "");
             Self::append_activity_log(&env, vault_id, "withdraw", &caller, "");
+            
+            // Issue #569: Record successful withdrawal in audit trail
+            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, true, "");
+            
+            // Issue #571: Emit withdrawal notification event
+            env.events().publish(
+                (WITHDRAWAL_NOTIF_TOPIC, vault_id),
+                (&caller, amount, env.ledger().timestamp()),
+            );
+            
             env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
             env.events().publish(
                 (WITHDRAW_TOPIC, vault_id),
@@ -1069,17 +1118,21 @@ impl TtlVaultContract {
         // Validate all entries before mutating state
         for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
             if amount <= 0 {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Invalid amount");
                 return Err(ContractError::InvalidAmount);
             }
             let vault = Self::try_load_vault(&env, vault_id)
                 .ok_or(ContractError::VaultNotFound)?;
             if caller != vault.owner {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Not owner");
                 return Err(ContractError::NotOwner);
             }
             if vault.status != ReleaseStatus::Locked {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault already released");
                 return Err(ContractError::AlreadyReleased);
             }
             if vault.balance < amount {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Insufficient balance");
                 return Err(ContractError::InsufficientBalance);
             }
         }
@@ -1091,12 +1144,23 @@ impl TtlVaultContract {
         for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
             let mut vault = Self::load_vault(&env, vault_id);
             if vault.token_address != default_token {
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Incompatible token");
                 return Err(ContractError::InvalidAmount);
             }
             token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
             vault.balance -= amount;
             let remaining = vault.balance;
             Self::save_vault(&env, vault_id, &vault);
+            
+            // Issue #569: Record successful withdrawal in audit trail
+            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, true, "");
+            
+            // Issue #571: Emit withdrawal notification event
+            env.events().publish(
+                (WITHDRAWAL_NOTIF_TOPIC, vault_id),
+                (&caller, amount, env.ledger().timestamp()),
+            );
+            
             env.events().publish(
                 (WITHDRAW_TOPIC, vault_id),
                 (amount, remaining),
@@ -8021,5 +8085,345 @@ impl TtlVaultContract {
         }
 
         ttl
+    }
+
+    // --- Issue #565: Withdrawal Scheduling Validation ---
+
+    /// Validates withdrawal schedules to prevent overlapping or conflicting withdrawals.
+    /// Returns true if the schedule is valid, false otherwise.
+    fn validate_withdrawal_schedule(
+        env: &Env,
+        vault_id: u64,
+        new_timestamp: u64,
+        new_amount: i128,
+    ) -> bool {
+        let key = DataKey::WithdrawalScheduleValidation(vault_id);
+        if let Some(schedules) = env.storage().persistent().get::<DataKey, Vec<WithdrawalScheduleEntry>>(&key) {
+            for schedule in schedules.iter() {
+                // Check for overlapping withdrawals (within 1 hour window)
+                if (new_timestamp as i128 - schedule.timestamp as i128).abs() < 3600 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Schedules a withdrawal with validation to prevent conflicts.
+    /// Only the vault owner can call this.
+    pub fn schedule_withdrawal(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        timestamp: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        // Validate schedule
+        if !Self::validate_withdrawal_schedule(&env, vault_id, timestamp, amount) {
+            return Err(ContractError::ConflictingWithdrawalSchedule);
+        }
+
+        let key = DataKey::WithdrawalScheduleValidation(vault_id);
+        let mut schedules = env.storage().persistent().get::<DataKey, Vec<WithdrawalScheduleEntry>>(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        
+        schedules.push_back(WithdrawalScheduleEntry { timestamp, amount });
+        
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &schedules);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        
+        env.events().publish((WITHDRAWAL_VALIDATION_TOPIC, vault_id), (timestamp, amount));
+        Ok(())
+    }
+
+    // --- Issue #566: Withdrawal Limits by Time ---
+
+    /// Sets daily, weekly, and monthly withdrawal limits for a vault.
+    /// Only the vault owner can call this.
+    pub fn set_withdrawal_limits(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        daily_limit: i128,
+        weekly_limit: i128,
+        monthly_limit: i128,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let limits = WithdrawalLimit {
+            daily_limit,
+            weekly_limit,
+            monthly_limit,
+        };
+
+        let key = DataKey::WithdrawalLimit(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &limits);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish((WITHDRAWAL_LIMIT_SET_TOPIC, vault_id), (daily_limit, weekly_limit, monthly_limit));
+        Ok(())
+    }
+
+    /// Gets the current withdrawal limits for a vault.
+    pub fn get_withdrawal_limits(env: Env, vault_id: u64) -> Option<WithdrawalLimit> {
+        env.storage().persistent().get(&DataKey::WithdrawalLimit(vault_id))
+    }
+
+    /// Checks if a withdrawal would exceed time-based limits.
+    fn check_withdrawal_limits(
+        env: &Env,
+        vault_id: u64,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        if let Some(limits) = env.storage().persistent().get::<DataKey, WithdrawalLimit>(&DataKey::WithdrawalLimit(vault_id)) {
+            let tracker_key = DataKey::WithdrawalTracker(vault_id);
+            let now = env.ledger().timestamp();
+            
+            let mut tracker = env.storage().persistent().get::<DataKey, WithdrawalTracker>(&tracker_key)
+                .unwrap_or_else(|| WithdrawalTracker {
+                    daily_withdrawn: 0,
+                    daily_reset_at: now + 86_400,
+                    weekly_withdrawn: 0,
+                    weekly_reset_at: now + 604_800,
+                    monthly_withdrawn: 0,
+                    monthly_reset_at: now + 2_592_000,
+                });
+
+            // Reset trackers if periods have passed
+            if now >= tracker.daily_reset_at {
+                tracker.daily_withdrawn = 0;
+                tracker.daily_reset_at = now + 86_400;
+            }
+            if now >= tracker.weekly_reset_at {
+                tracker.weekly_withdrawn = 0;
+                tracker.weekly_reset_at = now + 604_800;
+            }
+            if now >= tracker.monthly_reset_at {
+                tracker.monthly_withdrawn = 0;
+                tracker.monthly_reset_at = now + 2_592_000;
+            }
+
+            // Check limits
+            if tracker.daily_withdrawn + amount > limits.daily_limit {
+                return Err(ContractError::DailyWithdrawalLimitExceeded);
+            }
+            if tracker.weekly_withdrawn + amount > limits.weekly_limit {
+                return Err(ContractError::WeeklyWithdrawalLimitExceeded);
+            }
+            if tracker.monthly_withdrawn + amount > limits.monthly_limit {
+                return Err(ContractError::MonthlyWithdrawalLimitExceeded);
+            }
+
+            // Update tracker
+            tracker.daily_withdrawn += amount;
+            tracker.weekly_withdrawn += amount;
+            tracker.monthly_withdrawn += amount;
+
+            let vault = Self::load_vault(&env, vault_id);
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&tracker_key, &tracker);
+            env.storage().persistent().extend_ttl(&tracker_key, VAULT_TTL_THRESHOLD, ttl);
+        }
+        Ok(())
+    }
+
+    // --- Issue #567: Withdrawal Destination Whitelist ---
+
+    /// Adds an address to the withdrawal whitelist for a vault.
+    /// Only the vault owner can call this.
+    pub fn add_whitelist_address(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+        label: String,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let key = DataKey::WithdrawalWhitelist(vault_id);
+        let mut whitelist = env.storage().persistent().get::<DataKey, Vec<WhitelistEntry>>(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let entry = WhitelistEntry {
+            address: address.clone(),
+            added_at: env.ledger().timestamp(),
+            label,
+        };
+        whitelist.push_back(entry);
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &whitelist);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish((WHITELIST_ADDED_TOPIC, vault_id), address);
+        Ok(())
+    }
+
+    /// Removes an address from the withdrawal whitelist for a vault.
+    pub fn remove_whitelist_address(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let key = DataKey::WithdrawalWhitelist(vault_id);
+        if let Some(whitelist) = env.storage().persistent().get::<DataKey, Vec<WhitelistEntry>>(&key) {
+            let mut new_whitelist = Vec::new(&env);
+            for entry in whitelist.iter() {
+                if entry.address != address {
+                    new_whitelist.push_back(entry);
+                }
+            }
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&key, &new_whitelist);
+            env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        }
+
+        env.events().publish((WHITELIST_REMOVED_TOPIC, vault_id), address);
+        Ok(())
+    }
+
+    /// Gets the withdrawal whitelist for a vault.
+    pub fn get_whitelist(env: Env, vault_id: u64) -> Option<Vec<WhitelistEntry>> {
+        env.storage().persistent().get(&DataKey::WithdrawalWhitelist(vault_id))
+    }
+
+    /// Checks if an address is whitelisted for withdrawals.
+    fn is_whitelisted(env: &Env, vault_id: u64, address: &Address) -> bool {
+        if let Some(whitelist) = env.storage().persistent().get::<DataKey, Vec<WhitelistEntry>>(&DataKey::WithdrawalWhitelist(vault_id)) {
+            for entry in whitelist.iter() {
+                if entry.address == *address {
+                    return true;
+                }
+            }
+            false
+        } else {
+            true // No whitelist means all addresses allowed
+        }
+    }
+
+    // --- Issue #568: Withdrawal Reversal ---
+
+    /// Records a withdrawal for potential reversal within a grace period.
+    fn record_withdrawal_for_reversal(
+        env: &Env,
+        vault_id: u64,
+        amount: i128,
+        grace_period_seconds: u64,
+    ) {
+        let counter_key = DataKey::WithdrawalReversalCounter(vault_id);
+        let withdrawal_id: u64 = env.storage().persistent().get(&counter_key).unwrap_or(0u64);
+        
+        let reversal = WithdrawalReversal {
+            withdrawal_id,
+            amount,
+            withdrawn_at: env.ledger().timestamp(),
+            grace_period_until: env.ledger().timestamp() + grace_period_seconds,
+            reversed: false,
+        };
+
+        let key = DataKey::WithdrawalReversal(vault_id, withdrawal_id);
+        let vault = Self::load_vault(&env, vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        
+        env.storage().persistent().set(&key, &reversal);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().persistent().set(&counter_key, &(withdrawal_id + 1));
+        env.storage().persistent().extend_ttl(&counter_key, VAULT_TTL_THRESHOLD, ttl);
+    }
+
+    /// Reverses a withdrawal within the grace period.
+    /// Only the vault owner can call this.
+    pub fn reverse_withdrawal(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        withdrawal_id: u64,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let key = DataKey::WithdrawalReversal(vault_id, withdrawal_id);
+        let mut reversal = env.storage().persistent().get::<DataKey, WithdrawalReversal>(&key)
+            .ok_or(ContractError::VaultNotFound)?;
+
+        if reversal.reversed {
+            return Err(ContractError::WithdrawalAlreadyReversed);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > reversal.grace_period_until {
+            return Err(ContractError::WithdrawalReversalGracePeriodExpired);
+        }
+
+        // Restore funds to vault
+        vault.balance += reversal.amount;
+        reversal.reversed = true;
+
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().persistent().set(&key, &reversal);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish((WITHDRAWAL_REVERSED_TOPIC, vault_id), (withdrawal_id, reversal.amount));
+        Ok(())
+    }
+
+    /// Gets a withdrawal reversal record.
+    pub fn get_withdrawal_reversal(
+        env: Env,
+        vault_id: u64,
+        withdrawal_id: u64,
+    ) -> Option<WithdrawalReversal> {
+        env.storage().persistent().get(&DataKey::WithdrawalReversal(vault_id, withdrawal_id))
     }
 }

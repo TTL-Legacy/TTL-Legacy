@@ -214,16 +214,203 @@ pub fn set_notification_preferences(
     prefs: crate::models::VaultNotificationPreferences,
 
 ) {
-    notif_store.lock().unwrap().insert(prefs.vault_id.clone(), prefs);
+    notif_store
+        .lock()
+        .unwrap()
+        .insert(prefs.owner.clone(), prefs);
 }
 
 pub fn get_notification_preferences(
     notif_store: &NotificationStore,
-    vault_id: &str,
+    owner: &str,
 ) -> Option<crate::models::VaultNotificationPreferences> {
 
-    notif_store.lock().unwrap().get(vault_id).cloned()
+    notif_store.lock().unwrap().get(owner).cloned()
 }
+
+// ── TTL Insurance persistence (SQLite) ───────────────────────────────────────
+
+use crate::models::{OwnerActivity, PurchaseTtlInsuranceRequest, TtlInsurancePolicy};
+
+impl Db {
+    pub fn upsert_insurance_policy(
+        &self,
+        policy: &TtlInsurancePolicy,
+    ) -> Result<(), rusqlite::Error> {
+        // Store DateTimes as RFC3339 strings.
+        let purchased_at = policy.purchased_at.to_rfc3339();
+        let last_extended_at = policy
+            .last_extended_at
+            .map(|d| d.to_rfc3339());
+
+        let enabled_i = if policy.enabled { 1i64 } else { 0i64 };
+
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO ttl_insurance_policies (
+                vault_id,
+                extension_seconds,
+                inactivity_threshold_seconds,
+                enabled,
+                purchased_at,
+                last_extended_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(vault_id) DO UPDATE SET
+                extension_seconds = excluded.extension_seconds,
+                inactivity_threshold_seconds = excluded.inactivity_threshold_seconds,
+                enabled = excluded.enabled,
+                purchased_at = excluded.purchased_at,
+                last_extended_at = excluded.last_extended_at
+            "#,
+            params![
+                policy.vault_id as i64,
+                policy.extension_seconds as i64,
+                policy.inactivity_threshold_seconds as i64,
+                enabled_i,
+                purchased_at,
+                last_extended_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_insurance_policy(&self, vault_id: u64) -> Result<Option<TtlInsurancePolicy>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT vault_id, extension_seconds, inactivity_threshold_seconds, enabled, purchased_at, last_extended_at
+            FROM ttl_insurance_policies
+            WHERE vault_id = ?1
+            "#,
+        )?;
+
+        let row_res = stmt.query_row(params![vault_id as i64], |r| {
+            let purchased_at_str: String = r.get(4)?;
+            let purchased_at = chrono::DateTime::parse_from_rfc3339(&purchased_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+
+            let last_extended_at: Option<String> = r.get(5)?;
+            let last_extended_at_dt = match last_extended_at {
+                Some(s) => {
+                    let dt = chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                    Some(dt)
+                }
+                None => None,
+            };
+
+            let enabled_i: i64 = r.get(3)?;
+
+            Ok(TtlInsurancePolicy {
+                vault_id: r.get::<_, i64>(0)? as u64,
+                extension_seconds: r.get::<_, i64>(1)? as u64,
+                inactivity_threshold_seconds: r.get::<_, i64>(2)? as u64,
+                enabled: enabled_i != 0,
+                purchased_at,
+                last_extended_at: last_extended_at_dt,
+            })
+        });
+
+        match row_res {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn upsert_owner_activity(&self, owner_id: u64, last_active_at: chrono::DateTime<chrono::Utc>) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO owner_activity (owner_id, last_active_at)
+            VALUES (?1, ?2)
+            ON CONFLICT(owner_id) DO UPDATE SET
+                last_active_at = excluded.last_active_at
+            "#,
+            params![
+                owner_id as i64,
+                last_active_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_owner_last_active_at(
+        &self,
+        owner_id: u64,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT last_active_at
+            FROM owner_activity
+            WHERE owner_id = ?1
+            "#,
+        )?;
+
+        let row_res: Result<String, rusqlite::Error> = stmt.query_row(params![owner_id as i64], |r| r.get(0));
+
+        match row_res {
+            Ok(s) => {
+                let dt = chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                Ok(Some(dt))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn all_enabled_insurance_policies(&self) -> Result<Vec<TtlInsurancePolicy>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT vault_id, extension_seconds, inactivity_threshold_seconds, enabled, purchased_at, last_extended_at
+            FROM ttl_insurance_policies
+            WHERE enabled = 1
+            "#,
+        )?;
+
+        let iter = stmt.query_map([], |r| {
+            let purchased_at_str: String = r.get(4)?;
+            let purchased_at = chrono::DateTime::parse_from_rfc3339(&purchased_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+
+            let last_extended_at: Option<String> = r.get(5)?;
+            let last_extended_at_dt = match last_extended_at {
+                Some(s) => {
+                    let dt = chrono::DateTime::parse_from_rfc3339(&s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                    Some(dt)
+                }
+                None => None,
+            };
+
+            let enabled_i: i64 = r.get(3)?;
+
+            Ok(TtlInsurancePolicy {
+                vault_id: r.get::<_, i64>(0)? as u64,
+                extension_seconds: r.get::<_, i64>(1)? as u64,
+                inactivity_threshold_seconds: r.get::<_, i64>(2)? as u64,
+                enabled: enabled_i != 0,
+                purchased_at,
+                last_extended_at: last_extended_at_dt,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+}
+
 
 use rusqlite::{params, Connection};
 
@@ -235,18 +422,17 @@ pub struct Db {
     conn: std::sync::Mutex<Connection>,
 }
 
-
-
 impl Db {
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
-let conn = Connection::open(path)?;
-        Ok(Self { conn: std::sync::Mutex::new(conn) })
-
+        let conn = Connection::open(path)?;
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
     }
 
-    pub fn migrate(&self) -> Result<(), rusqlite::Error> {
-self.conn.lock().unwrap().execute_batch(
 
+    pub fn migrate(&self) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS reminder_preferences (
                 vault_id              INTEGER PRIMARY KEY,
@@ -254,10 +440,25 @@ self.conn.lock().unwrap().execute_batch(
                 hours_before_expiry  INTEGER NOT NULL,
                 frequency            TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS ttl_insurance_policies (
+                vault_id                      INTEGER PRIMARY KEY,
+                extension_seconds            INTEGER NOT NULL,
+                inactivity_threshold_seconds INTEGER NOT NULL,
+                enabled                       INTEGER NOT NULL,
+                purchased_at                  TEXT NOT NULL,
+                last_extended_at              TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS owner_activity (
+                owner_id        INTEGER PRIMARY KEY,
+                last_active_at TEXT NOT NULL
+            );
             "#,
         )?;
         Ok(())
     }
+
 
     pub fn upsert(&self, prefs: &ReminderPreferences) -> Result<(), rusqlite::Error> {
         let channels_json = serde_json::to_string(&prefs.channels).unwrap();

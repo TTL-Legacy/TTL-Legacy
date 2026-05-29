@@ -36,6 +36,10 @@ This Soroban implementation makes TTL-Legacy:
 - **Legacy Dashboard**: Minimalist frontend to manage vault state and history
 - **Native XLM Support**: Built-in support for Stellar Lumens
 - **Token Ready**: Architecture supports custom Stellar tokens (roadmap item)
+- **Withdrawal Audit Trail**: Track all withdrawal attempts (successful and failed) with comprehensive details
+- **Withdrawal Batching**: Batch multiple small withdrawals into single transaction for efficiency
+- **Withdrawal Notifications**: Real-time alerts to vault owners for all withdrawal attempts
+- **Withdrawal Dispute**: Allow disputing unauthorized withdrawals within 24-hour grace period
 
 ## 🛠️ Quick Start
 
@@ -131,6 +135,7 @@ The script will display the target network and identity, then require you to typ
 - [Passkey Integration](docs/passkeys.md)
 - [Beneficiary Conditional Acceptance](docs/beneficiary-conditional-acceptance.md)
 - [Beneficiary Conflict Resolution](docs/beneficiary-conflict-resolution.md)
+- [Withdrawal Features](docs/withdrawal-features.md)
 - [Threat Model & Security](docs/security.md)
 - [Security Policy & Vulnerability Disclosure](SECURITY.md)
 - [Roadmap](docs/roadmap.md)

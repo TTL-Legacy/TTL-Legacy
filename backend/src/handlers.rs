@@ -1,10 +1,10 @@
 use crate::models::*;
 use crate::db::*;
-use crate::notifications::NotificationService;
 use chrono::Utc;
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
+
 
 pub fn search_vaults_handler(
     store: &VaultStore,
@@ -445,12 +445,22 @@ pub fn set_notification_preferences_handler(
         .get(vault_id)
         .ok_or_else(|| "Vault not found".to_string())?;
 
-    let prefs = VaultNotificationPreferences {
-        vault_id: vault_id.to_string(),
-
-        channels: request.channels,
-        frequency: request.frequency,
-        updated_at: Utc::now(),
+    // Map HTTP channels into legacy boolean flags.
+    let prefs = NotificationPreferences {
+        owner: vault_id.to_string(),
+        expiry_warning_enabled: request
+            .channels
+            .iter()
+            .any(|c| matches!(c, NotificationChannel::Email | NotificationChannel::Push)),
+        check_in_reminder_enabled: request
+            .channels
+            .iter()
+            .any(|c| matches!(c, NotificationChannel::Sms | NotificationChannel::Push)),
+        vault_released_enabled: request
+            .channels
+            .iter()
+            .any(|c| matches!(c, NotificationChannel::Push)),
+        warning_hours_before: 24,
     };
 
     set_notification_preferences(notif_store, prefs.clone());
@@ -907,9 +917,10 @@ mod tests {
         let result = set_notification_preferences_handler(&store, &notif_store, "v1", req);
         assert!(result.is_ok());
         let prefs = result.unwrap();
-        assert_eq!(prefs.vault_id, "v1");
-        assert_eq!(prefs.frequency, NotificationFrequency::Weekly);
-        assert!(prefs.channels.contains(&NotificationChannel::Email));
+        assert_eq!(prefs.owner, "v1");
+        assert!(prefs.expiry_warning_enabled);
+        assert!(prefs.vault_released_enabled || prefs.check_in_reminder_enabled);
+
     }
 
     #[test]
@@ -935,7 +946,7 @@ mod tests {
 
         let prefs = get_notification_preferences_handler(&notif_store, "v1");
         assert!(prefs.is_some());
-        assert_eq!(prefs.unwrap().frequency, NotificationFrequency::Daily);
+        assert!(prefs.unwrap().check_in_reminder_enabled);
     }
 
     #[test]

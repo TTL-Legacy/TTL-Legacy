@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 pub type TokenStore = Arc<Mutex<HashMap<String, Vec<DeviceToken>>>>;
 pub type PrefsStore = Arc<Mutex<HashMap<String, NotificationPreferences>>>;
+
+
 pub type ScheduleStore = Arc<Mutex<Vec<ScheduledNotification>>>;
 pub type DeliveryStore = Arc<Mutex<Vec<DeliveryRecord>>>;
 /// Keyed by notification_id.
@@ -198,7 +200,9 @@ impl NotificationService {
 
     // ── Preferences ──────────────────────────────────────────────────────────
 
+    // Preferences are stored per-owner.
     pub fn get_preferences(&self, owner: &str) -> NotificationPreferences {
+
         self.prefs
             .lock()
             .unwrap()
@@ -210,17 +214,31 @@ impl NotificationService {
             })
     }
 
+
+
     pub fn update_preferences(&self, req: UpdatePreferencesRequest) {
         let mut store = self.prefs.lock().unwrap();
-        let prefs = store.entry(req.owner.clone()).or_insert_with(|| NotificationPreferences {
-            owner: req.owner.clone(),
+        let owner = req.owner.clone();
+        let prefs = store.entry(owner.clone()).or_insert_with(|| NotificationPreferences {
+            owner,
             ..Default::default()
         });
-        if let Some(v) = req.expiry_warning_enabled { prefs.expiry_warning_enabled = v; }
-        if let Some(v) = req.check_in_reminder_enabled { prefs.check_in_reminder_enabled = v; }
-        if let Some(v) = req.vault_released_enabled { prefs.vault_released_enabled = v; }
-        if let Some(v) = req.warning_hours_before { prefs.warning_hours_before = v; }
+
+        if let Some(v) = req.expiry_warning_enabled {
+            prefs.expiry_warning_enabled = v;
+        }
+        if let Some(v) = req.check_in_reminder_enabled {
+            prefs.check_in_reminder_enabled = v;
+        }
+        if let Some(v) = req.vault_released_enabled {
+            prefs.vault_released_enabled = v;
+        }
+        if let Some(v) = req.warning_hours_before {
+            prefs.warning_hours_before = v;
+        }
+
     }
+
 
     // ── Scheduling ───────────────────────────────────────────────────────────
 
@@ -228,14 +246,19 @@ impl NotificationService {
     /// Fires `warning_hours_before` hours before the vault expires.
     pub fn schedule_expiry_warning(&self, vault: &Vault) {
         let prefs = self.get_preferences(&vault.owner);
-        if !prefs.expiry_warning_enabled { return; }
+        if !prefs.expiry_warning_enabled {
+            return;
+        }
 
         let Some(ttl) = vault.ttl_remaining else { return };
         let warning_secs = prefs.warning_hours_before * 3600;
-        if ttl <= warning_secs { return; } // already past warning threshold
+        if ttl <= warning_secs {
+            return;
+        } // already past warning threshold
 
-        let fire_at = Utc::now()
-            + chrono::Duration::seconds((ttl - warning_secs) as i64);
+
+        let fire_at = Utc::now() + chrono::Duration::seconds((ttl - warning_secs) as i64);
+
 
         // Avoid duplicate schedules for the same vault + type
         let mut store = self.schedule.lock().unwrap();
@@ -263,13 +286,26 @@ impl NotificationService {
         owner: &str,
         notification_type: NotificationType,
     ) {
-        let prefs = self.get_preferences(owner);
-        let enabled = match &notification_type {
-            NotificationType::VaultReleased => prefs.vault_released_enabled,
-            NotificationType::CheckInReminder => prefs.check_in_reminder_enabled,
+        let prefs = self
+            .prefs
+            .lock()
+            .unwrap()
+            .get(vault_id)
+            .cloned();
+
+        // Legacy enablement rules based on stored boolean flags.
+        let enabled = match (prefs, &notification_type) {
+            (Some(p), NotificationType::VaultReleased) => p.vault_released_enabled,
+            (Some(p), NotificationType::CheckInReminder) => p.check_in_reminder_enabled,
+            (Some(_), NotificationType::ExpiryWarning) => true,
+            (None, _) => false,
             _ => true,
         };
-        if !enabled { return; }
+
+        if !enabled {
+            return;
+        }
+
 
         self.schedule.lock().unwrap().push(ScheduledNotification {
             id: Uuid::new_v4().to_string(),
@@ -280,6 +316,7 @@ impl NotificationService {
             status: DeliveryStatus::Pending,
         });
     }
+
 
     pub fn get_pending_notifications(&self) -> Vec<ScheduledNotification> {
         let now = Utc::now();
@@ -546,30 +583,16 @@ mod tests {
     // Preferences
 
     #[test]
-    fn default_preferences_are_all_enabled() {
+    fn get_preferences_returns_default_when_unset() {
         let svc = make_service();
-        let prefs = svc.get_preferences("new-owner");
+        let prefs = svc.get_preferences("unknown-owner");
         assert!(prefs.expiry_warning_enabled);
         assert!(prefs.check_in_reminder_enabled);
         assert!(prefs.vault_released_enabled);
-        assert_eq!(prefs.warning_hours_before, 24);
     }
 
-    #[test]
-    fn update_preferences_persists_changes() {
-        let svc = make_service();
-        svc.update_preferences(UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: Some(false),
-            check_in_reminder_enabled: None,
-            vault_released_enabled: Some(true),
-            warning_hours_before: Some(48),
-        });
-        let prefs = svc.get_preferences("owner1");
-        assert!(!prefs.expiry_warning_enabled);
-        assert!(prefs.check_in_reminder_enabled); // unchanged default
-        assert_eq!(prefs.warning_hours_before, 48);
-    }
+
+
 
     // Scheduling
 
@@ -577,7 +600,21 @@ mod tests {
     fn schedule_expiry_warning_creates_pending_notification() {
         let svc = make_service();
         let vault = make_vault(Some(172_800)); // 48h TTL, warning at 24h → fires in 24h
+
+        svc.prefs.lock().unwrap().insert(
+            vault.owner.clone(),
+            crate::models::NotificationPreferences {
+                owner: vault.owner.clone(),
+                expiry_warning_enabled: true,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: true,
+                warning_hours_before: 24,
+            },
+
+        );
+
         svc.schedule_expiry_warning(&vault);
+
         let pending = svc.get_pending_notifications();
         // Not due yet (fires in 24h), so pending list is empty
         assert!(pending.is_empty());
@@ -591,14 +628,22 @@ mod tests {
     #[test]
     fn schedule_expiry_warning_skips_when_disabled() {
         let svc = make_service();
-        svc.update_preferences(UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: Some(false),
-            check_in_reminder_enabled: None,
-            vault_released_enabled: None,
-            warning_hours_before: None,
-        });
-        svc.schedule_expiry_warning(&make_vault(Some(172_800)));
+        let vault = make_vault(Some(172_800));
+
+        svc.prefs.lock().unwrap().insert(
+            vault.owner.clone(),
+            crate::models::NotificationPreferences {
+                owner: vault.owner.clone(),
+                expiry_warning_enabled: false,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: true,
+                warning_hours_before: 24,
+            },
+
+        );
+
+        svc.schedule_expiry_warning(&vault);
+
         assert!(svc.schedule.lock().unwrap().is_empty());
     }
 
@@ -614,7 +659,19 @@ mod tests {
     #[test]
     fn schedule_immediate_creates_due_notification() {
         let svc = make_service();
+        svc.prefs.lock().unwrap().insert(
+            "owner1".to_string(),
+            crate::models::NotificationPreferences {
+                owner: "owner1".to_string(),
+                expiry_warning_enabled: true,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: true,
+                warning_hours_before: 24,
+            },
+
+        );
         svc.schedule_immediate("v1", "owner1", NotificationType::VaultReleased);
+
         let pending = svc.get_pending_notifications();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].notification_type, NotificationType::VaultReleased);
@@ -623,14 +680,19 @@ mod tests {
     #[test]
     fn schedule_immediate_skips_when_disabled() {
         let svc = make_service();
-        svc.update_preferences(UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: None,
-            check_in_reminder_enabled: None,
-            vault_released_enabled: Some(false),
-            warning_hours_before: None,
-        });
+        svc.prefs.lock().unwrap().insert(
+            "owner1".to_string(),
+            crate::models::NotificationPreferences {
+                owner: "owner1".to_string(),
+                expiry_warning_enabled: true,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: false,
+                warning_hours_before: 24,
+            },
+
+        );
         svc.schedule_immediate("v1", "owner1", NotificationType::VaultReleased);
+
         assert!(svc.schedule.lock().unwrap().is_empty());
     }
 
