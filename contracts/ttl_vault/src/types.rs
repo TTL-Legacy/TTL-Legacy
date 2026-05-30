@@ -166,6 +166,14 @@ pub const VESTING_ACCELERATED_TOPIC: Symbol = symbol_short!("vest_acc");
 // Issue #544: Vesting Staggering
 pub const VESTING_STAGGER_TOPIC: Symbol = symbol_short!("vest_stg");
 
+// Issue #545: Vesting Catch-Up
+pub const VESTING_CATCHUP_SET_TOPIC: Symbol = symbol_short!("vest_cu");
+pub const VESTING_CATCHUP_CLAIMED_TOPIC: Symbol = symbol_short!("vest_cuc");
+
+// Issue #546: Vesting Bonus
+pub const VESTING_BONUS_SET_TOPIC: Symbol = symbol_short!("vest_bon");
+pub const VESTING_BONUS_CLAIMED_TOPIC: Symbol = symbol_short!("vest_bonc");
+
 // Vault state snapshots
 pub const SNAPSHOT_CREATED_TOPIC: Symbol = symbol_short!("snap_crt");
 pub const SNAPSHOT_RESTORED_TOPIC: Symbol = symbol_short!("snap_rst");
@@ -345,6 +353,10 @@ pub enum DataKey {
     // Issue #568: withdrawal reversal
     WithdrawalReversal(u64, u64), // (vault_id, withdrawal_id)
     WithdrawalReversalCounter(u64),
+    // Issue #545: vesting catch-up
+    VestingCatchUp(u64),
+    // Issue #546: vesting bonus
+    VestingBonus(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -1033,4 +1045,28 @@ pub struct WithdrawalReversal {
     pub withdrawn_at: u64,
     pub grace_period_until: u64,
     pub reversed: bool,
+}
+
+/// Vesting catch-up configuration - Issue #545.
+/// When enabled, a beneficiary who missed claiming periods can catch up
+/// and claim all accumulated missed installments in a single call.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingCatchUpConfig {
+    /// Whether catch-up claiming is enabled for this vault.
+    pub enabled: bool,
+    /// Maximum number of missed installments that can be caught up in one call.
+    /// 0 means unlimited (all missed installments can be claimed at once).
+    pub max_catchup_installments: u32,
+}
+
+/// Vesting bonus configuration - Issue #546.
+/// Awards a bonus to the beneficiary when they claim on time (within the grace window).
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingBonusConfig {
+    /// Bonus in basis points awarded for on-time claims (e.g., 100 = 1%).
+    pub bonus_bps: u32,
+    /// Seconds after an installment unlocks within which a claim is considered "on time".
+    pub on_time_window_seconds: u64,
 }

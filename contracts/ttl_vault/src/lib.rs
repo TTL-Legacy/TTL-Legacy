@@ -60,6 +60,9 @@ use types::{
     WITHDRAWAL_VALIDATION_TOPIC, WITHDRAWAL_LIMIT_SET_TOPIC, WITHDRAWAL_LIMIT_EXCEEDED_TOPIC,
     WHITELIST_ADDED_TOPIC, WHITELIST_REMOVED_TOPIC, WHITELIST_VIOLATION_TOPIC,
     WITHDRAWAL_REVERSED_TOPIC, REVERSAL_GRACE_EXPIRED_TOPIC,
+    VestingCatchUpConfig, VestingBonusConfig,
+    VESTING_CATCHUP_SET_TOPIC, VESTING_CATCHUP_CLAIMED_TOPIC,
+    VESTING_BONUS_SET_TOPIC, VESTING_BONUS_CLAIMED_TOPIC,
 };
 #[cfg(test)]
 mod regression_tests;
@@ -190,6 +193,10 @@ pub enum ContractError {
     // Issue #568: withdrawal reversal
     WithdrawalReversalGracePeriodExpired = 70,
     WithdrawalAlreadyReversed = 71,
+    // Issue #545: vesting catch-up
+    CatchUpNotEnabled = 72,
+    // Issue #546: vesting bonus
+    BonusNotEnabled = 73,
 }
 
 #[contract]
@@ -9650,5 +9657,384 @@ impl TtlVaultContract {
         withdrawal_id: u64,
     ) -> Option<WithdrawalReversal> {
         env.storage().persistent().get(&DataKey::WithdrawalReversal(vault_id, withdrawal_id))
+    }
+
+    // --- Issue #545: Vesting Catch-Up ---
+
+    /// Configures catch-up vesting for a vault.
+    ///
+    /// When enabled, a beneficiary who missed claiming periods can catch up and claim
+    /// all accumulated missed installments in a single `claim_catchup_vesting` call.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault to configure
+    /// * `caller` - Must be the vault owner
+    /// * `enabled` - Whether catch-up claiming is enabled
+    /// * `max_catchup_installments` - Max missed installments claimable at once (0 = unlimited)
+    pub fn set_vesting_catchup(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        enabled: bool,
+        max_catchup_installments: u32,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let config = VestingCatchUpConfig { enabled, max_catchup_installments };
+        let key = DataKey::VestingCatchUp(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &config);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((VESTING_CATCHUP_SET_TOPIC, vault_id), (enabled, max_catchup_installments));
+        Ok(())
+    }
+
+    /// Returns the catch-up vesting configuration for a vault.
+    pub fn get_vesting_catchup(env: Env, vault_id: u64) -> Option<VestingCatchUpConfig> {
+        env.storage().persistent().get(&DataKey::VestingCatchUp(vault_id))
+    }
+
+    /// Claims all accumulated missed vesting installments in one call.
+    ///
+    /// Requires catch-up to be enabled via `set_vesting_catchup`. Transfers all
+    /// unlocked-but-unclaimed installments up to `max_catchup_installments` (if set).
+    ///
+    /// # Returns
+    /// Total amount transferred to the beneficiary.
+    ///
+    /// # Errors
+    /// * `ContractError::CatchUpNotEnabled` - If catch-up is not configured or disabled
+    /// * `ContractError::VestingNotFound` - If no vesting schedule exists
+    /// * `ContractError::AlreadyReleased` - If vault is not in Released status
+    /// * `ContractError::NothingToClaimYet` - If no missed installments to catch up on
+    /// * `ContractError::VestingAlreadyComplete` - If all installments already claimed
+    pub fn claim_catchup_vesting(env: Env, vault_id: u64) -> Result<i128, ContractError> {
+        Self::assert_not_paused(&env);
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        if vault.status != ReleaseStatus::Released {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let catchup_cfg: VestingCatchUpConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VestingCatchUp(vault_id))
+            .ok_or(ContractError::CatchUpNotEnabled)?;
+
+        if !catchup_cfg.enabled {
+            return Err(ContractError::CatchUpNotEnabled);
+        }
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VestingSchedule(vault_id))
+            .ok_or(ContractError::VestingNotFound)?;
+
+        if schedule.claimed_installments >= schedule.num_installments {
+            return Err(ContractError::VestingAlreadyComplete);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < schedule.start_time {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Enforce cliff
+        if schedule.cliff_period > 0 && now < schedule.start_time + schedule.cliff_period {
+            return Err(ContractError::CliffNotReached);
+        }
+
+        let elapsed = now.saturating_sub(schedule.start_time);
+        let unlocked = ((elapsed / schedule.interval) + 1)
+            .min(schedule.num_installments as u64) as u32;
+
+        let mut claimable = unlocked.saturating_sub(schedule.claimed_installments);
+        if claimable == 0 {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Apply max catch-up limit if set
+        if catchup_cfg.max_catchup_installments > 0 {
+            claimable = claimable.min(catchup_cfg.max_catchup_installments);
+        }
+
+        let new_claimed = schedule.claimed_installments + claimable;
+        let per_installment = schedule.total_amount / schedule.num_installments as i128;
+        let amount = if new_claimed >= schedule.num_installments {
+            vault.balance
+        } else {
+            per_installment * claimable as i128
+        };
+
+        if vault.balance < amount {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        let token_client = token::Client::new(&env, &vault.token_address);
+
+        if vault.beneficiaries.is_empty() {
+            token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &amount);
+            env.events().publish(
+                (VESTING_CATCHUP_CLAIMED_TOPIC, vault_id),
+                (vault.beneficiary.clone(), amount, claimable),
+            );
+        } else {
+            let mut distributed: i128 = 0;
+            let last_idx = vault.beneficiaries.len() - 1;
+            for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                let share = if i as u32 == last_idx {
+                    amount - distributed
+                } else {
+                    amount * (entry.bps as i128) / 10_000
+                };
+                if share > 0 {
+                    token_client.transfer(&env.current_contract_address(), &entry.address, &share);
+                }
+                distributed += share;
+                env.events().publish(
+                    (VESTING_CATCHUP_CLAIMED_TOPIC, vault_id),
+                    (entry.address.clone(), share, claimable),
+                );
+            }
+        }
+
+        vault.balance -= amount;
+        schedule.claimed_installments = new_claimed;
+        Self::save_vault(&env, vault_id, &vault);
+
+        let sched_key = DataKey::VestingSchedule(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage().persistent().extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(amount)
+    }
+
+    // --- Issue #546: Vesting Bonus ---
+
+    /// Configures a bonus for on-time vesting claims.
+    ///
+    /// When configured, beneficiaries who claim within `on_time_window_seconds` of an
+    /// installment unlocking receive a bonus of `bonus_bps` basis points on top of
+    /// their normal installment amount.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault to configure
+    /// * `caller` - Must be the vault owner
+    /// * `bonus_bps` - Bonus in basis points (e.g., 100 = 1%)
+    /// * `on_time_window_seconds` - Seconds after unlock within which claim is "on time"
+    pub fn set_vesting_bonus(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        bonus_bps: u32,
+        on_time_window_seconds: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if bonus_bps == 0 || bonus_bps > 10_000 {
+            return Err(ContractError::InvalidBps);
+        }
+        let config = VestingBonusConfig { bonus_bps, on_time_window_seconds };
+        let key = DataKey::VestingBonus(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &config);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((VESTING_BONUS_SET_TOPIC, vault_id), (bonus_bps, on_time_window_seconds));
+        Ok(())
+    }
+
+    /// Returns the vesting bonus configuration for a vault.
+    pub fn get_vesting_bonus(env: Env, vault_id: u64) -> Option<VestingBonusConfig> {
+        env.storage().persistent().get(&DataKey::VestingBonus(vault_id))
+    }
+
+    /// Claims vesting installments with an on-time bonus applied if eligible.
+    ///
+    /// Behaves like `claim_vested_installment` but additionally checks if a bonus
+    /// config exists. If all claimable installments are claimed within the on-time
+    /// window, the bonus is applied on top of the base payout.
+    ///
+    /// # Returns
+    /// Total amount transferred (base + bonus if on time).
+    ///
+    /// # Errors
+    /// * `ContractError::BonusNotEnabled` - If no bonus config is set
+    /// * `ContractError::VestingNotFound` - If no vesting schedule exists
+    /// * `ContractError::AlreadyReleased` - If vault is not in Released status
+    /// * `ContractError::NothingToClaimYet` - If no installments available
+    /// * `ContractError::VestingAlreadyComplete` - If all installments already claimed
+    /// * `ContractError::InsufficientBalance` - If vault balance is too low for bonus
+    pub fn claim_with_bonus(env: Env, vault_id: u64) -> Result<i128, ContractError> {
+        Self::assert_not_paused(&env);
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        if vault.status != ReleaseStatus::Released {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let bonus_cfg: VestingBonusConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VestingBonus(vault_id))
+            .ok_or(ContractError::BonusNotEnabled)?;
+
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VestingSchedule(vault_id))
+            .ok_or(ContractError::VestingNotFound)?;
+
+        if schedule.claimed_installments >= schedule.num_installments {
+            return Err(ContractError::VestingAlreadyComplete);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < schedule.start_time {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Enforce cliff
+        if schedule.cliff_period > 0 && now < schedule.start_time + schedule.cliff_period {
+            return Err(ContractError::CliffNotReached);
+        }
+
+        let elapsed = now.saturating_sub(schedule.start_time);
+        let unlocked = ((elapsed / schedule.interval) + 1)
+            .min(schedule.num_installments as u64) as u32;
+
+        let claimable = unlocked.saturating_sub(schedule.claimed_installments);
+        if claimable == 0 {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        let per_installment = schedule.total_amount / schedule.num_installments as i128;
+        let base_amount = if unlocked >= schedule.num_installments {
+            vault.balance
+        } else {
+            per_installment * claimable as i128
+        };
+
+        // Determine if all claimable installments are on time.
+        // An installment i (1-based from claimed+1) is on time if:
+        //   now <= unlock_time + on_time_window_seconds
+        let mut all_on_time = true;
+        for i in (schedule.claimed_installments + 1)..=unlocked {
+            let unlock_time = schedule
+                .start_time
+                .saturating_add((i as u64 - 1).saturating_mul(schedule.interval));
+            if now > unlock_time + bonus_cfg.on_time_window_seconds {
+                all_on_time = false;
+                break;
+            }
+        }
+
+        let bonus = if all_on_time {
+            base_amount * bonus_cfg.bonus_bps as i128 / 10_000
+        } else {
+            0
+        };
+
+        let total_amount = base_amount + bonus;
+
+        if vault.balance < total_amount {
+            // If vault can't cover the bonus, pay base only
+            let fallback = base_amount.min(vault.balance);
+            if vault.balance < fallback {
+                return Err(ContractError::InsufficientBalance);
+            }
+            // Pay base without bonus
+            let token_client = token::Client::new(&env, &vault.token_address);
+            if vault.beneficiaries.is_empty() {
+                token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &fallback);
+                env.events().publish(
+                    (VESTING_BONUS_CLAIMED_TOPIC, vault_id),
+                    (vault.beneficiary.clone(), fallback, 0i128),
+                );
+            } else {
+                let mut distributed: i128 = 0;
+                let last_idx = vault.beneficiaries.len() - 1;
+                for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                    let share = if i as u32 == last_idx {
+                        fallback - distributed
+                    } else {
+                        fallback * (entry.bps as i128) / 10_000
+                    };
+                    if share > 0 {
+                        token_client.transfer(&env.current_contract_address(), &entry.address, &share);
+                    }
+                    distributed += share;
+                    env.events().publish(
+                        (VESTING_BONUS_CLAIMED_TOPIC, vault_id),
+                        (entry.address.clone(), share, 0i128),
+                    );
+                }
+            }
+            vault.balance -= fallback;
+            schedule.claimed_installments = unlocked;
+            Self::save_vault(&env, vault_id, &vault);
+            let sched_key = DataKey::VestingSchedule(vault_id);
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&sched_key, &schedule);
+            env.storage().persistent().extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+            env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            return Ok(fallback);
+        }
+
+        let token_client = token::Client::new(&env, &vault.token_address);
+
+        if vault.beneficiaries.is_empty() {
+            token_client.transfer(&env.current_contract_address(), &vault.beneficiary, &total_amount);
+            env.events().publish(
+                (VESTING_BONUS_CLAIMED_TOPIC, vault_id),
+                (vault.beneficiary.clone(), total_amount, bonus),
+            );
+        } else {
+            let mut distributed: i128 = 0;
+            let last_idx = vault.beneficiaries.len() - 1;
+            for (i, entry) in vault.beneficiaries.iter().enumerate() {
+                let share = if i as u32 == last_idx {
+                    total_amount - distributed
+                } else {
+                    total_amount * (entry.bps as i128) / 10_000
+                };
+                if share > 0 {
+                    token_client.transfer(&env.current_contract_address(), &entry.address, &share);
+                }
+                distributed += share;
+                let entry_bonus = if all_on_time {
+                    share * bonus_cfg.bonus_bps as i128 / (10_000 + bonus_cfg.bonus_bps as i128)
+                } else {
+                    0
+                };
+                env.events().publish(
+                    (VESTING_BONUS_CLAIMED_TOPIC, vault_id),
+                    (entry.address.clone(), share, entry_bonus),
+                );
+            }
+        }
+
+        vault.balance -= total_amount;
+        schedule.claimed_installments = unlocked;
+        Self::save_vault(&env, vault_id, &vault);
+
+        let sched_key = DataKey::VestingSchedule(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage().persistent().extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(total_amount)
     }
 }

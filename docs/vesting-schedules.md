@@ -211,6 +211,96 @@ fn set_vesting_stagger(env: Env, vault_id: u64, caller: Address, entries: Vec<Ve
 fn claim_staggered_vesting(env: Env, vault_id: u64, caller: Address) -> Result<i128, ContractError>
 ```
 
+## Vesting Catch-Up (Issue #545)
+
+When enabled, a beneficiary who missed claiming periods can catch up and claim all accumulated missed installments in a single call, rather than having to call `claim_vested_installment` multiple times.
+
+### `set_vesting_catchup`
+
+```rust
+fn set_vesting_catchup(
+    env: Env,
+    vault_id: u64,
+    caller: Address,           // must be vault owner
+    enabled: bool,
+    max_catchup_installments: u32, // 0 = unlimited
+) -> Result<(), ContractError>
+```
+
+### `get_vesting_catchup`
+
+```rust
+fn get_vesting_catchup(env: Env, vault_id: u64) -> Option<VestingCatchUpConfig>
+```
+
+### `claim_catchup_vesting`
+
+```rust
+fn claim_catchup_vesting(env: Env, vault_id: u64) -> Result<i128, ContractError>
+```
+
+Claims all unlocked-but-unclaimed installments at once. If `max_catchup_installments` is set, at most that many missed installments are claimed per call.
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `CatchUpNotEnabled` | 72 | Catch-up not configured or disabled for this vault |
+| `VestingNotFound`   | 22 | No vesting schedule attached |
+| `NothingToClaimYet` | 23 | No missed installments to catch up on |
+| `VestingAlreadyComplete` | 24 | All installments already claimed |
+
+### Events
+
+| Topic | Data | Emitted when |
+|-------|------|--------------|
+| `vest_cu` | `(enabled, max_catchup_installments)` | Catch-up config set |
+| `vest_cuc` | `(beneficiary, amount, installments_claimed)` | Catch-up claimed |
+
+## Vesting Bonus (Issue #546)
+
+Awards a bonus to the beneficiary when they claim on time — i.e., within `on_time_window_seconds` of an installment unlocking. Use `claim_with_bonus` instead of `claim_vested_installment` to receive the bonus.
+
+### `set_vesting_bonus`
+
+```rust
+fn set_vesting_bonus(
+    env: Env,
+    vault_id: u64,
+    caller: Address,              // must be vault owner
+    bonus_bps: u32,               // 1–10000 (e.g. 100 = 1%)
+    on_time_window_seconds: u64,  // seconds after unlock to qualify
+) -> Result<(), ContractError>
+```
+
+### `get_vesting_bonus`
+
+```rust
+fn get_vesting_bonus(env: Env, vault_id: u64) -> Option<VestingBonusConfig>
+```
+
+### `claim_with_bonus`
+
+```rust
+fn claim_with_bonus(env: Env, vault_id: u64) -> Result<i128, ContractError>
+```
+
+Claims available installments. If all claimable installments are within the on-time window, a bonus of `bonus_bps / 10_000` is added on top of the base payout. If the vault balance cannot cover the bonus, the base amount is paid without bonus.
+
+Example: 1% bonus, 7-day window, installment of 100 XLM claimed on time → 101 XLM paid.
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `BonusNotEnabled` | 73 | No bonus config set for this vault |
+| `VestingNotFound` | 22 | No vesting schedule attached |
+| `NothingToClaimYet` | 23 | No installments available |
+| `VestingAlreadyComplete` | 24 | All installments already claimed |
+
+### Events
+
+| Topic | Data | Emitted when |
+|-------|------|--------------|
+| `vest_bon` | `(bonus_bps, on_time_window_seconds)` | Bonus config set |
+| `vest_bonc` | `(beneficiary, total_amount, bonus_amount)` | Bonus claim completed |
+
 ## Late-Claim Penalty (Issue #547)
 ...
 
