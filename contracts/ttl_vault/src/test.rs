@@ -1757,6 +1757,36 @@ fn test_check_in_uses_check_in_topic_constant() {
 }
 
 #[test]
+fn test_schedule_beneficiary_rotation_applies_on_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let beneficiary2 = Address::generate(&env);
+    let now = env.ledger().timestamp();
+
+    // Schedule rotation to a 50/50 split shortly in the future
+    client.schedule_beneficiary_rotation(
+        &vault_id,
+        &owner,
+        &(now + 5u64),
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
+            BeneficiaryEntry { address: beneficiary2.clone(), bps: 5_000 },
+        ],
+    );
+
+    // Advance time past effective timestamp and perform a check-in to trigger rotation
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    client.check_in(&vault_id, &owner);
+
+    // Rotation event should be emitted and vault should have new beneficiaries
+    assert!(find_event_by_topic(&env, types::BEN_ROTATION_TOPIC));
+    assert_eq!(client.get_vault(&vault_id).beneficiaries.len(), 2);
+}
+
+#[test]
 fn test_cancel_vault_emits_cancel_event() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);

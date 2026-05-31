@@ -1131,7 +1131,28 @@ impl TtlVaultContract {
         Self::validate_passkey_for_checkin(&env, vault_id, &vault, &passkey_hash, now)?;
 
         vault.last_check_in = now;
-        
+        // Apply scheduled beneficiary rotation if effective timestamp has passed
+        let rot_key = DataKey::BeneficiaryRotationSchedule(vault_id);
+        if let Some(mut schedule) = env.storage().persistent()
+            .get::<DataKey, Vec<BeneficiaryRotationEntry>>(&rot_key)
+        {
+            // Find the latest entry whose effective_timestamp <= now
+            let mut applied: Option<BeneficiaryRotationEntry> = None;
+            for entry in schedule.iter() {
+                if entry.effective_timestamp <= now {
+                    if applied.as_ref().map_or(true, |a: &BeneficiaryRotationEntry| entry.effective_timestamp > a.effective_timestamp) {
+                        applied = Some(entry.clone());
+                    }
+                }
+            }
+            if let Some(rotation) = applied {
+                if !rotation.new_beneficiaries.is_empty() {
+                    vault.beneficiaries = rotation.new_beneficiaries.clone();
+                }
+                env.events().publish((BEN_ROTATION_TOPIC, vault_id), rotation.effective_timestamp);
+            }
+        }
+
         // Inactivity penalty: deduct per missed check-in interval
         if let (Some(penalty_bps), Some(recipient)) = (vault.inactivity_penalty_bps, vault.penalty_recipient.clone()) {
             let elapsed = now.saturating_sub(original_last_check_in);
@@ -1831,6 +1852,29 @@ impl TtlVaultContract {
         for vault_id in vault_ids.iter() {
             let mut vault = Self::load_vault(&env, vault_id);
             vault.last_check_in = now;
+
+            // Apply scheduled beneficiary rotation if effective timestamp has passed
+            let rot_key = DataKey::BeneficiaryRotationSchedule(vault_id);
+            if let Some(mut schedule) = env.storage().persistent()
+                .get::<DataKey, Vec<BeneficiaryRotationEntry>>(&rot_key)
+            {
+                // Find the latest entry whose effective_timestamp <= now
+                let mut applied: Option<BeneficiaryRotationEntry> = None;
+                for entry in schedule.iter() {
+                    if entry.effective_timestamp <= now {
+                        if applied.as_ref().map_or(true, |a: &BeneficiaryRotationEntry| entry.effective_timestamp > a.effective_timestamp) {
+                            applied = Some(entry.clone());
+                        }
+                    }
+                }
+                if let Some(rotation) = applied {
+                    if !rotation.new_beneficiaries.is_empty() {
+                        vault.beneficiaries = rotation.new_beneficiaries.clone();
+                    }
+                    env.events().publish((BEN_ROTATION_TOPIC, vault_id), rotation.effective_timestamp);
+                }
+            }
+
             Self::save_vault(&env, vault_id, &vault);
             env.events().publish((CHECK_IN_TOPIC, vault_id), now);
         }
@@ -2384,6 +2428,50 @@ impl TtlVaultContract {
             env.events().publish((SET_BENEFICIARIES_TOPIC, vault_id), beneficiaries);
             Ok(())
         }
+
+    /// Schedule a beneficiary rotation for a vault.
+    ///
+    /// The caller must be the vault owner. The `new_beneficiaries` vector must
+    /// be non-empty and sum to 10,000 BPS. The rotation will be applied
+    /// automatically when the effective timestamp is reached (e.g., on next
+    /// check-in or other mutation) and emits a `BEN_ROTATION_TOPIC` event.
+    pub fn schedule_beneficiary_rotation(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        effective_timestamp: u64,
+        new_beneficiaries: Vec<BeneficiaryEntry>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if new_beneficiaries.is_empty() {
+            return Err(ContractError::InvalidBps);
+        }
+        let total_bps: u32 = new_beneficiaries.iter().map(|e| e.bps).sum();
+        if total_bps != 10_000 {
+            return Err(ContractError::InvalidBps);
+        }
+        for entry in new_beneficiaries.iter() {
+            if entry.address == vault.owner {
+                return Err(ContractError::InvalidBeneficiary);
+            }
+        }
+        let rot_key = DataKey::BeneficiaryRotationSchedule(vault_id);
+        let mut schedule: Vec<BeneficiaryRotationEntry> = env.storage().persistent()
+            .get::<DataKey, Vec<BeneficiaryRotationEntry>>(&rot_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        schedule.push(BeneficiaryRotationEntry { effective_timestamp, new_beneficiaries: new_beneficiaries.clone() });
+        env.storage().persistent().set(&rot_key, &schedule);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((BENEFICIARY_TRIGGER_SET_TOPIC, vault_id), (effective_timestamp, new_beneficiaries));
+        Ok(())
+    }
 
     /// Adds a single beneficiary to a vault's multi-beneficiary split.
     ///

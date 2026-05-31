@@ -148,3 +148,24 @@ get_notification_log(vault_id: u64) -> Vec<NotificationEntry>
 | Escrow rejected          | `escrow_rejected`       |
 | Escrow expired           | `escrow_expired`        |
 | Arbitration ruled        | `arbitration_ruled`     |
+
+---
+
+## Scheduled Beneficiary Rotation
+
+Owners can schedule a future beneficiary rotation that will be applied automatically when its effective timestamp is reached. Use `schedule_beneficiary_rotation(vault_id, caller, effective_timestamp, new_beneficiaries)` to enqueue a rotation. The `new_beneficiaries` vector must be a valid multi-beneficiary split (non-empty, BPS sum = 10_000) and the caller must be the vault owner.
+
+When a scheduled rotation becomes effective it is applied on the next state-mutating call that touches the vault (for example `check_in` or `batch_check_in`). The contract emits a `ben_rot` event with the effective timestamp when the rotation is applied.
+
+API:
+
+```rust
+schedule_beneficiary_rotation(vault_id: u64, caller: Address, effective_timestamp: u64, new_beneficiaries: Vec<BeneficiaryEntry>)
+```
+
+Event:
+
+| Topic     | Data                         |
+|-----------|------------------------------|
+| `ben_rot` | `(effective_timestamp)`      |
+
