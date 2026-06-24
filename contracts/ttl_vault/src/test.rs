@@ -92,7 +92,7 @@ fn test_vault_count_not_incremented_on_failed_create() {
 
     assert_eq!(client.vault_count(), 0);
 
-    assert!(client.try_create_vault(&owner, &owner, &100u64, &None).is_err()); // InvalidBeneficiary must not mutate count
+    assert!(client.try_create_vault(&owner, &owner, &100u64, &None).is_err()); // OwnerCannotBeBeneficiary must not mutate count
     assert_eq!(client.vault_count(), 0);
 }
 
@@ -636,10 +636,10 @@ fn test_admin_transfer_full_flow() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #17)")]
 fn test_create_vault_rejects_owner_as_beneficiary() {
     let (_, owner, _, _, _, client) = setup();
-    client.create_vault(&owner, &owner, &1000, &None);
+    let result = client.try_create_vault(&owner, &owner, &1000, &None);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -813,11 +813,11 @@ fn test_partial_release_emits_partial_event() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #17)")]
 fn test_update_beneficiary_rejects_owner_as_beneficiary() {
     let (_, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &1000, &None);
-    client.update_beneficiary(&vault_id, &owner, &owner);
+    let err = client.update_beneficiary(&vault_id, &owner, &owner).unwrap_err();
+    assert_eq!(err, ContractError::OwnerCannotBeBeneficiary);
 }
 
 #[test]
@@ -1251,13 +1251,12 @@ fn test_set_beneficiaries_rejects_invalid_bps() {
 // ---- Issue #105: set_beneficiaries owner-as-beneficiary guard ----
 
 #[test]
-#[should_panic(expected = "Error(Contract, #17)")]
 fn test_set_beneficiaries_rejects_owner_as_beneficiary() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
 
     // owner sneaks themselves into the multi-split list
-    client.set_beneficiaries(
+    let err = client.set_beneficiaries(
         &vault_id,
         &owner,
         &vec![
@@ -1265,7 +1264,8 @@ fn test_set_beneficiaries_rejects_owner_as_beneficiary() {
             BeneficiaryEntry { address: owner.clone(), bps: 5_000 },
             BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
         ],
-    );
+    ).unwrap_err();
+    assert_eq!(err, ContractError::OwnerCannotBeBeneficiary);
 }
 
 // ---- Issue #226: set_beneficiaries empty list guard ----
@@ -5825,4 +5825,130 @@ fn test_cannot_reverse_twice() {
     // Try to reverse again
     let result = client.try_reverse_withdrawal(&vault_id, &owner, &0u64);
     assert!(result.is_err(), "Cannot reverse the same withdrawal twice");
+}
+
+// ── Issue #768: is_hibernating convenience query ─────────────────────────────
+
+#[test]
+fn test_is_hibernating_returns_true_when_hibernating() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    assert!(client.is_hibernating(&id));
+}
+
+#[test]
+fn test_is_hibernating_returns_false_when_not_hibernating() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    assert!(!client.is_hibernating(&id));
+}
+
+#[test]
+fn test_is_hibernating_returns_false_after_hibernation_expires() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.enter_hibernation(&id, &owner, &100u64).unwrap();
+    // Advance past the hibernation window
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    assert!(!client.is_hibernating(&id));
+}
+
+#[test]
+fn test_is_hibernating_returns_false_after_exit() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 500);
+    client.exit_hibernation(&id, &owner).unwrap();
+    assert!(!client.is_hibernating(&id));
+}
+
+// ── Issue #769: validate check_in_interval upper bound against Soroban max TTL ─
+
+#[test]
+fn test_create_vault_fails_when_interval_ttl_exceeds_max() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    // MAX_PERSISTENT_TTL = 3_110_400 ledgers, LEDGER_SECOND = 5
+    // max_interval = 3_110_400 * 5 / 2 = 7_776_000
+    // Any interval > 7_776_003 yields a computed TTL exceeding MAX_PERSISTENT_TTL
+    let too_big: u64 = 7_776_004;
+    let result = client.try_create_vault(&owner, &beneficiary, &too_big, &None);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        soroban_sdk::Error::from_contract_error(ContractError::IntervalTooHigh as u32),
+    );
+}
+
+#[test]
+fn test_create_vault_succeeds_at_max_ttl_boundary() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    // 7_776_003 is the largest interval where computed TTL ≤ MAX_PERSISTENT_TTL
+    let boundary: u64 = 7_776_003;
+    let id = client.create_vault(&owner, &beneficiary, &boundary, &None);
+    assert_eq!(client.get_vault(&id).check_in_interval, boundary);
+}
+
+#[test]
+fn test_update_check_in_interval_fails_when_ttl_exceeds_max() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let too_big: u64 = 7_776_004;
+    let result = client.try_update_check_in_interval(&vault_id, &too_big);
+    assert!(result.is_err());
+}
+
+// ── Issue #772: prevent owner self-assignment as beneficiary ──────────────────
+
+#[test]
+fn test_update_beneficiary_returns_owner_cannot_be_beneficiary() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000, &None);
+    let err = client.update_beneficiary(&vault_id, &owner, &owner).unwrap_err();
+    assert_eq!(err, ContractError::OwnerCannotBeBeneficiary);
+}
+
+#[test]
+fn test_add_beneficiary_rejects_owner() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let err = client.add_beneficiary(&vault_id, &owner, &owner, &5_000u32).unwrap_err();
+    assert_eq!(err, ContractError::OwnerCannotBeBeneficiary);
+}
+
+// ── Issue #774: get_vault_summary returning key fields in one call ────────────
+
+#[test]
+fn test_get_vault_summary_returns_all_fields() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    let summary = client.get_vault_summary(&vault_id);
+    assert_eq!(summary.balance, 500i128);
+    assert_eq!(summary.status, ReleaseStatus::Locked);
+    assert!(summary.ttl_remaining > 0);
+    assert_eq!(summary.beneficiary, beneficiary);
+    assert!(!summary.is_hibernating);
+}
+
+#[test]
+fn test_get_vault_summary_shows_hibernating_true() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.enter_hibernation(&vault_id, &owner, &7200u64).unwrap();
+
+    let summary = client.get_vault_summary(&vault_id);
+    assert!(summary.is_hibernating);
+}
+
+#[test]
+fn test_get_vault_summary_ttl_remaining_zero_when_expired() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    // Advance far past the check-in interval
+    env.ledger().with_mut(|l| l.timestamp += 500);
+
+    let summary = client.get_vault_summary(&vault_id);
+    assert_eq!(summary.ttl_remaining, 0u64);
 }

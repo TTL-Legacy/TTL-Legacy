@@ -1036,6 +1036,17 @@ pub struct VaultStatusSummary {
     pub is_expired: bool,
 }
 
+/// Summary of key vault fields returned in a single call.
+#[contracttype]
+#[derive(Clone)]
+pub struct VaultSummary {
+    pub balance: i128,
+    pub status: ReleaseStatus,
+    pub ttl_remaining: u64,
+    pub beneficiary: Address,
+    pub is_hibernating: bool,
+}
+
 /// A shared TTL pool that multiple vaults can join.
 /// A single `pool_check_in` resets `last_check_in` for all member vaults.
 #[contracttype]
