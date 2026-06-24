@@ -2728,6 +2728,15 @@ impl TtlVaultContract {
         Self::try_load_vault(&env, vault_id).map(|vault| vault.beneficiaries.clone())
     }
 
+    /// Returns the number of multi-beneficiaries for a vault.
+    ///
+    /// Returns 0 if no multi-beneficiary list has been set.
+    pub fn get_beneficiary_count(env: Env, vault_id: u64) -> u32 {
+        Self::try_load_vault(&env, vault_id)
+            .map(|vault| vault.beneficiaries.len())
+            .unwrap_or(0)
+    }
+
     // --- Task 4: update_metadata ---
 
     /// Updates the metadata string associated with a vault.
@@ -9021,6 +9030,19 @@ impl TtlVaultContract {
             .unwrap_or(CheckInStreak { current: 0, best: 0, last_timestamp: 0 })
     }
 
+    /// Returns a summary of the check-in streak for a vault, or `None` if no streak record exists.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(CheckInStreak)` if a streak record has been set, `None` otherwise
+    pub fn get_streak_summary(env: Env, vault_id: u64) -> Option<CheckInStreak> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CheckInStreak(vault_id))
+    }
+
     // ── Issue #481: Check-In Proof of Work ───────────────────────────────────
 
     /// Performs a check-in with proof-of-work validation.
@@ -9539,6 +9561,41 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get(&DataKey::Hibernation(vault_id))
+    }
+
+    /// Returns the absolute timestamp of the next required check-in for a vault.
+    ///
+    /// Returns `None` if the vault is currently hibernating or has already expired.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// `Some(timestamp)` if the vault is active and within its check-in window,
+    /// `None` if hibernating or expired
+    pub fn get_next_check_in_deadline(env: Env, vault_id: u64) -> Option<u64> {
+        let vault = Self::load_vault(&env, vault_id);
+        let now = env.ledger().timestamp();
+
+        // If hibernating and still inside the hibernation window, return None
+        if let Some(h) = env.storage()
+            .persistent()
+            .get::<DataKey, HibernationEntry>(&DataKey::Hibernation(vault_id))
+        {
+            let elapsed = now.saturating_sub(h.started_at).min(h.duration_seconds);
+            if elapsed < h.duration_seconds {
+                return None;
+            }
+        }
+
+        let deadline = vault.last_check_in.saturating_add(vault.check_in_interval);
+
+        // If already expired, return None
+        if now >= deadline {
+            return None;
+        }
+
+        Some(deadline)
     }
 
     fn get_delegated_beneficiary(env: &Env, vault_id: u64) -> Option<Address> {

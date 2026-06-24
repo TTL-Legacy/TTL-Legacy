@@ -5826,3 +5826,191 @@ fn test_cannot_reverse_twice() {
     let result = client.try_reverse_withdrawal(&vault_id, &owner, &0u64);
     assert!(result.is_err(), "Cannot reverse the same withdrawal twice");
 }
+
+// ── Issue #787: set_beneficiaries must validate BPS on every call ────────────
+
+#[test]
+fn test_set_beneficiaries_validates_bps_on_second_call() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let b2 = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+
+    // First call with valid 10_000 BPS — succeeds
+    client.set_beneficiaries(
+        &vault_id,
+        &owner,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 6_000 },
+            BeneficiaryEntry { address: b2.clone(), bps: 4_000 },
+        ],
+    );
+
+    // Second call with invalid BPS (8_000) — must be rejected
+    let err = client
+        .try_set_beneficiaries(
+            &vault_id,
+            &owner,
+            &vec![
+                &env,
+                BeneficiaryEntry { address: beneficiary.clone(), bps: 4_000 },
+                BeneficiaryEntry { address: b2.clone(), bps: 4_000 },
+            ],
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidBps);
+}
+
+// ── Issue #786: get_beneficiary_count ────────────────────────────────────────
+
+#[test]
+fn test_get_beneficiary_count_no_multi_beneficiaries() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    assert_eq!(client.get_beneficiary_count(&vault_id), 0);
+}
+
+#[test]
+fn test_get_beneficiary_count_one_beneficiary() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    client.set_beneficiaries(
+        &vault_id,
+        &owner,
+        &vec![&env, BeneficiaryEntry { address: beneficiary.clone(), bps: 10_000 }],
+    );
+    assert_eq!(client.get_beneficiary_count(&vault_id), 1);
+}
+
+#[test]
+fn test_get_beneficiary_count_multiple_beneficiaries() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let b2 = Address::generate(&env);
+    let b3 = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    client.set_beneficiaries(
+        &vault_id,
+        &owner,
+        &vec![
+            &env,
+            BeneficiaryEntry { address: beneficiary.clone(), bps: 5_000 },
+            BeneficiaryEntry { address: b2.clone(), bps: 3_000 },
+            BeneficiaryEntry { address: b3.clone(), bps: 2_000 },
+        ],
+    );
+    assert_eq!(client.get_beneficiary_count(&vault_id), 3);
+}
+
+// ── Issue #781: get_streak_summary ───────────────────────────────────────────
+
+#[test]
+fn test_get_streak_summary_none_when_no_streak() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let summary = client.get_streak_summary(&vault_id);
+    assert!(summary.is_none());
+}
+
+#[test]
+fn test_get_streak_summary_active_after_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.check_in(&vault_id, &owner, &hash);
+
+    let summary = client.get_streak_summary(&vault_id);
+    assert!(summary.is_some());
+    let streak = summary.unwrap();
+    assert_eq!(streak.current, 1);
+    assert_eq!(streak.best, 1);
+    assert!(streak.last_timestamp > 0);
+}
+
+#[test]
+fn test_get_streak_summary_broken_streak() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 100u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    // First check-in on time
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    let hash = BytesN::from_array(&env, &[0u8; 32]);
+    client.check_in(&vault_id, &owner, &hash);
+
+    // Second check-in after interval — still on time (streak = 2)
+    env.ledger().with_mut(|l| l.timestamp += interval - 10);
+    client.check_in(&vault_id, &owner, &hash);
+
+    let summary = client.get_streak_summary(&vault_id);
+    assert!(summary.is_some());
+    assert_eq!(summary.unwrap().current, 2);
+
+    // Third check-in well after deadline — streak broken
+    env.ledger().with_mut(|l| l.timestamp += interval * 3);
+    client.check_in(&vault_id, &owner, &hash);
+
+    let summary = client.get_streak_summary(&vault_id);
+    assert!(summary.is_some());
+    let streak = summary.unwrap();
+    assert_eq!(streak.current, 1); // reset
+    assert_eq!(streak.best, 2);    // best preserved
+}
+
+// ── Issue #777: get_next_check_in_deadline ───────────────────────────────────
+
+#[test]
+fn test_get_next_check_in_deadline_returns_deadline_for_active_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 86_400u64; // 1 day
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    let deadline = client.get_next_check_in_deadline(&vault_id);
+    // last_check_in = 0 (epoch), interval = 86_400, now = 0
+    // deadline = 0 + 86_400 = 86_400, not expired
+    assert!(deadline.is_some());
+    assert_eq!(deadline.unwrap(), interval);
+}
+
+#[test]
+fn test_get_next_check_in_deadline_none_when_expired() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 100u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    // Advance time past the deadline
+    env.ledger().with_mut(|l| l.timestamp = interval + 1);
+
+    let deadline = client.get_next_check_in_deadline(&vault_id);
+    assert!(deadline.is_none());
+}
+
+#[test]
+fn test_get_next_check_in_deadline_none_when_hibernating() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 86_400u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    // Enter hibernation
+    client.enter_hibernation(&vault_id, &owner, &100_000u64);
+
+    let deadline = client.get_next_check_in_deadline(&vault_id);
+    assert!(deadline.is_none());
+}
+
+#[test]
+fn test_get_next_check_in_deadline_returns_after_hibernation_ends() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 86_400u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    // Enter hibernation and then exit
+    client.enter_hibernation(&vault_id, &owner, &100_000u64);
+    client.exit_hibernation(&vault_id, &owner);
+
+    // After exiting hibernation, deadline should be available again
+    let deadline = client.get_next_check_in_deadline(&vault_id);
+    assert!(deadline.is_some());
+}
