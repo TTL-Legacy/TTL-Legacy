@@ -5826,3 +5826,151 @@ fn test_cannot_reverse_twice() {
     let result = client.try_reverse_withdrawal(&vault_id, &owner, &0u64);
     assert!(result.is_err(), "Cannot reverse the same withdrawal twice");
 }
+
+// ── Issue #782: Max Passkeys Per Vault ─────────────────────────────────────
+
+#[test]
+fn test_add_passkey_within_limit() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    for i in 0..10 {
+        let hash = BytesN::<32>::from_array(&env, &[i as u8; 32]);
+        client.add_passkey(&vault_id, &owner, &hash);
+    }
+}
+
+#[test]
+fn test_add_passkey_exceeds_default_limit() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    for i in 0..10 {
+        let hash = BytesN::<32>::from_array(&env, &[i as u8; 32]);
+        client.add_passkey(&vault_id, &owner, &hash);
+    }
+
+    let extra = BytesN::<32>::from_array(&env, &[42u8; 32]);
+    let err = client.try_add_passkey(&vault_id, &owner, &extra).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(82)); // PasskeyLimitReached
+}
+
+#[test]
+fn test_admin_can_set_max_passkeys_per_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Admin raises limit to 15
+    client.set_max_passkeys_per_vault(&15u32);
+    assert_eq!(client.get_max_passkeys_per_vault(), 15);
+
+    for i in 0..15 {
+        let hash = BytesN::<32>::from_array(&env, &[i as u8; 32]);
+        client.add_passkey(&vault_id, &owner, &hash);
+    }
+
+    let extra = BytesN::<32>::from_array(&env, &[99u8; 32]);
+    let err = client.try_add_passkey(&vault_id, &owner, &extra).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(82));
+}
+
+#[test]
+fn test_add_passkey_rejects_zero_admin_limit() {
+    let (env, _, _, _, _, client) = setup();
+    let err = client.try_set_max_passkeys_per_vault(&0u32).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(5)); // InvalidAmount
+}
+
+// ── Issue #778: Min Gap Between Check-Ins ──────────────────────────────────
+
+#[test]
+fn test_check_in_too_frequent() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let pk = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    // First check-in succeeds
+    client.check_in(&vault_id, &owner, &pk);
+
+    // Second check-in immediately should fail
+    let err = client.try_check_in(&vault_id, &owner, &pk).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(58)); // CheckInTooFrequent
+}
+
+#[test]
+fn test_check_in_after_cooldown_succeeds() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let pk = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &pk);
+
+    // Advance time past the 60-second default cooldown
+    env.ledger().with_mut(|l| l.timestamp += 61);
+
+    // Should succeed now
+    client.check_in(&vault_id, &owner, &pk);
+}
+
+#[test]
+fn test_check_in_exactly_at_cooldown_boundary() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let pk = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.check_in(&vault_id, &owner, &pk);
+
+    // Advance exactly 60 seconds (default cooldown)
+    env.ledger().with_mut(|l| l.timestamp += 60);
+
+    // `now < vault.last_check_in + cooldown` => `(start + 60) < (start + 60)` => false, so should succeed
+    client.check_in(&vault_id, &owner, &pk);
+}
+
+// ── Issue #775: Reject Deposits into Cancelled Vaults ──────────────────────
+
+#[test]
+fn test_deposit_rejected_on_cancelled_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+    client.cancel_vault(&vault_id, &owner);
+
+    let err = client.try_deposit(&vault_id, &owner, &100i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(83)); // VaultCancelled
+}
+
+#[test]
+fn test_deposit_rejected_on_cancelled_vault_after_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+    let pk = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    client.check_in(&vault_id, &owner, &pk);
+    client.cancel_vault(&vault_id, &owner);
+
+    let err = client.try_deposit(&vault_id, &owner, &100i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(83)); // VaultCancelled
+}
+
+#[test]
+fn test_batch_deposit_rejected_when_any_vault_cancelled() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &200u64, &None);
+    let token_client = token::Client::new(&env, &token_address);
+
+    client.deposit(&vault_id_1, &owner, &200i128);
+    client.cancel_vault(&vault_id_1, &owner);
+
+    // batch_deposit should fail because vault_id_1 is cancelled
+    assert!(
+        client
+            .try_batch_deposit(&owner, &vec![&env, (vault_id_1, 100i128), (vault_id_2, 200i128)])
+            .is_err()
+    );
+
+    // No funds should have been transferred
+    assert_eq!(client.get_vault(&vault_id_2).balance, 0i128);
+    assert_eq!(token_client.balance(&owner), 1_000_000i128);
+}

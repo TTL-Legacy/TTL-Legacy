@@ -125,6 +125,9 @@ const DEFAULT_MIN_CHECKIN_COOLDOWN: u64 = 60;
 /// Maximum seconds an owner can accelerate TTL decay per call (30 days).
 const MAX_ACCELERATE_SECONDS: u64 = 2_592_000;
 
+/// Default maximum number of passkeys per vault.
+const DEFAULT_MAX_PASSKEYS_PER_VAULT: u32 = 10;
+
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
 /// interval, capped at the Soroban maximum.
@@ -228,6 +231,12 @@ pub enum ContractError {
     AuctionAlreadyExists = 79,
     AuctionEnded = 80,
     AuctionNotEnded = 81,
+    // Issue #782: max passkeys per vault
+    PasskeyLimitReached = 82,
+    // Issue #775: deposit into cancelled vault
+    VaultCancelled = 83,
+    // Issue #770: batch deposit atomicity
+    BatchPartialFailure = 84,
 }
 
 #[contract]
@@ -1132,19 +1141,13 @@ impl TtlVaultContract {
         
         let now = env.ledger().timestamp();
 
-        // Rate limiting: enforce minimum cooldown between check-ins
+        // Rate limiting: enforce minimum cooldown between consecutive check-ins
         let cooldown: u64 = env
             .storage().instance()
             .get(&DataKey::MinCheckInCooldown)
             .unwrap_or(DEFAULT_MIN_CHECKIN_COOLDOWN);
-        if cooldown > 0 {
-            if let Some(last) = env.storage().persistent()
-                .get::<DataKey, u64>(&DataKey::LastCheckInTime(vault_id))
-            {
-                if now < last + cooldown {
-                    return Err(ContractError::InvalidInterval);
-                }
-            }
+        if cooldown > 0 && vault.last_check_in > 0 && now < vault.last_check_in + cooldown {
+            return Err(ContractError::CheckInTooFrequent);
         }
 
         // Issue #549: enforce passkey registration and expiry.
@@ -1251,6 +1254,9 @@ impl TtlVaultContract {
         if vault.is_paused {
             panic_with_error!(&env, ContractError::Paused);
         }
+        if vault.status == ReleaseStatus::Cancelled {
+            panic_with_error!(&env, ContractError::VaultCancelled);
+        }
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
         }
@@ -1310,13 +1316,16 @@ impl TtlVaultContract {
         let mut total_amount = 0i128;
         let default_token = Self::load_token(&env);
 
-        for deposit in deposits.iter() {
+        for (_i, deposit) in deposits.iter().enumerate() {
             let (vault_id, amount) = deposit;
             if amount <= 0 {
                 panic_with_error!(&env, ContractError::InvalidAmount);
             }
 
             let vault = Self::load_vault(&env, vault_id);
+            if vault.status == ReleaseStatus::Cancelled {
+                panic_with_error!(&env, ContractError::VaultCancelled);
+            }
             if vault.status != ReleaseStatus::Locked {
                 panic_with_error!(&env, ContractError::AlreadyReleased);
             }
@@ -1328,6 +1337,11 @@ impl TtlVaultContract {
 
             // Issue #582: Validate token whitelist
             Self::assert_token_whitelisted(&env, &vault.token_address);
+
+            // Verify vault uses default token (all vaults in batch must use same token)
+            if vault.token_address != default_token {
+                panic_with_error!(&env, ContractError::IncompatibleVaultToken);
+            }
 
             total_amount = total_amount
                 .checked_add(amount)
@@ -1347,10 +1361,6 @@ impl TtlVaultContract {
 
         for validated_deposit in validated.iter() {
             let (vault_id, mut vault, amount) = validated_deposit;
-            // Verify vault uses default token
-            if vault.token_address != default_token {
-                panic_with_error!(&env, ContractError::InvalidAmount);
-            }
             vault.balance = vault.balance
                 .checked_add(amount)
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
@@ -6142,6 +6152,27 @@ impl TtlVaultContract {
             .unwrap_or(DEFAULT_MIN_CHECKIN_COOLDOWN)
     }
 
+    /// Sets the maximum number of passkeys allowed per vault.
+    ///
+    /// Admin-only. Prevents attackers from registering hundreds of passkeys
+    /// to make revocation impractical. Default is 10.
+    pub fn set_max_passkeys_per_vault(env: Env, max_passkeys: u32) {
+        Self::require_admin(&env);
+        if max_passkeys == 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        env.storage().instance().set(&DataKey::MaxPasskeysPerVault, &max_passkeys);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Returns the configured maximum passkeys per vault.
+    /// Defaults to `DEFAULT_MAX_PASSKEYS_PER_VAULT` (10) if not set.
+    pub fn get_max_passkeys_per_vault(env: Env) -> u32 {
+        env.storage().instance()
+            .get(&DataKey::MaxPasskeysPerVault)
+            .unwrap_or(DEFAULT_MAX_PASSKEYS_PER_VAULT)
+    }
+
     /// Returns the timestamp of the most recent check-in for a vault.
     /// Returns `None` if no check-in has been recorded yet.
     pub fn get_last_checkin_time(env: Env, vault_id: u64) -> Option<u64> {
@@ -7380,7 +7411,14 @@ impl TtlVaultContract {
         let key = DataKey::VaultPasskeys(vault_id);
         let mut passkeys: Vec<PasskeyHash> = env.storage().persistent().get(&key)
             .unwrap_or(Vec::new(&env));
-        
+
+        let max_passkeys: u32 = env.storage().instance()
+            .get(&DataKey::MaxPasskeysPerVault)
+            .unwrap_or(DEFAULT_MAX_PASSKEYS_PER_VAULT);
+        if passkeys.len() >= max_passkeys {
+            return Err(ContractError::PasskeyLimitReached);
+        }
+
         let timestamp = env.ledger().timestamp();
         passkeys.push_back(PasskeyHash {
             hash: passkey_hash.clone(),
