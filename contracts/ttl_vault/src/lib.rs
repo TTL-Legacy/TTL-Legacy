@@ -228,6 +228,7 @@ pub enum ContractError {
     AuctionAlreadyExists = 79,
     AuctionEnded = 80,
     AuctionNotEnded = 81,
+    PasskeyAlreadyRegistered = 82,
 }
 
 #[contract]
@@ -1223,7 +1224,8 @@ impl TtlVaultContract {
         // Reset countdown fired flags so thresholds fire again on the new cycle
         env.storage().persistent().remove(&DataKey::CountdownFired(vault_id));
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
+        let ttl_extended = vault_ttl_ledgers(vault.check_in_interval);
+        env.events().publish((CHECK_IN_TOPIC, vault_id), (vault.last_check_in, ttl_extended));
         Ok(())
     }
     ///
@@ -7381,6 +7383,13 @@ impl TtlVaultContract {
         let mut passkeys: Vec<PasskeyHash> = env.storage().persistent().get(&key)
             .unwrap_or(Vec::new(&env));
         
+        // Reject duplicate passkey hash - Issue #784
+        for pk in passkeys.iter() {
+            if pk.hash == passkey_hash {
+                return Err(ContractError::PasskeyAlreadyRegistered);
+            }
+        }
+
         let timestamp = env.ledger().timestamp();
         passkeys.push_back(PasskeyHash {
             hash: passkey_hash.clone(),
@@ -7621,6 +7630,18 @@ impl TtlVaultContract {
     pub fn get_vault_passkeys(env: Env, vault_id: u64) -> Vec<PasskeyHash> {
         let key = DataKey::VaultPasskeys(vault_id);
         env.storage().persistent().get(&key).unwrap_or(Vec::new(&env))
+    }
+
+    /// Lists all currently active (non-revoked) passkeys for a vault. - Issue #783
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// Vector of passkey hashes
+    pub fn list_passkeys(env: Env, vault_id: u64) -> Vec<PasskeyHash> {
+        Self::get_vault_passkeys(env, vault_id)
     }
 
     /// Checks if a passkey is valid for a vault.

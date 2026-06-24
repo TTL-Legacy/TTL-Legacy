@@ -1756,6 +1756,33 @@ fn test_check_in_uses_check_in_topic_constant() {
     assert!(find_event_by_topic(&env, types::CHECK_IN_TOPIC));
 }
 
+// ---- Issue #779: TTL Extension Amount in Check-In Event ----
+
+#[test]
+fn test_check_in_event_contains_ttl_extended_ledgers() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let interval = 3600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    client.add_passkey(&vault_id, &owner, &passkey_hash);
+
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    client.check_in(&vault_id, &owner, &passkey_hash);
+
+    let events = env.events().all();
+    let check_in_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 2 { return false; }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("check_in")).unwrap_or(false)
+    });
+
+    assert!(check_in_event.is_some(), "check_in event not emitted");
+    let (_last_check_in, ttl_extended): (u64, u32) = check_in_event.unwrap().2.clone().into_val(&env);
+    let expected = vault_ttl_ledgers(interval);
+    assert_eq!(ttl_extended, expected, "ttl_extended_ledgers should match vault_ttl_ledgers(interval)");
+}
+
 #[test]
 fn test_schedule_beneficiary_rotation_applies_on_check_in() {
     let (env, owner, beneficiary, _, _, client) = setup();
@@ -3202,6 +3229,87 @@ fn test_extend_passkey_expiry() {
     // Verify new expiry
     let updated_expiry = client.get_passkey_expiry(&vault_id, &passkey_hash);
     assert_eq!(updated_expiry, Some(new_expiry));
+}
+
+// ---- Issue #784: Duplicate Passkey Rejection ----
+
+#[test]
+fn test_add_duplicate_passkey_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    // First add should succeed
+    client.add_passkey(&vault_id, &owner, &passkey_hash);
+
+    // Second add of same hash should fail
+    let err = client.try_add_passkey(&vault_id, &owner, &passkey_hash).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(82)); // PasskeyAlreadyRegistered
+}
+
+#[test]
+fn test_add_duplicate_passkey_does_not_overwrite_timestamp() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+
+    client.add_passkey(&vault_id, &owner, &passkey_hash);
+    let added_at = client.get_vault_passkeys(&vault_id).get(0).unwrap().added_at;
+
+    // Advance time
+    env.ledger().with_mut(|l| l.timestamp += 500);
+
+    // Attempt duplicate add should fail
+    assert!(client.try_add_passkey(&vault_id, &owner, &passkey_hash).is_err());
+
+    // Original timestamp must remain unchanged
+    let passkeys = client.get_vault_passkeys(&vault_id);
+    assert_eq!(passkeys.len(), 1);
+    assert_eq!(passkeys.get(0).unwrap().added_at, added_at);
+}
+
+// ---- Issue #783: list_passkeys Tests ----
+
+#[test]
+fn test_list_passkeys_empty() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let passkeys = client.list_passkeys(&vault_id);
+    assert_eq!(passkeys.len(), 0);
+}
+
+#[test]
+fn test_list_passkeys_single() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    client.add_passkey(&vault_id, &owner, &hash);
+
+    let passkeys = client.list_passkeys(&vault_id);
+    assert_eq!(passkeys.len(), 1);
+    assert_eq!(passkeys.get(0).unwrap().hash, hash);
+}
+
+#[test]
+fn test_list_passkeys_multi() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let hash1 = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    let hash2 = BytesN::<32>::from_array(&env, &[2u8; 32]);
+    let hash3 = BytesN::<32>::from_array(&env, &[3u8; 32]);
+    client.add_passkey(&vault_id, &owner, &hash1);
+    client.add_passkey(&vault_id, &owner, &hash2);
+    client.add_passkey(&vault_id, &owner, &hash3);
+
+    let passkeys = client.list_passkeys(&vault_id);
+    assert_eq!(passkeys.len(), 3);
+    assert_eq!(passkeys.get(0).unwrap().hash, hash1);
+    assert_eq!(passkeys.get(1).unwrap().hash, hash2);
+    assert_eq!(passkeys.get(2).unwrap().hash, hash3);
 }
 
 // ---- Issue #397: Beneficiary Acceptance Flow Tests ----
@@ -4946,6 +5054,24 @@ fn test_vault_not_expired_after_early_exit_within_interval() {
     client.exit_hibernation(&id, &owner).unwrap();
 
     // Total elapsed from original last_check_in = 1000 s, interval = 3600 s → not expired
+    assert!(!client.is_expired(&id));
+}
+
+#[test]
+fn test_exit_hibernation_re_extends_vault_ttl() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    // Short interval so vault TTL helper returns floor (200_000 ledgers).
+    let interval = 3600u64;
+    let id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    client.enter_hibernation(&id, &owner, &7200u64).unwrap();
+    // Exit after a significant time advance
+    env.ledger().with_mut(|l| l.timestamp += 5000);
+    env.ledger().with_mut(|l| l.sequence_number += 100_000);
+    client.exit_hibernation(&id, &owner).unwrap();
+
+    // Vault must still be loadable and not expired after exit
+    let vault = client.get_vault(&id);
     assert!(!client.is_expired(&id));
 }
 
