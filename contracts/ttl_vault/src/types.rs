@@ -379,6 +379,7 @@ pub enum DataKey {
     Hibernation(u64),
     LastCheckInTime(u64),
     MinCheckInCooldown,
+    MaxPasskeysPerVault,
     VaultDuplicate(Address, Address, u64),
     BeneficiaryRotationSchedule(u64),
     CheckInGeoLog(u64),
