@@ -15,7 +15,7 @@ use types::{
     ArchivedVaultInfo, OwnershipTransferRequest, PendingBeneficiaryUpdate, AuditEntry, MultiSigConfig, MultiSigProposal,
     MultiSigOperation, ProposalStatus, PasskeyUsageEntry, BeneficiaryStatus, BridgeConfig,
     TokenConversion, TokenStaking, YieldDistributionMode, YieldDistributionConfig,
-    StateTransitionEntry, OwnershipProof, IntegrityReport, VaultStatusSummary,
+    StateTransitionEntry, OwnershipProof, IntegrityReport, VaultStatusSummary, VaultSummary,
     TtlBorrowRecord, BeneficiaryCommitment,
     GeoCheckInEntry,
     ProofOfLifeEntry, ReleaseVoteEntry,
@@ -228,6 +228,8 @@ pub enum ContractError {
     AuctionAlreadyExists = 79,
     AuctionEnded = 80,
     AuctionNotEnded = 81,
+    // Issue #772: prevent owner from being set as beneficiary
+    OwnerCannotBeBeneficiary = 82,
 }
 
 #[contract]
@@ -993,9 +995,10 @@ impl TtlVaultContract {
             }
 
             Self::assert_interval_in_bounds(&env, check_in_interval);
+            Self::assert_interval_ttl_within_max(&env, check_in_interval);
 
             if owner == beneficiary {
-                panic_with_error!(&env, ContractError::InvalidBeneficiary);
+                panic_with_error!(&env, ContractError::OwnerCannotBeBeneficiary);
             }
 
             // Detect duplicate: same (owner, beneficiary, check_in_interval) already Locked
@@ -2439,7 +2442,7 @@ impl TtlVaultContract {
             }
             for entry in beneficiaries.iter() {
                 if entry.address == vault.owner {
-                    return Err(ContractError::InvalidBeneficiary);
+                    return Err(ContractError::OwnerCannotBeBeneficiary);
                 }
             }
             vault.beneficiaries = beneficiaries.clone();
@@ -2479,7 +2482,7 @@ impl TtlVaultContract {
         }
         for entry in new_beneficiaries.iter() {
             if entry.address == vault.owner {
-                return Err(ContractError::InvalidBeneficiary);
+                return Err(ContractError::OwnerCannotBeBeneficiary);
             }
         }
         let rot_key = DataKey::BeneficiaryRotationSchedule(vault_id);
@@ -2513,7 +2516,7 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::InvalidBps` - If total BPS would exceed 10,000
-    /// * `ContractError::InvalidBeneficiary` - If address is the vault owner
+    /// * `ContractError::OwnerCannotBeBeneficiary` - If address is the vault owner
     pub fn add_beneficiary(
         env: Env,
         vault_id: u64,
@@ -2530,7 +2533,7 @@ impl TtlVaultContract {
             return Err(ContractError::AlreadyReleased);
         }
         if address == vault.owner {
-            return Err(ContractError::InvalidBeneficiary);
+            return Err(ContractError::OwnerCannotBeBeneficiary);
         }
         
         // Check if beneficiary already exists
@@ -4276,6 +4279,57 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id)
     }
 
+    /// Returns a summary of key vault fields in a single call.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// A `VaultSummary` containing balance, status, ttl_remaining, beneficiary,
+    /// and is_hibernating.
+    pub fn get_vault_summary(env: Env, vault_id: u64) -> VaultSummary {
+        let vault = Self::load_vault(&env, vault_id);
+        let now = env.ledger().timestamp();
+        let hibernated = if let Some(h) = env.storage()
+            .persistent()
+            .get::<DataKey, HibernationEntry>(&DataKey::Hibernation(vault_id))
+        {
+            let elapsed = now.saturating_sub(h.started_at);
+            if elapsed < h.duration_seconds {
+                h.duration_seconds
+            } else {
+                0u64
+            }
+        } else {
+            0u64
+        };
+        let deadline = vault.last_check_in
+            .saturating_add(vault.check_in_interval)
+            .saturating_add(hibernated);
+        let ttl_remaining = if now < deadline {
+            deadline.saturating_sub(now)
+        } else {
+            0u64
+        };
+        let is_hibernating = if let Some(h) = env.storage()
+            .persistent()
+            .get::<DataKey, HibernationEntry>(&DataKey::Hibernation(vault_id))
+        {
+            let elapsed = now.saturating_sub(h.started_at);
+            elapsed < h.duration_seconds
+        } else {
+            false
+        };
+        VaultSummary {
+            balance: vault.balance,
+            status: vault.status,
+            ttl_remaining,
+            beneficiary: vault.beneficiary,
+            is_hibernating,
+        }
+    }
+
     /// Returns the last check-in timestamp for a vault.
     ///
     /// # Arguments
@@ -5096,7 +5150,7 @@ impl TtlVaultContract {
         }
 
         if vault.owner == new_beneficiary {
-            return Err(ContractError::InvalidBeneficiary);
+            return Err(ContractError::OwnerCannotBeBeneficiary);
         }
 
         let now = env.ledger().timestamp();
@@ -5201,6 +5255,7 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidInterval);
         }
         Self::assert_interval_in_bounds(&env, new_interval);
+        Self::assert_interval_ttl_within_max(&env, new_interval);
         let mut vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
         if vault.status != ReleaseStatus::Locked {
@@ -5698,8 +5753,9 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::InvalidInterval);
         }
         Self::assert_interval_in_bounds(&env, check_in_interval);
+        Self::assert_interval_ttl_within_max(&env, check_in_interval);
         if caller == new_beneficiary {
-            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+            panic_with_error!(&env, ContractError::OwnerCannotBeBeneficiary);
         }
 
         let vault_token = match token_address {
@@ -6582,6 +6638,16 @@ impl TtlVaultContract {
             if interval > max {
                 panic_with_error!(env, ContractError::IntervalTooHigh);
             }
+        }
+    }
+
+    /// Validate that the computed TTL for the interval is within the Soroban max.
+    fn assert_interval_ttl_within_max(env: &Env, interval: u64) {
+        let computed_ledgers = (interval as u128)
+            .saturating_mul(2)
+            .saturating_div(LEDGER_SECOND as u128);
+        if computed_ledgers > MAX_PERSISTENT_TTL as u128 {
+            panic_with_error!(env, ContractError::IntervalTooHigh);
         }
     }
 
@@ -9539,6 +9605,20 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get(&DataKey::Hibernation(vault_id))
+    }
+
+    /// Returns true iff the vault has a non-expired hibernation entry.
+    pub fn is_hibernating(env: Env, vault_id: u64) -> bool {
+        let now = env.ledger().timestamp();
+        if let Some(h) = env.storage()
+            .persistent()
+            .get::<DataKey, HibernationEntry>(&DataKey::Hibernation(vault_id))
+        {
+            let elapsed = now.saturating_sub(h.started_at);
+            elapsed < h.duration_seconds
+        } else {
+            false
+        }
     }
 
     fn get_delegated_beneficiary(env: &Env, vault_id: u64) -> Option<Address> {
