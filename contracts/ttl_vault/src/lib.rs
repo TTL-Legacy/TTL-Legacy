@@ -2949,6 +2949,14 @@ impl TtlVaultContract {
         env.storage().persistent().get(&DataKey::VestingSchedule(vault_id))
     }
 
+    /// Returns the number of vesting schedules attached to a vault.
+    pub fn get_vesting_schedule_count(env: Env, vault_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VestingScheduleCount(vault_id))
+            .unwrap_or(0)
+    }
+
     /// Sets a late-claim penalty for a vault's vesting schedule.
     ///
     /// If a beneficiary claims an installment more than `grace_period_seconds` after

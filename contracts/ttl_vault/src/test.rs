@@ -2421,6 +2421,36 @@ fn test_set_vesting_schedule_rejects_empty_vault() {
 }
 
 #[test]
+fn test_get_vesting_schedule_count_zero() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    assert_eq!(client.get_vesting_schedule_count(&vault_id), 0u32);
+}
+
+#[test]
+fn test_get_vesting_schedule_count_one() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+    let start = env.ledger().timestamp() + 50;
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &4u32, &0u64);
+    assert_eq!(client.get_vesting_schedule_count(&vault_id), 1u32);
+}
+
+#[test]
+fn test_get_vesting_schedule_count_max() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    // MAX_VESTING_SCHEDULES = 20; deposit enough for 20 schedules of 1 each
+    client.deposit(&vault_id, &owner, &20i128);
+    let start = env.ledger().timestamp() + 50;
+    for _ in 0..20u32 {
+        client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &1u32, &0u64);
+    }
+    assert_eq!(client.get_vesting_schedule_count(&vault_id), 20u32);
+}
+
+#[test]
 fn test_trigger_release_with_vesting_keeps_balance() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 100u64);
