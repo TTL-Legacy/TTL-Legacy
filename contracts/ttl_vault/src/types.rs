@@ -24,6 +24,7 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
+pub const VESTING_CANCELLED_TOPIC: Symbol = symbol_short!("vest_can");
 // Issue #534: vesting cliff period reached
 pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("clif_rch");
 pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");

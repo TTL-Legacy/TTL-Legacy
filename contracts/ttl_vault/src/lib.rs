@@ -23,7 +23,7 @@ use types::{
     WithdrawalLimit, WithdrawalTracker, WhitelistEntry, WithdrawalReversal,
     EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC, BENEFICIARY_TIER_SET_TOPIC,
     BENEFICIARY_WATERFALL_TOPIC, BENEFICIARY_REBALANCED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
-    CLAIM_VEST_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
+    CLAIM_VEST_TOPIC, VESTING_CANCELLED_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
     SET_VESTING_TOPIC, UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC,
     VAULT_CREATED_TOPIC, WITHDRAW_TOPIC, MAX_METADATA_LEN, MAX_NAME_LEN, MAX_DESCRIPTION_LEN,
@@ -228,6 +228,7 @@ pub enum ContractError {
     AuctionAlreadyExists = 79,
     AuctionEnded = 80,
     AuctionNotEnded = 81,
+    InvalidVestingSchedule = 82,
 }
 
 #[contract]
@@ -2886,6 +2887,10 @@ impl TtlVaultContract {
         if interval == 0 || num_installments == 0 {
             return Err(ContractError::InvalidInterval);
         }
+        let end_time = start_time + (interval as u64 * num_installments as u64);
+        if end_time <= start_time {
+            return Err(ContractError::InvalidVestingSchedule);
+        }
         if vault.balance == 0 {
             return Err(ContractError::EmptyVault);
         }
@@ -2947,6 +2952,42 @@ impl TtlVaultContract {
     /// Returns the vesting schedule for a vault, if one exists.
     pub fn get_vesting_schedule(env: Env, vault_id: u64) -> Option<VestingSchedule> {
         env.storage().persistent().get(&DataKey::VestingSchedule(vault_id))
+    }
+
+    /// Cancels a vesting schedule and returns unclaimed vested amounts to vault balance.
+    /// Owner-only. Refunds the unclaimed portion to the vault.
+    pub fn cancel_vesting_schedule(
+        env: Env,
+        vault_id: u64,
+        schedule_id: u32,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let schedule_key = DataKey::VestingSchedule(vault_id, schedule_id);
+        let schedule = env.storage().persistent()
+            .get::<DataKey, VestingSchedule>(&schedule_key)
+            .ok_or(ContractError::VestingNotFound)?;
+
+        // Calculate unclaimed amount
+        let per_installment = schedule.total_amount / (schedule.num_installments as i128);
+        let claimed_amount = per_installment * (schedule.claimed_installments as i128);
+        let unclaimed = schedule.total_amount.saturating_sub(claimed_amount);
+
+        // Return unclaimed to vault
+        vault.balance = vault.balance.saturating_add(unclaimed);
+        Self::save_vault(&env, vault_id, &vault);
+
+        // Remove schedule
+        env.storage().persistent().remove(&schedule_key);
+
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((VESTING_CANCELLED_TOPIC, vault_id), (schedule_id, unclaimed));
+        Ok(())
     }
 
     /// Sets a late-claim penalty for a vault's vesting schedule.
@@ -3223,6 +3264,11 @@ impl TtlVaultContract {
     pub fn claim_vested_installment(env: Env, vault_id: u64) -> Result<i128, ContractError> {
         Self::assert_not_paused(&env);
         let mut vault = Self::load_vault(&env, vault_id);
+
+        // Cannot claim from cancelled vault
+        if vault.status == ReleaseStatus::Cancelled {
+            return Err(ContractError::AlreadyReleased);
+        }
 
         // Vault must be Released for vesting claims
         if vault.status != ReleaseStatus::Released {
@@ -3740,6 +3786,26 @@ impl TtlVaultContract {
     /// Returns the vesting acceleration configuration for a vault.
     pub fn get_vesting_acceleration(env: Env, vault_id: u64) -> Option<VestingAccelerationConfig> {
         env.storage().persistent().get(&DataKey::VestingAcceleration(vault_id))
+    }
+
+    /// Returns the total amount still locked in vesting schedules for a vault.
+    pub fn get_total_unvested_amount(env: Env, vault_id: u64) -> i128 {
+        let count: u32 = env.storage().persistent()
+            .get(&DataKey::VestingScheduleCount(vault_id))
+            .unwrap_or(0);
+
+        let mut total = 0i128;
+        for i in 0..count {
+            if let Some(schedule) = env.storage().persistent()
+                .get::<DataKey, VestingSchedule>(&DataKey::VestingSchedule(vault_id, i))
+            {
+                let per_installment = schedule.total_amount / (schedule.num_installments as i128);
+                let claimed_amount = per_installment * (schedule.claimed_installments as i128);
+                let unclaimed = schedule.total_amount.saturating_sub(claimed_amount);
+                total = total.saturating_add(unclaimed);
+            }
+        }
+        total
     }
 
     /// Triggers immediate acceleration of all remaining vesting installments.
