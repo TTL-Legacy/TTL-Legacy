@@ -480,62 +480,97 @@ impl Db {
 
 
     pub fn migrate(&self) -> Result<(), rusqlite::Error> {
+        // Bootstrap the migration tracking table before anything else.
         self.conn.lock().unwrap().execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS reminder_preferences (
-                vault_id              INTEGER PRIMARY KEY,
-                channels             TEXT NOT NULL,
-                hours_before_expiry  INTEGER NOT NULL,
-                frequency            TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS ttl_insurance_policies (
-                vault_id                      INTEGER PRIMARY KEY,
-                extension_seconds            INTEGER NOT NULL,
-                inactivity_threshold_seconds INTEGER NOT NULL,
-                enabled                       INTEGER NOT NULL,
-                purchased_at                  TEXT NOT NULL,
-                last_extended_at              TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS owner_activity (
-                owner_id        INTEGER PRIMARY KEY,
-                last_active_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS idempotency_keys (
-                key          TEXT PRIMARY KEY,
-                status_code  INTEGER NOT NULL,
-                response_body TEXT NOT NULL,
-                created_at   TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS unsubscribe_tokens (
-                token      TEXT PRIMARY KEY,
-                owner      TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS unsubscribed_users (
-                owner TEXT PRIMARY KEY
-            );
-            "#,
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );",
         )?;
+
+        const MIGRATIONS: &[(&str, &str)] = &[
+            (
+                "1",
+                r#"
+                CREATE TABLE IF NOT EXISTS reminder_preferences (
+                    vault_id             INTEGER PRIMARY KEY,
+                    channels             TEXT NOT NULL,
+                    hours_before_expiry  INTEGER NOT NULL,
+                    frequency            TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS ttl_insurance_policies (
+                    vault_id                      INTEGER PRIMARY KEY,
+                    extension_seconds             INTEGER NOT NULL,
+                    inactivity_threshold_seconds  INTEGER NOT NULL,
+                    enabled                        INTEGER NOT NULL,
+                    purchased_at                   TEXT NOT NULL,
+                    last_extended_at               TEXT
+                );
+                CREATE TABLE IF NOT EXISTS owner_activity (
+                    owner_id       INTEGER PRIMARY KEY,
+                    last_active_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS idempotency_keys (
+                    key           TEXT PRIMARY KEY,
+                    status_code   INTEGER NOT NULL,
+                    response_body TEXT NOT NULL,
+                    created_at    TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS unsubscribe_tokens (
+                    token      TEXT PRIMARY KEY,
+                    owner      TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS unsubscribed_users (
+                    owner TEXT PRIMARY KEY
+                );
+                "#,
+            ),
+            (
+                "2",
+                "ALTER TABLE reminder_preferences ADD COLUMN deleted_at TEXT;",
+            ),
+        ];
+
+        for (version, sql) in MIGRATIONS {
+            let already_applied: bool = {
+                let conn = self.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?1",
+                    params![version],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false)
+            };
+
+            if !already_applied {
+                tracing::info!(version = version, "applying migration");
+                self.conn.lock().unwrap().execute_batch(sql)?;
+                self.conn.lock().unwrap().execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                    params![version, chrono::Utc::now().to_rfc3339()],
+                )?;
+                tracing::info!(version = version, "migration applied successfully");
+            } else {
+                tracing::debug!(version = version, "migration already applied, skipping");
+            }
+        }
+
         Ok(())
     }
 
 
     pub fn upsert(&self, prefs: &ReminderPreferences) -> Result<(), rusqlite::Error> {
         let channels_json = serde_json::to_string(&prefs.channels).unwrap();
-self.conn.lock().unwrap().execute(
-
+        self.conn.lock().unwrap().execute(
             r#"
             INSERT INTO reminder_preferences (vault_id, channels, hours_before_expiry, frequency)
             VALUES (?1, ?2, ?3, ?4)
             ON CONFLICT(vault_id) DO UPDATE SET
               channels = excluded.channels,
               hours_before_expiry = excluded.hours_before_expiry,
-              frequency = excluded.frequency
+              frequency = excluded.frequency,
+              deleted_at = NULL
             "#,
             params![
                 prefs.vault_id as i64,
@@ -548,11 +583,11 @@ self.conn.lock().unwrap().execute(
     }
 
     pub fn get(&self, vault_id: u64) -> Result<ReminderPreferences, rusqlite::Error> {
-let binding = self.conn.lock().unwrap();
+        let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
-            "SELECT vault_id, channels, hours_before_expiry, frequency FROM reminder_preferences WHERE vault_id = ?1",
-
-
+            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
+               FROM reminder_preferences
+               WHERE vault_id = ?1 AND deleted_at IS NULL"#,
         )?;
         let row = stmt.query_row(params![vault_id as i64], |r| {
             let channels_str: String = r.get(1)?;
@@ -564,6 +599,7 @@ let binding = self.conn.lock().unwrap();
                 channels,
                 hours_before_expiry: r.get::<_, i64>(2)? as u32,
                 frequency,
+                deleted_at: None,
             })
         })?;
         Ok(row)
@@ -572,7 +608,9 @@ let binding = self.conn.lock().unwrap();
     pub fn all(&self) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
-            "SELECT vault_id, channels, hours_before_expiry, frequency FROM reminder_preferences",
+            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
+               FROM reminder_preferences
+               WHERE deleted_at IS NULL"#,
         )?;
         let iter = stmt.query_map([], |r| {
             let channels_str: String = r.get(1)?;
@@ -584,6 +622,52 @@ let binding = self.conn.lock().unwrap();
                 channels,
                 hours_before_expiry: r.get::<_, i64>(2)? as u32,
                 frequency,
+                deleted_at: None,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn soft_delete_reminder(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE reminder_preferences SET deleted_at = ?1 WHERE vault_id = ?2 AND deleted_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), vault_id as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn all_reminders_including_deleted(
+        &self,
+        vault_id: u64,
+    ) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
+               FROM reminder_preferences
+               WHERE vault_id = ?1"#,
+        )?;
+        let iter = stmt.query_map(params![vault_id as i64], |r| {
+            let channels_str: String = r.get(1)?;
+            let frequency_str: String = r.get(3)?;
+            let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
+            let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
+            let deleted_at_str: Option<String> = r.get(4)?;
+            let deleted_at = deleted_at_str.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            });
+            Ok(ReminderPreferences {
+                vault_id: r.get::<_, i64>(0)? as u64,
+                channels,
+                hours_before_expiry: r.get::<_, i64>(2)? as u32,
+                frequency,
+                deleted_at,
             })
         })?;
 

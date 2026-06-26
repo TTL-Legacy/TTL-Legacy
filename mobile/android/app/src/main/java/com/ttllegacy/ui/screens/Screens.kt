@@ -1,5 +1,6 @@
 package com.ttllegacy.ui.screens
 
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ttllegacy.models.Vault
+import com.ttllegacy.services.BiometricHelper
 import com.ttllegacy.ui.AuthViewModel
 import com.ttllegacy.ui.VaultViewModel
 
@@ -88,7 +90,10 @@ fun VaultListScreen(
     vm: VaultViewModel = hiltViewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var showCreate by remember { mutableStateOf(false) }
+    var pendingCheckIn by remember { mutableStateOf<Vault?>(null) }
+    var biometricError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { vm.load() }
 
@@ -96,6 +101,22 @@ fun VaultListScreen(
         CreateVaultDialog(
             onCreate = { ben, days -> vm.createVault(ben, days); showCreate = false },
             onDismiss = { showCreate = false }
+        )
+    }
+
+    pendingCheckIn?.let { vault ->
+        CheckInConfirmationDialog(
+            vault = vault,
+            onConfirm = {
+                pendingCheckIn = null
+                BiometricHelper(context as ComponentActivity).authenticate(
+                    title = "Confirm Check-In",
+                    subtitle = "Vault ${vault.id.take(12)}… will extend by ${formatInterval(vault.checkInInterval)}",
+                    onSuccess = { vm.checkIn(vault.id) },
+                    onError = { err -> biometricError = err },
+                )
+            },
+            onDismiss = { pendingCheckIn = null },
         )
     }
 
@@ -119,19 +140,56 @@ fun VaultListScreen(
                         if (state.isOffline) item {
                             OfflineBanner()
                         }
-                        state.error?.let { err -> item {
-                            Text(err, color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(16.dp))
-                        }}
+                        val errorMsg = biometricError ?: state.error
+                        errorMsg?.let { err ->
+                            item {
+                                Text(err, color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(16.dp))
+                            }
+                        }
                         items(state.vaults, key = { it.id }) { vault ->
-                            VaultCard(vault = vault, onClick = { onVaultClick(vault.id) },
-                                onCheckIn = { vm.checkIn(vault.id) })
+                            VaultCard(
+                                vault = vault,
+                                onClick = { onVaultClick(vault.id) },
+                                onCheckIn = { pendingCheckIn = vault },
+                            )
                         }
                     }
                 }
             }
         }
     }
+}
+
+private fun formatInterval(seconds: Long): String {
+    val days = seconds / 86_400
+    return if (days > 0) "$days day${if (days == 1L) "" else "s"}" else "${seconds / 3_600}h"
+}
+
+@Composable
+private fun CheckInConfirmationDialog(vault: Vault, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Confirm Check-In") },
+        text = {
+            Column {
+                Text("Vault: ${vault.id.take(12)}…",
+                    style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(4.dp))
+                Text("TTL will be extended by ${formatInterval(vault.checkInInterval)}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(4.dp))
+                Text("Biometric or PIN confirmation is required.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Confirm") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable

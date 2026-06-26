@@ -6,11 +6,35 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, Instant, interval};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 use tokio_tungstenite::WebSocketStream;
 use tokio::net::TcpStream;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const RATE_LIMIT_MSG_PER_SEC: u32 = 10;
+
+struct MessageRateLimiter {
+    count: u32,
+    window_start: Instant,
+}
+
+impl MessageRateLimiter {
+    fn new() -> Self {
+        Self { count: 0, window_start: Instant::now() }
+    }
+
+    /// Returns false when the per-second limit is exceeded.
+    fn check_and_count(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.window_start) >= Duration::from_secs(1) {
+            self.count = 0;
+            self.window_start = now;
+        }
+        self.count += 1;
+        self.count <= RATE_LIMIT_MSG_PER_SEC
+    }
+}
 
 pub type WsStream = WebSocketStream<TcpStream>;
 pub type WsSink = SplitSink<WsStream, Message>;
@@ -105,14 +129,21 @@ pub async fn handle_authenticated_vault_stream(
 pub async fn read_client_frames(
     mut ws_source: WsSource,
     pong_notify: Arc<tokio::sync::Notify>,
+    rate_exceeded: Arc<tokio::sync::Notify>,
 ) {
+    let mut rate_limiter = MessageRateLimiter::new();
     while let Some(Ok(msg)) = ws_source.next().await {
         match msg {
             Message::Pong(_) => {
                 pong_notify.notify_one();
             }
             Message::Close(_) => break,
-            _ => {}
+            _ => {
+                if !rate_limiter.check_and_count() {
+                    rate_exceeded.notify_one();
+                    break;
+                }
+            }
         }
     }
 }
@@ -126,6 +157,7 @@ pub async fn handle_vault_stream_with_heartbeat(
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     let mut last_pong = Instant::now();
     let mut awaiting_pong = false;
+    let mut rate_limiter = MessageRateLimiter::new();
 
     loop {
         tokio::select! {
@@ -153,6 +185,15 @@ pub async fn handle_vault_stream_with_heartbeat(
                         awaiting_pong = false;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {
+                        if !rate_limiter.check_and_count() {
+                            let _ = ws_sink.send(Message::Close(Some(CloseFrame {
+                                code: CloseCode::Policy,
+                                reason: "message rate limit exceeded".into(),
+                            }))).await;
+                            break;
+                        }
+                    }
                     _ => {}
                 }
             }

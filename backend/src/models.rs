@@ -54,6 +54,8 @@ pub struct ReminderPreferences {
     pub channels: Vec<Channel>,
     pub hours_before_expiry: u32,
     pub frequency: Frequency,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// Request body for setting reminder preferences.

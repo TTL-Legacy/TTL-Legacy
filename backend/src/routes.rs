@@ -13,6 +13,35 @@ use crate::{
     models::{ReminderPreferences, SetPreferencesRequest},
 };
 
+#[derive(Deserialize)]
+pub struct RemindersQuery {
+    pub include_deleted: Option<bool>,
+}
+
+pub async fn list_vault_reminders(
+    State(db): State<Arc<Db>>,
+    Path(vault_id): Path<u64>,
+    Query(query): Query<RemindersQuery>,
+) -> Result<Json<Vec<ReminderPreferences>>, AppError> {
+    let records = if query.include_deleted.unwrap_or(false) {
+        db.all_reminders_including_deleted(vault_id)?
+    } else {
+        match db.get(vault_id) {
+            Ok(p) => vec![p],
+            Err(_) => vec![],
+        }
+    };
+    Ok(Json(records))
+}
+
+pub async fn delete_preferences(
+    State(db): State<Arc<Db>>,
+    Path(vault_id): Path<u64>,
+) -> Result<StatusCode, AppError> {
+    db.soft_delete_reminder(vault_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn set_preferences(
     State(db): State<Arc<Db>>,
     Path(vault_id): Path<u64>,
@@ -42,6 +71,7 @@ pub async fn set_preferences(
         channels: body.channels,
         hours_before_expiry: body.hours_before_expiry,
         frequency: body.frequency,
+        deleted_at: None,
     };
     db.upsert(&prefs)?;
 

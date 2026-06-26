@@ -66,6 +66,9 @@ dependencies {
     // DataStore (offline)
     implementation(libs.datastore.preferences)
 
+    // Biometric authentication
+    implementation(libs.biometric)
+
     // Credentials (Passkey)
     implementation(libs.credentials)
     implementation(libs.credentials.play.services.auth)

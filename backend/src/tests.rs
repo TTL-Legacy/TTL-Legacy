@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{HeaderValue, Method, Request, StatusCode},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde_json::json;
@@ -24,7 +24,13 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
         .route("/ready", get(ready_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
-            post(routes::set_preferences).get(routes::get_preferences),
+            post(routes::set_preferences)
+                .get(routes::get_preferences)
+                .delete(routes::delete_preferences),
+        )
+        .route(
+            "/api/vaults/:vault_id/reminders",
+            get(routes::list_vault_reminders),
         )
         .route(
             "/notifications/unsubscribe",
@@ -90,6 +96,7 @@ async fn test_set_and_get_preferences() {
         channels: vec![crate::models::Channel::Email],
         hours_before_expiry: 24,
         frequency: crate::models::Frequency::Once,
+        deleted_at: None,
     };
     db.upsert(&prefs).unwrap();
     let fetched = db.get(1).unwrap();
@@ -141,6 +148,7 @@ async fn test_upsert_overwrites() {
         channels: vec![crate::models::Channel::Email],
         hours_before_expiry: 12,
         frequency: crate::models::Frequency::Once,
+        deleted_at: None,
     };
     db.upsert(&p1).unwrap();
 
@@ -149,6 +157,7 @@ async fn test_upsert_overwrites() {
         channels: vec![crate::models::Channel::Sms, crate::models::Channel::Push],
         hours_before_expiry: 6,
         frequency: crate::models::Frequency::Hourly,
+        deleted_at: None,
     };
     db.upsert(&p2).unwrap();
 

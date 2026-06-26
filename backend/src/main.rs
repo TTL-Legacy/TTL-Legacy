@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     extract::State,
     http::{HeaderValue, Method},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
@@ -88,7 +88,13 @@ async fn main() {
         .route("/ready", get(ready_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
-            post(routes::set_preferences).get(routes::get_preferences),
+            post(routes::set_preferences)
+                .get(routes::get_preferences)
+                .delete(routes::delete_preferences),
+        )
+        .route(
+            "/api/vaults/:vault_id/reminders",
+            get(routes::list_vault_reminders),
         )
         .layer(build_cors_layer())
         .with_state(db);
