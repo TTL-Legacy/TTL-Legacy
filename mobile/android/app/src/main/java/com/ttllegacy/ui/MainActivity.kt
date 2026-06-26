@@ -1,35 +1,124 @@
 package com.ttllegacy.ui
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.ttllegacy.ui.screens.AuthScreen
+import com.ttllegacy.ui.screens.BeneficiaryAcceptanceScreen
 import com.ttllegacy.ui.screens.VaultListScreen
 import com.ttllegacy.ui.theme.TTLLegacyTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    private var pendingDeepLinkVaultId by mutableStateOf<String?>(null)
+    private var showPermissionRationale by mutableStateOf(false)
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* result handled gracefully — denial does not break the app */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        pendingDeepLinkVaultId = extractDeepLinkVaultId(intent)
+
         setContent {
             TTLLegacyTheme {
-                AppNavigation()
+                NotificationPermissionEffect(
+                    showRationale = showPermissionRationale,
+                    onRationaleShown = { showPermissionRationale = false },
+                    onRequestPermission = {
+                        showPermissionRationale = false
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    }
+                )
+                AppNavigation(
+                    deepLinkVaultId = pendingDeepLinkVaultId,
+                    onDeepLinkConsumed = { pendingDeepLinkVaultId = null }
+                )
             }
         }
+
+        requestNotificationPermissionIfNeeded()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingDeepLinkVaultId = extractDeepLinkVaultId(intent)
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        when {
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED -> Unit
+            shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS) ->
+                showPermissionRationale = true
+            else ->
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun extractDeepLinkVaultId(intent: Intent): String? =
+        intent.data
+            ?.takeIf { it.scheme == "https" && it.host == "ttl-legacy.app" && it.path == "/accept" }
+            ?.getQueryParameter("vault_id")
+}
+
+@Composable
+private fun NotificationPermissionEffect(
+    showRationale: Boolean,
+    onRationaleShown: () -> Unit,
+    onRequestPermission: () -> Unit
+) {
+    if (showRationale) {
+        AlertDialog(
+            onDismissRequest = onRationaleShown,
+            title = { Text("Stay Notified") },
+            text = {
+                Text(
+                    "TTL-Legacy needs notification permission to alert you before your vault " +
+                    "expires and remind you to check in. Without it, reminders will not be delivered."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = onRequestPermission) { Text("Allow") }
+            },
+            dismissButton = {
+                TextButton(onClick = onRationaleShown) { Text("Not now") }
+            }
+        )
     }
 }
 
 @Composable
-private fun AppNavigation() {
+private fun AppNavigation(
+    deepLinkVaultId: String?,
+    onDeepLinkConsumed: () -> Unit
+) {
     val navController = rememberNavController()
     val authVm: AuthViewModel = hiltViewModel()
     val authState by authVm.state.collectAsStateWithLifecycle()
@@ -39,10 +128,25 @@ private fun AppNavigation() {
         else navController.navigate("auth") { popUpTo("vaults") { inclusive = true } }
     }
 
+    LaunchedEffect(deepLinkVaultId) {
+        if (deepLinkVaultId != null && authState.isAuthenticated) {
+            navController.navigate("accept/$deepLinkVaultId")
+            onDeepLinkConsumed()
+        }
+    }
+
     NavHost(navController, startDestination = if (authState.isAuthenticated) "vaults" else "auth") {
         composable("auth") { AuthScreen(vm = authVm) }
         composable("vaults") {
             VaultListScreen(onVaultClick = { /* navigate to detail */ })
+        }
+        composable("accept/{vaultId}") { backStack ->
+            val vaultId = backStack.arguments?.getString("vaultId") ?: return@composable
+            BeneficiaryAcceptanceScreen(
+                vaultId = vaultId,
+                onAccepted = { navController.popBackStack() },
+                onDecline = { navController.popBackStack() }
+            )
         }
     }
 }

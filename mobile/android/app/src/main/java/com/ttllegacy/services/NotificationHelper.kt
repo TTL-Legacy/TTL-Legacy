@@ -17,9 +17,15 @@ class NotificationHelper @Inject constructor(@ApplicationContext private val con
     companion object {
         const val CHANNEL_ID = "ttl_reminders"
         const val CHANNEL_NAME = "Check-in Reminders"
+        const val QUEUED_CHANNEL_ID = "ttl_queued"
+        const val QUEUED_CHANNEL_NAME = "Queued Check-ins"
+        const val QUEUED_NOTIFICATION_ID = 9_001
     }
 
-    init { createChannel() }
+    init {
+        createChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH)
+        createChannel(QUEUED_CHANNEL_ID, QUEUED_CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT)
+    }
 
     fun show(title: String, body: String, vaultId: String?) {
         val intent = Intent(context, MainActivity::class.java).apply {
@@ -42,8 +48,36 @@ class NotificationHelper @Inject constructor(@ApplicationContext private val con
         nm.notify(vaultId.hashCode(), notification)
     }
 
-    private fun createChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH)
+    fun showQueuedCheckIn(count: Int) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pi = PendingIntent.getActivity(context, QUEUED_NOTIFICATION_ID, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+        val body = if (count == 1) "1 check-in will be submitted when back online"
+                   else "$count check-ins will be submitted when back online"
+
+        val notification = NotificationCompat.Builder(context, QUEUED_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+            .setContentTitle("Check-in queued")
+            .setContentText(body)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setContentIntent(pi)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+
+        context.getSystemService(NotificationManager::class.java)
+            .notify(QUEUED_NOTIFICATION_ID, notification)
+    }
+
+    fun cancelQueuedCheckIn() {
+        context.getSystemService(NotificationManager::class.java).cancel(QUEUED_NOTIFICATION_ID)
+    }
+
+    private fun createChannel(id: String, name: String, importance: Int) {
+        val channel = NotificationChannel(id, name, importance)
         context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 }

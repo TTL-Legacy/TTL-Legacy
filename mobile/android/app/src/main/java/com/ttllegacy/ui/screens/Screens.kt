@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ttllegacy.models.Vault
+import com.ttllegacy.ui.AcceptanceViewModel
 import com.ttllegacy.ui.AuthViewModel
 import com.ttllegacy.ui.VaultViewModel
 
@@ -188,6 +189,73 @@ private fun StatusChip(status: com.ttllegacy.models.VaultStatus) {
     }
     SuggestionChip(onClick = {}, label = { Text(label, style = MaterialTheme.typography.labelSmall) },
         colors = SuggestionChipDefaults.suggestionChipColors(labelColor = color))
+}
+
+// MARK: - Beneficiary Acceptance Screen
+
+@Composable
+fun BeneficiaryAcceptanceScreen(
+    vaultId: String,
+    onAccepted: () -> Unit,
+    onDecline: () -> Unit,
+    vm: AcceptanceViewModel = hiltViewModel()
+) {
+    val state by vm.state.collectAsStateWithLifecycle()
+
+    LaunchedEffect(state.isAccepted) {
+        if (state.isAccepted) onAccepted()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Default.Lock,
+            contentDescription = null,
+            modifier = Modifier.size(56.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.height(16.dp))
+        Text("Beneficiary Acceptance", style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "You have been named as the beneficiary for the following vault:",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = vaultId,
+            onValueChange = {},
+            label = { Text("Vault ID") },
+            readOnly = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        state.error?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(24.dp))
+        Button(
+            onClick = { vm.accept(vaultId) },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !state.isLoading
+        ) {
+            if (state.isLoading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            else Text("Accept")
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = onDecline,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !state.isLoading
+        ) {
+            Text("Decline")
+        }
+    }
 }
 
 @Composable

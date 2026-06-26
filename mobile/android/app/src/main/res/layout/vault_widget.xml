@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="#FF1C1C1E">
+
+    <TextView
+        android:id="@+id/widget_vault_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:textColor="#FFFFFFFF"
+        android:text="—"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/widget_ttl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="#FFEBEBF5"
+        android:layout_marginTop="4dp"
+        android:text="TTL: —" />
+
+    <TextView
+        android:id="@+id/widget_last_check_in"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="#FFEBEBF5"
+        android:layout_marginTop="4dp"
+        android:text="Last check-in: —" />
+
+</LinearLayout>

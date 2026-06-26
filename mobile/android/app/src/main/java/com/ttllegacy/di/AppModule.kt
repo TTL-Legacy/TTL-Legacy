@@ -1,11 +1,14 @@
 package com.ttllegacy.di
 
 import android.content.Context
+import androidx.work.WorkManager
 import com.ttllegacy.BuildConfig
 import com.ttllegacy.api.ApiClient
 import com.ttllegacy.api.NetworkMonitor
 import com.ttllegacy.api.OfflineCache
 import com.ttllegacy.api.TokenProvider
+import com.ttllegacy.services.CheckInDatabase
+import com.ttllegacy.services.PendingCheckInDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -23,4 +26,16 @@ object AppModule {
         networkMonitor: NetworkMonitor,
         offlineCache: OfflineCache
     ): ApiClient = ApiClient(tokenProvider, networkMonitor, offlineCache, BuildConfig.API_BASE_URL)
+
+    @Provides @Singleton
+    fun provideCheckInDatabase(@ApplicationContext context: Context): CheckInDatabase =
+        CheckInDatabase.create(context)
+
+    @Provides @Singleton
+    fun providePendingCheckInDao(db: CheckInDatabase): PendingCheckInDao =
+        db.pendingCheckInDao()
+
+    @Provides @Singleton
+    fun provideWorkManager(@ApplicationContext context: Context): WorkManager =
+        WorkManager.getInstance(context)
 }

@@ -48,6 +48,10 @@ class ApiClient @Inject constructor(
     suspend fun withdraw(vaultId: String, amount: Long): ApiResult<Vault> =
         post("/vaults/$vaultId/withdraw", mapOf("amount" to amount))
 
+    // Beneficiary
+    suspend fun acceptBeneficiary(vaultId: String): ApiResult<Unit> =
+        post("/vaults/$vaultId/accept", Unit)
+
     // Push
     suspend fun registerPushToken(token: String): ApiResult<Unit> =
         post("/notifications/register", PushRegistration(token = token))

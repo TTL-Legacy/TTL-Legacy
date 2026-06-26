@@ -1,6 +1,7 @@
 package com.ttllegacy.ui
 
 import android.app.Activity
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ttllegacy.api.ApiClient
@@ -8,9 +9,13 @@ import com.ttllegacy.api.ApiResult
 import com.ttllegacy.api.TokenProvider
 import com.ttllegacy.models.CreateVaultRequest
 import com.ttllegacy.models.Vault
+import com.ttllegacy.services.CheckInSyncWorker
 import com.ttllegacy.services.NotificationHelper
 import com.ttllegacy.services.PasskeyService
+import com.ttllegacy.services.PendingCheckIn
+import com.ttllegacy.services.PendingCheckInDao
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -66,7 +71,9 @@ data class VaultUiState(
 @HiltViewModel
 class VaultViewModel @Inject constructor(
     private val apiClient: ApiClient,
-    private val notificationHelper: NotificationHelper
+    private val notificationHelper: NotificationHelper,
+    private val pendingCheckInDao: PendingCheckInDao,
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(VaultUiState())
@@ -91,7 +98,13 @@ class VaultViewModel @Inject constructor(
         when (val result = apiClient.checkIn(vaultId)) {
             is ApiResult.Success -> load()
             is ApiResult.Error -> _state.update { it.copy(error = result.message) }
-            ApiResult.NetworkUnavailable -> _state.update { it.copy(error = "No network — check-in queued") }
+            ApiResult.NetworkUnavailable -> {
+                pendingCheckInDao.insert(PendingCheckIn(vaultId = vaultId, queuedAt = System.currentTimeMillis()))
+                val queued = pendingCheckInDao.getAll()
+                notificationHelper.showQueuedCheckIn(queued.size)
+                CheckInSyncWorker.schedule(context)
+                _state.update { it.copy(error = "Offline — check-in queued and will retry automatically") }
+            }
         }
     }
 
@@ -101,6 +114,32 @@ class VaultViewModel @Inject constructor(
             is ApiResult.Success -> load()
             is ApiResult.Error -> _state.update { it.copy(error = result.message) }
             ApiResult.NetworkUnavailable -> _state.update { it.copy(error = "No network") }
+        }
+    }
+}
+
+// --- Acceptance ViewModel ---
+
+data class AcceptanceUiState(
+    val isLoading: Boolean = false,
+    val isAccepted: Boolean = false,
+    val error: String? = null
+)
+
+@HiltViewModel
+class AcceptanceViewModel @Inject constructor(
+    private val apiClient: ApiClient
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(AcceptanceUiState())
+    val state = _state.asStateFlow()
+
+    fun accept(vaultId: String) = viewModelScope.launch {
+        _state.update { it.copy(isLoading = true, error = null) }
+        when (val result = apiClient.acceptBeneficiary(vaultId)) {
+            is ApiResult.Success -> _state.update { it.copy(isLoading = false, isAccepted = true) }
+            is ApiResult.Error -> _state.update { it.copy(isLoading = false, error = result.message) }
+            ApiResult.NetworkUnavailable -> _state.update { it.copy(isLoading = false, error = "No network. Please try again.") }
         }
     }
 }
