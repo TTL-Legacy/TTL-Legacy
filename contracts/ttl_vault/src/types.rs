@@ -423,6 +423,9 @@ pub enum DataKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
+    // Issue #809: two-step protocol configuration update
+    PendingProtocolConfig,
+    ProtocolConfigProposedAt,
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -1379,3 +1382,18 @@ pub const CLAIM_BENEFICIARY_VESTING_TOPIC: Symbol = symbol_short!("clm_bvst");
 pub const AUCTION_CREATED_TOPIC: Symbol = symbol_short!("auc_crt");
 pub const AUCTION_BID_TOPIC: Symbol = symbol_short!("auc_bid");
 pub const AUCTION_FINALIZED_TOPIC: Symbol = symbol_short!("auc_fin");
+
+// Issue #809: two-step protocol configuration update
+pub const PROTOCOL_CONFIG_PROPOSED_TOPIC: Symbol = symbol_short!("pc_prop");
+pub const PROTOCOL_CONFIG_APPLIED_TOPIC: Symbol = symbol_short!("pc_apply");
+
+/// Aggregated protocol-level configuration — Issue #810.
+/// Returned by `get_protocol_config` so off-chain clients avoid raw storage key coupling.
+#[contracttype]
+#[derive(Clone)]
+pub struct ProtocolConfig {
+    pub min_check_in_interval: Option<u64>,
+    pub max_check_in_interval: Option<u64>,
+    pub max_ttl_seconds: u64,
+    pub ttl_decay_rate: u32,
+}

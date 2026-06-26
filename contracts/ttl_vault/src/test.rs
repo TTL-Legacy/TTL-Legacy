@@ -5826,3 +5826,94 @@ fn test_cannot_reverse_twice() {
     let result = client.try_reverse_withdrawal(&vault_id, &owner, &0u64);
     assert!(result.is_err(), "Cannot reverse the same withdrawal twice");
 }
+
+// ---- Issue #812: get_admin query ----
+
+#[test]
+fn test_get_admin_returns_initialized_admin() {
+    let (_, _, _, admin, _, client) = setup();
+    assert_eq!(client.get_admin(), admin);
+}
+
+// ---- Issue #810: get_protocol_config query ----
+
+#[test]
+fn test_get_protocol_config_defaults() {
+    let (_, _, _, _, _, client) = setup();
+    let config = client.get_protocol_config();
+    assert_eq!(config.min_check_in_interval, None);
+    assert_eq!(config.max_check_in_interval, None);
+    assert_eq!(config.max_ttl_seconds, 315_360_000);
+    assert_eq!(config.ttl_decay_rate, 0);
+}
+
+#[test]
+fn test_get_protocol_config_matches_set_values() {
+    let (_, _, _, _, _, client) = setup();
+    client.set_min_check_in_interval(&60u64);
+    client.set_max_check_in_interval(&3600u64);
+    client.set_max_ttl_seconds(&7200u64);
+    client.set_ttl_decay_rate(&100u32);
+    let config = client.get_protocol_config();
+    assert_eq!(config.min_check_in_interval, Some(60));
+    assert_eq!(config.max_check_in_interval, Some(3600));
+    assert_eq!(config.max_ttl_seconds, 7200);
+    assert_eq!(config.ttl_decay_rate, 100);
+}
+
+// ---- Issue #809: two-step protocol configuration update ----
+
+#[test]
+fn test_propose_protocol_config_rejects_immediate_apply() {
+    let (_, _, _, _, _, client) = setup();
+    let config = ProtocolConfig {
+        min_check_in_interval: Some(60),
+        max_check_in_interval: Some(3600),
+        max_ttl_seconds: 7200,
+        ttl_decay_rate: 100,
+    };
+    client.propose_protocol_config(&config);
+    // Applying immediately must fail (timelock not elapsed)
+    let err = client.try_apply_protocol_config().unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(84));
+}
+
+#[test]
+fn test_apply_protocol_config_after_timelock() {
+    let (env, _, _, _, _, client) = setup();
+    let config = ProtocolConfig {
+        min_check_in_interval: Some(60),
+        max_check_in_interval: Some(3600),
+        max_ttl_seconds: 7200,
+        ttl_decay_rate: 100,
+    };
+    client.propose_protocol_config(&config);
+    env.ledger().with_mut(|li| {
+        li.timestamp += 86_401;
+    });
+    client.apply_protocol_config();
+    let applied = client.get_protocol_config();
+    assert_eq!(applied.min_check_in_interval, Some(60));
+    assert_eq!(applied.max_check_in_interval, Some(3600));
+    assert_eq!(applied.max_ttl_seconds, 7200);
+    assert_eq!(applied.ttl_decay_rate, 100);
+}
+
+#[test]
+fn test_apply_protocol_config_without_proposal_fails() {
+    let (_, _, _, _, _, client) = setup();
+    let err = client.try_apply_protocol_config().unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(83));
+}
+
+// ---- Issue #811: admin cannot own a vault ----
+
+#[test]
+fn test_create_vault_rejects_admin_as_owner() {
+    let (_, _, beneficiary, admin, _, client) = setup();
+    let err = client
+        .try_create_vault(&admin, &beneficiary, &3600u64, &None)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(82));
+}

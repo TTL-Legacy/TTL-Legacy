@@ -76,6 +76,7 @@ use types::{
     TokenHedge, TOKEN_HEDGE_TOPIC, TOKEN_HEDGE_CLOSE_TOPIC,
     TokenWeight, TokenRebalanceConfig, TOKEN_REBALANCE_TOPIC, TOKEN_REBALANCED_TOPIC,
     BeneficiaryPool, POOL_CREATED_TOPIC,
+    ProtocolConfig, PROTOCOL_CONFIG_PROPOSED_TOPIC, PROTOCOL_CONFIG_APPLIED_TOPIC,
 };
 #[cfg(test)]
 mod regression_tests;
@@ -124,6 +125,9 @@ const DEFAULT_MIN_CHECKIN_COOLDOWN: u64 = 60;
 
 /// Maximum seconds an owner can accelerate TTL decay per call (30 days).
 const MAX_ACCELERATE_SECONDS: u64 = 2_592_000;
+
+/// Timelock delay for protocol config updates in seconds (24 hours) — Issue #809.
+const PROTOCOL_CONFIG_TIMELOCK: u64 = 86_400;
 
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
@@ -228,6 +232,11 @@ pub enum ContractError {
     AuctionAlreadyExists = 79,
     AuctionEnded = 80,
     AuctionNotEnded = 81,
+    // Issue #811: admin cannot own a vault
+    AdminCannotOwnVault = 82,
+    // Issue #809: two-step protocol config update
+    NoPendingProtocolConfig = 83,
+    ProtocolConfigTimeLocked = 84,
 }
 
 #[contract]
@@ -927,6 +936,84 @@ impl TtlVaultContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
+    /// Returns the current protocol-level configuration as a typed struct — Issue #810.
+    pub fn get_protocol_config(env: Env) -> ProtocolConfig {
+        ProtocolConfig {
+            min_check_in_interval: env.storage().instance().get(&DataKey::MinCheckInInterval),
+            max_check_in_interval: env.storage().instance().get(&DataKey::MaxCheckInInterval),
+            max_ttl_seconds: env.storage().instance().get(&DataKey::MaxTtlSeconds).unwrap_or(315_360_000),
+            ttl_decay_rate: env.storage().instance().get(&DataKey::TtlDecayRate).unwrap_or(0),
+        }
+    }
+
+    /// Proposes a new protocol configuration subject to a 24-hour timelock — Issue #809.
+    /// Admin-only. Stores the pending config; call `apply_protocol_config` after the delay.
+    pub fn propose_protocol_config(env: Env, config: ProtocolConfig) {
+        Self::require_admin(&env);
+        if let Some(min) = config.min_check_in_interval {
+            if min == 0 {
+                panic_with_error!(&env, ContractError::InvalidInterval);
+            }
+        }
+        if let Some(max) = config.max_check_in_interval {
+            if max == 0 {
+                panic_with_error!(&env, ContractError::InvalidInterval);
+            }
+        }
+        if let (Some(min), Some(max)) = (config.min_check_in_interval, config.max_check_in_interval) {
+            if min > max {
+                panic_with_error!(&env, ContractError::InvalidInterval);
+            }
+        }
+        if config.max_ttl_seconds == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        if config.ttl_decay_rate > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidBps);
+        }
+        let now = env.ledger().timestamp();
+        env.storage().instance().set(&DataKey::PendingProtocolConfig, &config);
+        env.storage().instance().set(&DataKey::ProtocolConfigProposedAt, &now);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((PROTOCOL_CONFIG_PROPOSED_TOPIC,), now);
+    }
+
+    /// Applies the pending protocol configuration after the 24-hour timelock — Issue #809.
+    /// Admin-only.
+    pub fn apply_protocol_config(env: Env) {
+        Self::require_admin(&env);
+        let config: ProtocolConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingProtocolConfig)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingProtocolConfig));
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProtocolConfigProposedAt)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingProtocolConfig));
+        let now = env.ledger().timestamp();
+        if now < proposed_at + PROTOCOL_CONFIG_TIMELOCK {
+            panic_with_error!(&env, ContractError::ProtocolConfigTimeLocked);
+        }
+        if let Some(min) = config.min_check_in_interval {
+            env.storage().instance().set(&DataKey::MinCheckInInterval, &min);
+        } else {
+            env.storage().instance().remove(&DataKey::MinCheckInInterval);
+        }
+        if let Some(max) = config.max_check_in_interval {
+            env.storage().instance().set(&DataKey::MaxCheckInInterval, &max);
+        } else {
+            env.storage().instance().remove(&DataKey::MaxCheckInInterval);
+        }
+        env.storage().instance().set(&DataKey::MaxTtlSeconds, &config.max_ttl_seconds);
+        env.storage().instance().set(&DataKey::TtlDecayRate, &config.ttl_decay_rate);
+        env.storage().instance().remove(&DataKey::PendingProtocolConfig);
+        env.storage().instance().remove(&DataKey::ProtocolConfigProposedAt);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((PROTOCOL_CONFIG_APPLIED_TOPIC,), now);
+    }
+
     /// Returns the contract version string set during initialization.
     pub fn get_version(env: Env) -> String {
         env.storage()
@@ -988,6 +1075,10 @@ impl TtlVaultContract {
         ) -> u64 {
             owner.require_auth();
             Self::require_initialized(&env);
+            // Issue #811: admin must not own vaults to prevent self-dealing on releases
+            if owner == Self::load_admin(&env) {
+                panic_with_error!(&env, ContractError::AdminCannotOwnVault);
+            }
             if check_in_interval == 0 {
                 panic_with_error!(&env, ContractError::InvalidInterval);
             }
