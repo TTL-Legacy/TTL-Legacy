@@ -76,6 +76,8 @@ use types::{
     TokenHedge, TOKEN_HEDGE_TOPIC, TOKEN_HEDGE_CLOSE_TOPIC,
     TokenWeight, TokenRebalanceConfig, TOKEN_REBALANCE_TOPIC, TOKEN_REBALANCED_TOPIC,
     BeneficiaryPool, POOL_CREATED_TOPIC,
+    ADMIN_TRANSFER_PROPOSED_TOPIC, ADMIN_TRANSFER_COMPLETED_TOPIC,
+    PauseRecord,
 };
 #[cfg(test)]
 mod regression_tests;
@@ -124,6 +126,9 @@ const DEFAULT_MIN_CHECKIN_COOLDOWN: u64 = 60;
 
 /// Maximum seconds an owner can accelerate TTL decay per call (30 days).
 const MAX_ACCELERATE_SECONDS: u64 = 2_592_000;
+
+/// Time-lock delay for admin transfers in seconds (24 hours) — Issue #813.
+const ADMIN_TRANSFER_TIMELOCK: u64 = 86_400;
 
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
@@ -228,6 +233,10 @@ pub enum ContractError {
     AuctionAlreadyExists = 79,
     AuctionEnded = 80,
     AuctionNotEnded = 81,
+    // Issue #815: invalid configuration values
+    InvalidConfig = 82,
+    // Issue #813: admin transfer timelock enforcement
+    AdminTransferTimeLocked = 83,
 }
 
 #[contract]
@@ -266,35 +275,43 @@ impl TtlVaultContract {
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Pauses the contract, blocking all state-changing operations.
+    /// Pauses the contract, blocking all state-changing operations (Issue #814).
     ///
-    /// Only the admin can call this function. When paused, operations like
-    /// deposit, withdraw, check_in, and trigger_release will fail.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
+    /// Stores a `PauseRecord` with the caller, reason, and timestamp.
+    /// Only the admin can call this function.
     ///
     /// # Panics
     /// Panics if the caller is not the admin
-    pub fn pause(env: Env) {
+    pub fn pause(env: Env, reason: Bytes) {
         Self::require_admin(&env);
+        let paused_by = Self::load_admin(&env);
+        let record = PauseRecord {
+            paused_by: paused_by.clone(),
+            reason: reason.clone(),
+            paused_at: env.ledger().timestamp(),
+        };
         env.storage().instance().set(&DataKey::Paused, &true);
-        env.events().publish((PAUSE_TOPIC,), true);
+        env.storage().instance().set(&DataKey::PauseRecord, &record);
+        env.events().publish((PAUSE_TOPIC,), (true, paused_by, reason));
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Returns the pause record if the contract is currently paused (Issue #814).
+    pub fn get_pause_record(env: Env) -> Option<PauseRecord> {
+        env.storage().instance().get(&DataKey::PauseRecord)
     }
 
     /// Unpauses the contract, allowing all operations to resume.
     ///
+    /// Clears the stored pause record.
     /// Only the admin can call this function.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
     ///
     /// # Panics
     /// Panics if the caller is not the admin
     pub fn unpause(env: Env) {
         Self::require_admin(&env);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PauseRecord);
         env.events().publish((UNPAUSE_TOPIC,), false);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
@@ -313,11 +330,11 @@ impl TtlVaultContract {
     pub fn set_min_check_in_interval(env: Env, min_interval: u64) {
         Self::require_admin(&env);
         if min_interval == 0 {
-            panic_with_error!(&env, ContractError::InvalidInterval);
+            panic_with_error!(&env, ContractError::InvalidConfig);
         }
         if let Some(max) = env.storage().instance().get::<DataKey, u64>(&DataKey::MaxCheckInInterval) {
             if min_interval > max {
-                panic_with_error!(&env, ContractError::InvalidInterval);
+                panic_with_error!(&env, ContractError::InvalidConfig);
             }
         }
         env.storage().instance().set(&DataKey::MinCheckInInterval, &min_interval);
@@ -339,11 +356,11 @@ impl TtlVaultContract {
     pub fn set_max_check_in_interval(env: Env, max_interval: u64) {
         Self::require_admin(&env);
         if max_interval == 0 {
-            panic_with_error!(&env, ContractError::InvalidInterval);
+            panic_with_error!(&env, ContractError::InvalidConfig);
         }
         if let Some(min) = env.storage().instance().get::<DataKey, u64>(&DataKey::MinCheckInInterval) {
             if max_interval < min {
-                panic_with_error!(&env, ContractError::InvalidInterval);
+                panic_with_error!(&env, ContractError::InvalidConfig);
             }
         }
         env.storage().instance().set(&DataKey::MaxCheckInInterval, &max_interval);
@@ -935,11 +952,21 @@ impl TtlVaultContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
     }
 
-    /// Proposes a new admin. The proposed admin must call `accept_admin` to complete the transfer.
-    pub fn propose_admin(env: Env, new_admin: Address) {
+    /// Proposes a new admin with a 24-hour timelock (Issue #813).
+    /// Only the current admin can call this. The proposed admin must call
+    /// `accept_admin` after the timelock has elapsed.
+    pub fn propose_new_admin(env: Env, new_admin: Address) {
         Self::require_admin(&env);
+        let proposed_at = env.ledger().timestamp();
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage().instance().set(&DataKey::AdminTransferProposedAt, &proposed_at);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((ADMIN_TRANSFER_PROPOSED_TOPIC,), (new_admin, proposed_at));
+    }
+
+    /// Backward-compatible alias for `propose_new_admin`.
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        Self::propose_new_admin(env, new_admin);
     }
 
     /// Returns the pending admin address, if any.
@@ -947,7 +974,8 @@ impl TtlVaultContract {
         env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
-    /// Accepts a pending admin transfer. Must be called by the pending admin.
+    /// Accepts a pending admin transfer. Must be called by the pending admin
+    /// after the 24-hour timelock has elapsed (Issue #813).
     pub fn accept_admin(env: Env) {
         let pending: Address = env
             .storage()
@@ -955,9 +983,19 @@ impl TtlVaultContract {
             .get(&DataKey::PendingAdmin)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingAdmin));
         pending.require_auth();
+        let proposed_at: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminTransferProposedAt)
+            .unwrap_or(0);
+        if env.ledger().timestamp() < proposed_at + ADMIN_TRANSFER_TIMELOCK {
+            panic_with_error!(&env, ContractError::AdminTransferTimeLocked);
+        }
         env.storage().instance().set(&DataKey::Admin, &pending);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::AdminTransferProposedAt);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((ADMIN_TRANSFER_COMPLETED_TOPIC,), pending);
     }
 
     // --- vault lifecycle ---

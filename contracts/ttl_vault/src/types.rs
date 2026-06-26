@@ -211,6 +211,13 @@ pub const TOKEN_REBALANCED_TOPIC: Symbol = symbol_short!("tok_rebd");
 // Issue #529: beneficiary pooling
 pub const POOL_CREATED_TOPIC: Symbol = symbol_short!("pool_crt");
 
+// Issue #813: admin transfer timelock
+pub const ADMIN_TRANSFER_PROPOSED_TOPIC: Symbol = symbol_short!("adm_prop");
+pub const ADMIN_TRANSFER_COMPLETED_TOPIC: Symbol = symbol_short!("adm_done");
+
+// Issue #814: pause reason tracking
+pub const PAUSE_REASON_TOPIC: Symbol = symbol_short!("pau_rsn");
+
 // Vault state snapshots
 pub const SNAPSHOT_CREATED_TOPIC: Symbol = symbol_short!("snap_crt");
 pub const SNAPSHOT_RESTORED_TOPIC: Symbol = symbol_short!("snap_rst");
@@ -423,6 +430,19 @@ pub enum DataKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
+    // Issue #813: admin transfer timelock
+    AdminTransferProposedAt,
+    // Issue #814: pause reason tracking
+    PauseRecord,
+}
+
+/// Pause record stored when the contract is paused (Issue #814).
+#[contracttype]
+#[derive(Clone)]
+pub struct PauseRecord {
+    pub paused_by: Address,
+    pub reason: Bytes,
+    pub paused_at: u64,
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
