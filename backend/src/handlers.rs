@@ -461,6 +461,7 @@ pub fn set_notification_preferences_handler(
             .iter()
             .any(|c| matches!(c, NotificationChannel::Push)),
         warning_hours_before: 24,
+        locale: None,
     };
 
     set_notification_preferences(notif_store, prefs.clone());

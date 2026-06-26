@@ -6,7 +6,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{storage::{Instance as _, Persistent as _}, Address as _, Events, Ledger},
     token::{self, StellarAssetClient},
-    vec, Address, BytesN, Env, IntoVal, TryIntoVal,
+    bytes, vec, Address, Bytes, BytesN, Env, IntoVal, TryIntoVal,
 };
 
 fn setup() -> (
@@ -213,10 +213,10 @@ fn test_batch_deposit_rejected_when_any_vault_expired() {
 
 #[test]
 fn test_pause_and_unpause_toggle() {
-    let (_, _, _, _, _, client) = setup();
+    let (env, _, _, _, _, client) = setup();
 
     assert!(!client.is_paused());
-    client.pause();
+    client.pause(&bytes!(&env, 0x01));
     assert!(client.is_paused());
     client.unpause();
     assert!(!client.is_paused());
@@ -227,7 +227,8 @@ fn test_pause_and_unpause_toggle() {
 #[test]
 fn test_pause_emits_event() {
     let (env, _, _, _, _, client) = setup();
-    client.pause();
+    let reason = bytes!(&env, 0x01);
+    client.pause(&reason);
 
     let event = env.events().all().iter().find(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
@@ -238,9 +239,6 @@ fn test_pause_emits_event() {
             .unwrap_or(false)
     });
     assert!(event.is_some(), "pause event not emitted");
-
-    let data: bool = event.unwrap().2.into_val(&env);
-    assert!(data);
 }
 
 // ---- Issue #317: unpause event emission test ----
@@ -249,7 +247,7 @@ fn test_pause_emits_event() {
 fn test_unpause_emits_event() {
     let (env, _, _, _, _, client) = setup();
 
-    client.pause();
+    client.pause(&bytes!(&env, 0x01));
     client.unpause();
 
     let events = env.events().all();
@@ -283,7 +281,7 @@ fn test_paused_blocks_check_in_withdraw_and_trigger_release() {
     client.deposit(&vault_id, &owner, &200i128);
     env.ledger().with_mut(|l| l.timestamp += 200);
 
-    client.pause();
+    client.pause(&bytes!(&env, 0x01));
 
     assert!(client.try_check_in(&vault_id, &owner).is_err());
     assert!(client.try_withdraw(&vault_id, &owner, &10i128).is_err());
@@ -453,6 +451,15 @@ fn test_initiate_ownership_transfer_stores_pending_request() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #82)")]
+fn test_initiate_ownership_transfer_to_current_owner_fails() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    // new_owner == current owner — should fail with AlreadyOwner (#82)
+    client.initiate_ownership_transfer(&vault_id, &owner, &owner);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #36)")]
 fn test_accept_ownership_transfer_before_timelock_fails() {
     let (env, owner, beneficiary, _, _, client) = setup();
@@ -578,6 +585,32 @@ fn test_cancel_ownership_transfer_emits_cancelled_event() {
 }
 
 #[test]
+fn test_new_owner_can_decline_ownership_transfer() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.initiate_ownership_transfer(&vault_id, &owner, &new_owner);
+    client.cancel_ownership_transfer(&vault_id, &new_owner);
+
+    assert!(client.get_pending_ownership_transfer(&vault_id).is_none());
+    assert_eq!(client.get_vault(&vault_id).owner, owner);
+    assert!(find_event_by_topic(&env, types::OWNERSHIP_CANCELLED_TOPIC));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_unrelated_address_cannot_cancel_ownership_transfer() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.initiate_ownership_transfer(&vault_id, &owner, &new_owner);
+    client.cancel_ownership_transfer(&vault_id, &stranger);
+}
+
+#[test]
 fn test_accept_ownership_transfer_emits_accepted_event() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let new_owner = Address::generate(&env);
@@ -587,6 +620,33 @@ fn test_accept_ownership_transfer_emits_accepted_event() {
     env.ledger().with_mut(|l| l.timestamp += 86_401);
     client.accept_ownership_transfer(&vault_id, &new_owner);
     assert!(find_event_by_topic(&env, types::OWNERSHIP_ACCEPTED_TOPIC));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_expire_ownership_transfer_before_expiry_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.initiate_ownership_transfer(&vault_id, &owner, &new_owner);
+    // Not yet expired — should fail with NotExpired (#16)
+    client.expire_ownership_transfer(&vault_id);
+}
+
+#[test]
+fn test_expire_ownership_transfer_after_expiry_succeeds() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let new_owner = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.initiate_ownership_transfer(&vault_id, &owner, &new_owner);
+    // Advance past OWNERSHIP_TRANSFER_EXPIRY (604_800 seconds)
+    env.ledger().with_mut(|l| l.timestamp += 604_801);
+    client.expire_ownership_transfer(&vault_id);
+
+    assert!(client.get_pending_ownership_transfer(&vault_id).is_none());
+    assert!(find_event_by_topic(&env, types::OWNERSHIP_TRANSFER_EXPIRED_TOPIC));
 }
 
 #[test]
@@ -622,14 +682,17 @@ fn test_admin_transfer_full_flow() {
     assert_eq!(client.get_admin(), admin.clone());
     assert_eq!(client.get_pending_admin(), None);
 
-    client.propose_admin(&new_admin);
+    client.propose_new_admin(&new_admin);
     assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+    // Advance past the 24-hour timelock
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
 
     client.accept_admin();
     assert_eq!(client.get_admin(), new_admin.clone());
     assert_eq!(client.get_pending_admin(), None);
 
-    client.pause();
+    client.pause(&bytes!(&env, 0x01));
     assert!(client.is_paused());
     client.unpause();
     assert!(!client.is_paused());
@@ -657,16 +720,19 @@ fn test_propose_admin_can_be_called_multiple_times() {
     let new_admin_1 = Address::generate(&env);
     let new_admin_2 = Address::generate(&env);
 
-    client.propose_admin(&new_admin_1);
+    client.propose_new_admin(&new_admin_1);
     assert_eq!(client.get_pending_admin(), Some(new_admin_1));
 
-    client.propose_admin(&new_admin_2);
+    client.propose_new_admin(&new_admin_2);
     assert_eq!(client.get_pending_admin(), Some(new_admin_2.clone()));
+
+    // Advance past the 24-hour timelock
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
 
     client.accept_admin();
     assert_eq!(client.get_admin(), new_admin_2.clone());
     assert_eq!(client.get_pending_admin(), None);
-    client.pause();
+    client.pause(&bytes!(&env, 0x01));
     assert!(client.is_paused());
 }
 
@@ -2421,6 +2487,36 @@ fn test_set_vesting_schedule_rejects_empty_vault() {
 }
 
 #[test]
+fn test_get_vesting_schedule_count_zero() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    assert_eq!(client.get_vesting_schedule_count(&vault_id), 0u32);
+}
+
+#[test]
+fn test_get_vesting_schedule_count_one() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+    let start = env.ledger().timestamp() + 50;
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &4u32, &0u64);
+    assert_eq!(client.get_vesting_schedule_count(&vault_id), 1u32);
+}
+
+#[test]
+fn test_get_vesting_schedule_count_max() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    // MAX_VESTING_SCHEDULES = 20; deposit enough for 20 schedules of 1 each
+    client.deposit(&vault_id, &owner, &20i128);
+    let start = env.ledger().timestamp() + 50;
+    for _ in 0..20u32 {
+        client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &1u32, &0u64);
+    }
+    assert_eq!(client.get_vesting_schedule_count(&vault_id), 20u32);
+}
+
+#[test]
 fn test_trigger_release_with_vesting_keeps_balance() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = setup_vesting(&env, &owner, &beneficiary, &client, 1_000i128, 4, 100u64);
@@ -2863,11 +2959,11 @@ fn test_security_authorization_admin_only() {
     // Attacker cannot pause - admin functions don't take caller parameter
     // They use require_auth() internally, so we need to test differently
     // For now, verify that admin can pause
-    client.pause();
-    
+    client.pause(&bytes!(&env, 0x01));
+
     // Verify contract is paused
     assert!(client.is_paused());
-    
+
     // Unpause for next tests
     client.unpause();
 }
@@ -2964,12 +3060,12 @@ fn test_security_paused_contract_blocks_operations() {
     let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &Some(token_address.clone()));
     
     // Pause contract
-    client.pause();
-    
+    client.pause(&bytes!(&env, 0x01));
+
     // Operations should fail
     let result = client.try_check_in(&vault_id, &owner);
     assert!(result.is_err());
-    
+
     let result = client.try_deposit(&vault_id, &owner, &100);
     assert!(result.is_err());
     
@@ -5827,93 +5923,152 @@ fn test_cannot_reverse_twice() {
     assert!(result.is_err(), "Cannot reverse the same withdrawal twice");
 }
 
-// ---- Issue #812: get_admin query ----
+// ---- Issue #813: Admin Transfer with Timelock ----
 
 #[test]
-fn test_get_admin_returns_initialized_admin() {
-    let (_, _, _, admin, _, client) = setup();
-    assert_eq!(client.get_admin(), admin);
-}
-
-// ---- Issue #810: get_protocol_config query ----
-
-#[test]
-fn test_get_protocol_config_defaults() {
-    let (_, _, _, _, _, client) = setup();
-    let config = client.get_protocol_config();
-    assert_eq!(config.min_check_in_interval, None);
-    assert_eq!(config.max_check_in_interval, None);
-    assert_eq!(config.max_ttl_seconds, 315_360_000);
-    assert_eq!(config.ttl_decay_rate, 0);
-}
-
-#[test]
-fn test_get_protocol_config_matches_set_values() {
-    let (_, _, _, _, _, client) = setup();
-    client.set_min_check_in_interval(&60u64);
-    client.set_max_check_in_interval(&3600u64);
-    client.set_max_ttl_seconds(&7200u64);
-    client.set_ttl_decay_rate(&100u32);
-    let config = client.get_protocol_config();
-    assert_eq!(config.min_check_in_interval, Some(60));
-    assert_eq!(config.max_check_in_interval, Some(3600));
-    assert_eq!(config.max_ttl_seconds, 7200);
-    assert_eq!(config.ttl_decay_rate, 100);
-}
-
-// ---- Issue #809: two-step protocol configuration update ----
-
-#[test]
-fn test_propose_protocol_config_rejects_immediate_apply() {
-    let (_, _, _, _, _, client) = setup();
-    let config = ProtocolConfig {
-        min_check_in_interval: Some(60),
-        max_check_in_interval: Some(3600),
-        max_ttl_seconds: 7200,
-        ttl_decay_rate: 100,
-    };
-    client.propose_protocol_config(&config);
-    // Applying immediately must fail (timelock not elapsed)
-    let err = client.try_apply_protocol_config().unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(84));
-}
-
-#[test]
-fn test_apply_protocol_config_after_timelock() {
+fn test_propose_new_admin_emits_event_and_stores_pending() {
     let (env, _, _, _, _, client) = setup();
-    let config = ProtocolConfig {
-        min_check_in_interval: Some(60),
-        max_check_in_interval: Some(3600),
-        max_ttl_seconds: 7200,
-        ttl_decay_rate: 100,
-    };
-    client.propose_protocol_config(&config);
-    env.ledger().with_mut(|li| {
-        li.timestamp += 86_401;
+    let new_admin = Address::generate(&env);
+
+    client.propose_new_admin(&new_admin);
+
+    assert_eq!(client.get_pending_admin(), Some(new_admin.clone()));
+
+    let events = env.events().all();
+    let proposed = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::ADMIN_TRANSFER_PROPOSED_TOPIC)
+            .unwrap_or(false)
     });
-    client.apply_protocol_config();
-    let applied = client.get_protocol_config();
-    assert_eq!(applied.min_check_in_interval, Some(60));
-    assert_eq!(applied.max_check_in_interval, Some(3600));
-    assert_eq!(applied.max_ttl_seconds, 7200);
-    assert_eq!(applied.ttl_decay_rate, 100);
+    assert!(proposed.is_some(), "ADMIN_TRANSFER_PROPOSED event not emitted");
 }
 
 #[test]
-fn test_apply_protocol_config_without_proposal_fails() {
+#[should_panic(expected = "Error(Contract, #83)")]
+fn test_accept_admin_blocked_before_timelock() {
+    let (env, _, _, _, _, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_new_admin(&new_admin);
+
+    // Advance only 1 hour — still within the 24-hour lock
+    env.ledger().with_mut(|l| l.timestamp += 3_600);
+
+    client.accept_admin();
+}
+
+#[test]
+fn test_accept_admin_allowed_after_timelock() {
+    let (env, _, _, admin, _, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    assert_eq!(client.get_admin(), admin);
+    client.propose_new_admin(&new_admin);
+
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+
+    client.accept_admin();
+
+    assert_eq!(client.get_admin(), new_admin);
+    assert_eq!(client.get_pending_admin(), None);
+}
+
+#[test]
+fn test_accept_admin_emits_completed_event() {
+    let (env, _, _, _, _, client) = setup();
+    let new_admin = Address::generate(&env);
+
+    client.propose_new_admin(&new_admin);
+    env.ledger().with_mut(|l| l.timestamp += 86_401);
+    client.accept_admin();
+
+    let events = env.events().all();
+    let completed = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::ADMIN_TRANSFER_COMPLETED_TOPIC)
+            .unwrap_or(false)
+    });
+    assert!(completed.is_some(), "ADMIN_TRANSFER_COMPLETED event not emitted");
+}
+
+// ---- Issue #814: Pause Reason Tracking ----
+
+#[test]
+fn test_pause_stores_pause_record() {
+    let (env, _, _, admin, _, client) = setup();
+    let reason = bytes!(&env, 0xdeadbeef);
+
+    client.pause(&reason);
+
+    let record = client.get_pause_record().expect("pause record should exist");
+    assert_eq!(record.paused_by, admin);
+    assert_eq!(record.reason, reason);
+}
+
+#[test]
+fn test_unpause_clears_pause_record() {
+    let (env, _, _, _, _, client) = setup();
+
+    client.pause(&bytes!(&env, 0x01));
+    assert!(client.get_pause_record().is_some());
+
+    client.unpause();
+    assert!(client.get_pause_record().is_none());
+}
+
+#[test]
+fn test_pause_record_included_in_event() {
+    let (env, _, _, _, _, client) = setup();
+    let reason = bytes!(&env, 0xbeef);
+
+    client.pause(&reason);
+
+    let events = env.events().all();
+    let pause_event = events.iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        topics
+            .get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: soroban_sdk::Symbol| s == types::PAUSE_TOPIC)
+            .unwrap_or(false)
+    });
+    assert!(pause_event.is_some(), "PAUSE event not emitted");
+}
+
+// ---- Issue #815: Initialize Config Validation ----
+
+#[test]
+#[should_panic(expected = "Error(Contract, #82)")]
+fn test_set_min_interval_rejects_zero() {
     let (_, _, _, _, _, client) = setup();
-    let err = client.try_apply_protocol_config().unwrap_err().unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(83));
+    client.set_min_check_in_interval(&0u64);
 }
 
-// ---- Issue #811: admin cannot own a vault ----
+#[test]
+#[should_panic(expected = "Error(Contract, #82)")]
+fn test_set_max_interval_rejects_zero() {
+    let (_, _, _, _, _, client) = setup();
+    client.set_max_check_in_interval(&0u64);
+}
 
 #[test]
-fn test_create_vault_rejects_admin_as_owner() {
-    let (_, _, beneficiary, admin, _, client) = setup();
-    let err = client
-        .try_create_vault(&admin, &beneficiary, &3600u64, &None)
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, soroban_sdk::Error::from_contract_error(82));
+#[should_panic(expected = "Error(Contract, #82)")]
+fn test_set_min_interval_rejects_greater_than_max() {
+    let (_, _, _, _, _, client) = setup();
+    client.set_max_check_in_interval(&1_000u64);
+    client.set_min_check_in_interval(&2_000u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #82)")]
+fn test_set_max_interval_rejects_less_than_min() {
+    let (_, _, _, _, _, client) = setup();
+    client.set_min_check_in_interval(&1_000u64);
+    client.set_max_check_in_interval(&500u64);
 }

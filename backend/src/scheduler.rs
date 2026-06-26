@@ -17,22 +17,29 @@ pub async fn run(db: Arc<Db>) {
         interval.tick().await;
 
         // 1) Existing reminder preferences scheduler.
-        if let Ok(all_prefs) = db.all() {
-            for prefs in all_prefs {
-                let ttl_hours = fetch_ttl_remaining(prefs.vault_id).await;
-                let window = prefs.hours_before_expiry;
+        match db.all() {
+            Ok(all_prefs) => {
+                for prefs in all_prefs {
+                    let ttl_hours = fetch_ttl_remaining(prefs.vault_id).await;
+                    let window = prefs.hours_before_expiry;
 
-                let should_notify = match prefs.frequency {
-                    Frequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
-                    Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
-                    Frequency::Hourly => ttl_hours <= window,
-                };
+                    let should_notify = match prefs.frequency {
+                        Frequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
+                        Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
+                        Frequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
+                        Frequency::Hourly => ttl_hours <= window,
+                        Frequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
+                    };
 
-                if should_notify {
-                    for channel in &prefs.channels {
-                        send_reminder(prefs.vault_id, channel, ttl_hours).await;
+                    if should_notify {
+                        for channel in &prefs.channels {
+                            send_reminder(prefs.vault_id, channel, ttl_hours).await;
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to fetch reminder preferences");
             }
         }
 
@@ -42,7 +49,13 @@ pub async fn run(db: Arc<Db>) {
 }
 
 async fn extend_ttl_for_inactive_owners(db: &Arc<Db>) {
-    let Ok(policies) = db.all_enabled_insurance_policies() else { return };
+    let policies = match db.all_enabled_insurance_policies() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch insurance policies");
+            return;
+        }
+    };
 
     let now = Utc::now();
 
@@ -50,9 +63,16 @@ async fn extend_ttl_for_inactive_owners(db: &Arc<Db>) {
         if !policy.enabled {
             continue;
         }
-        // Owner inactivity
-        let Ok(owner_last_active) = db.get_owner_last_active_at(policy.vault_id) else {
-            continue;
+        let owner_last_active = match db.get_owner_last_active_at(policy.vault_id) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    vault_id = policy.vault_id,
+                    error = %e,
+                    "failed to fetch owner last active time"
+                );
+                continue;
+            }
         };
         let Some(last_active) = owner_last_active else {
             continue;
@@ -63,21 +83,26 @@ async fn extend_ttl_for_inactive_owners(db: &Arc<Db>) {
             continue;
         }
 
-        // Extend TTL (stubbed as we don't have a real on-chain state updater here).
         tracing::info!(
             vault_id = policy.vault_id,
             extension_seconds = policy.extension_seconds,
             "TTL extended by insurance due to inactivity"
         );
 
-        let _ = db.upsert_insurance_policy(&crate::models::TtlInsurancePolicy {
+        if let Err(e) = db.upsert_insurance_policy(&crate::models::TtlInsurancePolicy {
             vault_id: policy.vault_id,
             extension_seconds: policy.extension_seconds,
             inactivity_threshold_seconds: policy.inactivity_threshold_seconds,
             enabled: true,
             purchased_at: policy.purchased_at,
             last_extended_at: Some(now),
-        });
+        }) {
+            tracing::error!(
+                vault_id = policy.vault_id,
+                error = %e,
+                "failed to update insurance policy after TTL extension"
+            );
+        }
     }
 }
 

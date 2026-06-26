@@ -14,6 +14,7 @@ pub const OWNERSHIP_TOPIC: Symbol = symbol_short!("own_xfer");
 pub const OWNERSHIP_INITIATED_TOPIC: Symbol = symbol_short!("own_init");
 pub const OWNERSHIP_ACCEPTED_TOPIC: Symbol = symbol_short!("own_acc");
 pub const OWNERSHIP_CANCELLED_TOPIC: Symbol = symbol_short!("own_can");
+pub const OWNERSHIP_TRANSFER_EXPIRED_TOPIC: Symbol = symbol_short!("own_exp");
 pub const BENEFICIARY_UPDATED_TOPIC: Symbol = symbol_short!("ben_upd");
 pub const SET_BENEFICIARIES_TOPIC: Symbol = symbol_short!("set_bens");
 pub const UPDATE_INTERVAL_TOPIC: Symbol = symbol_short!("upd_intv");
@@ -24,6 +25,7 @@ pub const PAUSE_TOPIC: Symbol = symbol_short!("pause");
 pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
+pub const VESTING_CANCELLED_TOPIC: Symbol = symbol_short!("vest_can");
 // Issue #534: vesting cliff period reached
 pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("clif_rch");
 pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
@@ -55,6 +57,7 @@ pub const BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC: Symbol = symbol_short!("ben_id_
 pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vf");
 pub const BENEFICIARY_CONFLICT_FILED_TOPIC: Symbol = symbol_short!("ben_conf");
 pub const BENEFICIARY_CONFLICT_RESOLVED_TOPIC: Symbol = symbol_short!("ben_res");
+pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
 pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
 pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
 pub const RESTORE_VAULT_TOPIC: Symbol = symbol_short!("restore");
@@ -71,6 +74,8 @@ pub const MULTISIG_PROPOSED_TOPIC: Symbol = symbol_short!("ms_prop");
 pub const MULTISIG_APPROVED_TOPIC: Symbol = symbol_short!("ms_app");
 pub const MULTISIG_REJECTED_TOPIC: Symbol = symbol_short!("ms_rej");
 pub const MULTISIG_EXECUTED_TOPIC: Symbol = symbol_short!("ms_exec");
+pub const MULTISIG_VETOED_TOPIC: Symbol = symbol_short!("ms_veto");
+pub const MULTISIG_SIGNER_REMOVED_TOPIC: Symbol = symbol_short!("ms_rm_sig");
 pub const MULTISIG_PROPOSAL_EXPIRY: u64 = 604_800; // 7 days
 
 pub const META_VERSION_TOPIC: Symbol = symbol_short!("meta_ver");
@@ -210,6 +215,13 @@ pub const TOKEN_REBALANCED_TOPIC: Symbol = symbol_short!("tok_rebd");
 
 // Issue #529: beneficiary pooling
 pub const POOL_CREATED_TOPIC: Symbol = symbol_short!("pool_crt");
+
+// Issue #813: admin transfer timelock
+pub const ADMIN_TRANSFER_PROPOSED_TOPIC: Symbol = symbol_short!("adm_prop");
+pub const ADMIN_TRANSFER_COMPLETED_TOPIC: Symbol = symbol_short!("adm_done");
+
+// Issue #814: pause reason tracking
+pub const PAUSE_REASON_TOPIC: Symbol = symbol_short!("pau_rsn");
 
 // Vault state snapshots
 pub const SNAPSHOT_CREATED_TOPIC: Symbol = symbol_short!("snap_crt");
@@ -423,9 +435,8 @@ pub enum DataKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
-    // Issue #809: two-step protocol configuration update
-    PendingProtocolConfig,
-    ProtocolConfigProposedAt,
+    // Issue #796: open proposals tracking
+    OpenProposals(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -996,6 +1007,7 @@ pub enum ProposalStatus {
     Rejected,
     Executed,
     Expired,
+    Vetoed,
 }
 
 /// State transition record for vault status changes - Issue #472
