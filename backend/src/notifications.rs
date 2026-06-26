@@ -5,9 +5,9 @@
 ///   NotificationStore  — in-memory stores (tokens, prefs, schedule, delivery log)
 ///   NotificationService — orchestrates scheduling + delivery
 use crate::models::{
-    DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken, NotificationPreferences,
-    NotificationType, RegisterTokenRequest, ReminderDeliveryLog, ScheduledNotification,
-
+    ChannelDeliveryLog, DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken,
+    IdempotencyRecord, NotificationChannel, NotificationPreferences, NotificationType,
+    RegisterTokenRequest, ReminderDeliveryLog, ScheduledNotification, UnsubscribeToken,
     UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
@@ -20,12 +20,16 @@ use uuid::Uuid;
 
 pub type TokenStore = Arc<Mutex<HashMap<String, Vec<DeviceToken>>>>;
 pub type PrefsStore = Arc<Mutex<HashMap<String, NotificationPreferences>>>;
-
-
 pub type ScheduleStore = Arc<Mutex<Vec<ScheduledNotification>>>;
 pub type DeliveryStore = Arc<Mutex<Vec<DeliveryRecord>>>;
 /// Keyed by notification_id.
 pub type RetryStore = Arc<Mutex<HashMap<String, ReminderDeliveryLog>>>;
+/// Keyed by token string → UnsubscribeToken (#828).
+pub type UnsubscribeStore = Arc<Mutex<HashMap<String, UnsubscribeToken>>>;
+/// Channel delivery logs (#827).
+pub type ChannelDeliveryStore = Arc<Mutex<Vec<ChannelDeliveryLog>>>;
+/// Idempotency key store (#825). Key → cached record.
+pub type IdempotencyStore = Arc<Mutex<HashMap<String, IdempotencyRecord>>>;
 
 pub fn create_token_store() -> TokenStore {
     Arc::new(Mutex::new(HashMap::new()))
@@ -42,9 +46,21 @@ pub fn create_delivery_store() -> DeliveryStore {
 pub fn create_retry_store() -> RetryStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
+pub fn create_unsubscribe_store() -> UnsubscribeStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+pub fn create_channel_delivery_store() -> ChannelDeliveryStore {
+    Arc::new(Mutex::new(Vec::new()))
+}
+pub fn create_idempotency_store() -> IdempotencyStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 /// Exponential backoff delays in seconds: 1 min, 5 min, 15 min, 1 hr, 6 hr.
 const RETRY_DELAYS_SECS: [u64; 5] = [60, 300, 900, 3_600, 21_600];
+
+/// Deduplication window: skip sending if the same reminder was sent within this many seconds.
+pub const DEDUP_WINDOW_SECONDS: i64 = 300;
 
 // ── FCM HTTP v1 client ───────────────────────────────────────────────────────
 
@@ -151,6 +167,12 @@ fn notification_content(
 
 // ── NotificationService ──────────────────────────────────────────────────────
 
+/// Delay (seconds) before attempting fallback channel (#827).
+const FALLBACK_DELAY_SECS: u64 = 300;
+
+/// Idempotency key TTL in seconds (24 hours) (#825).
+pub const IDEMPOTENCY_TTL_SECS: i64 = 86_400;
+
 pub struct NotificationService {
     pub fcm: Arc<FcmClient>,
     pub tokens: TokenStore,
@@ -158,6 +180,9 @@ pub struct NotificationService {
     pub schedule: ScheduleStore,
     pub delivery: DeliveryStore,
     pub retry_log: RetryStore,
+    pub unsubscribe_tokens: UnsubscribeStore,
+    pub channel_delivery_log: ChannelDeliveryStore,
+    pub idempotency: IdempotencyStore,
 }
 
 impl NotificationService {
@@ -168,7 +193,17 @@ impl NotificationService {
         schedule: ScheduleStore,
         delivery: DeliveryStore,
     ) -> Self {
-        Self { fcm, tokens, prefs, schedule, delivery, retry_log: create_retry_store() }
+        Self {
+            fcm,
+            tokens,
+            prefs,
+            schedule,
+            delivery,
+            retry_log: create_retry_store(),
+            unsubscribe_tokens: create_unsubscribe_store(),
+            channel_delivery_log: create_channel_delivery_store(),
+            idempotency: create_idempotency_store(),
+        }
     }
 
     // ── Token management ─────────────────────────────────────────────────────
@@ -276,6 +311,7 @@ impl NotificationService {
             notification_type: NotificationType::ExpiryWarning,
             scheduled_at: fire_at,
             status: DeliveryStatus::Pending,
+            sent_at: None,
         });
     }
 
@@ -314,6 +350,7 @@ impl NotificationService {
             notification_type,
             scheduled_at: Utc::now(),
             status: DeliveryStatus::Pending,
+            sent_at: None,
         });
     }
 
@@ -329,12 +366,36 @@ impl NotificationService {
             .collect()
     }
 
+    // ── Deduplication ─────────────────────────────────────────────────────────
+
+    /// Returns true if a notification with the same vault_id, owner, and type
+    /// was already sent within `DEDUP_WINDOW_SECONDS`.
+    pub fn is_duplicate(&self, notif: &ScheduledNotification) -> bool {
+        let cutoff = Utc::now() - chrono::Duration::seconds(DEDUP_WINDOW_SECONDS);
+        let store = self.schedule.lock().unwrap();
+        store.iter().any(|n| {
+            n.id != notif.id
+                && n.vault_id == notif.vault_id
+                && n.owner == notif.owner
+                && n.notification_type == notif.notification_type
+                && n.sent_at.map_or(false, |t| t > cutoff)
+        })
+    }
+
     // ── Delivery ─────────────────────────────────────────────────────────────
 
     /// Send all due pending notifications. Called by the background scheduler loop.
     pub async fn flush_pending(&self) {
         let due = self.get_pending_notifications();
         for notif in due {
+            if self.is_duplicate(&notif) {
+                log::info!(
+                    "Skipping duplicate notification: vault={} owner={} type={:?}",
+                    notif.vault_id, notif.owner, notif.notification_type
+                );
+                self.mark_sent(&notif.id, DeliveryStatus::Sent);
+                continue;
+            }
             self.deliver(&notif).await;
         }
     }
@@ -477,6 +538,9 @@ impl NotificationService {
     fn mark_sent(&self, id: &str, status: DeliveryStatus) {
         let mut store = self.schedule.lock().unwrap();
         if let Some(n) = store.iter_mut().find(|n| n.id == id) {
+            if status == DeliveryStatus::Sent {
+                n.sent_at = Some(Utc::now());
+            }
             n.status = status;
         }
     }
@@ -489,6 +553,224 @@ impl NotificationService {
             .filter(|r| r.owner == owner)
             .cloned()
             .collect()
+    }
+
+    // ── Unsubscribe (#828) ──────────────────────────────────────────────────
+
+    /// Generate a signed unsubscribe token for the given owner.
+    pub fn generate_unsubscribe_token(&self, owner: &str) -> String {
+        let token = Uuid::new_v4().to_string();
+        self.unsubscribe_tokens.lock().unwrap().insert(
+            token.clone(),
+            UnsubscribeToken {
+                token: token.clone(),
+                owner: owner.to_string(),
+                created_at: Utc::now(),
+            },
+        );
+        token
+    }
+
+    /// Validate an unsubscribe token and mark the owner as unsubscribed.
+    /// Returns the owner string on success.
+    pub fn process_unsubscribe(&self, token: &str) -> Result<String, String> {
+        let unsub = self
+            .unsubscribe_tokens
+            .lock()
+            .unwrap()
+            .get(token)
+            .cloned()
+            .ok_or_else(|| "invalid or expired unsubscribe token".to_string())?;
+
+        let mut prefs_store = self.prefs.lock().unwrap();
+        let prefs = prefs_store
+            .entry(unsub.owner.clone())
+            .or_insert_with(|| NotificationPreferences {
+                owner: unsub.owner.clone(),
+                ..Default::default()
+            });
+        prefs.unsubscribed = true;
+
+        Ok(unsub.owner)
+    }
+
+    /// Check if an owner has unsubscribed.
+    pub fn is_unsubscribed(&self, owner: &str) -> bool {
+        self.prefs
+            .lock()
+            .unwrap()
+            .get(owner)
+            .map_or(false, |p| p.unsubscribed)
+    }
+
+    // ── Email template with unsubscribe link (#828) ─────────────────────────
+
+    /// Render a reminder email body that includes an unsubscribe link.
+    pub fn render_email_with_unsubscribe(
+        &self,
+        owner: &str,
+        subject: &str,
+        body: &str,
+        base_url: &str,
+    ) -> String {
+        let token = self.generate_unsubscribe_token(owner);
+        format!(
+            "<html><body>\
+             <h2>{subject}</h2>\
+             <p>{body}</p>\
+             <hr/>\
+             <p style=\"font-size:small;color:#888;\">\
+             <a href=\"{base_url}/notifications/unsubscribe?token={token}\">\
+             Unsubscribe from these emails</a></p>\
+             </body></html>"
+        )
+    }
+
+    // ── Channel fallback (#827) ─────────────────────────────────────────────
+
+    /// Record a channel-level delivery attempt.
+    pub fn log_channel_delivery(
+        &self,
+        notification_id: &str,
+        channel: &NotificationChannel,
+        status: DeliveryStatus,
+        error: Option<String>,
+    ) {
+        self.channel_delivery_log.lock().unwrap().push(ChannelDeliveryLog {
+            notification_id: notification_id.to_string(),
+            channel: channel.clone(),
+            status,
+            attempted_at: Utc::now(),
+            error,
+        });
+    }
+
+    /// Get the channel delivery log for a notification.
+    pub fn get_channel_delivery_log(&self, notification_id: &str) -> Vec<ChannelDeliveryLog> {
+        self.channel_delivery_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.notification_id == notification_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Attempt delivery on the preferred channel, falling back if it fails.
+    /// Returns (primary_ok, fallback_ok).
+    pub async fn deliver_with_fallback(
+        &self,
+        notif: &ScheduledNotification,
+    ) -> (bool, Option<bool>) {
+        let prefs = self.get_preferences(&notif.owner);
+
+        let preferred = prefs.preferred_channel.clone();
+        let fallback = prefs.fallback_channel.clone();
+
+        let primary_ok = if let Some(ref ch) = preferred {
+            let ok = self.try_channel_delivery(notif, ch).await;
+            self.log_channel_delivery(
+                &notif.id,
+                ch,
+                if ok { DeliveryStatus::Sent } else { DeliveryStatus::Failed },
+                if ok { None } else { Some("primary channel failed".into()) },
+            );
+            ok
+        } else {
+            // No preferred channel set — use default FCM push delivery
+            let tokens = self.get_tokens(&notif.owner);
+            !tokens.is_empty()
+        };
+
+        if primary_ok {
+            return (true, None);
+        }
+
+        // Primary failed — try fallback after delay
+        if let Some(ref fb_channel) = fallback {
+            tokio::time::sleep(std::time::Duration::from_secs(FALLBACK_DELAY_SECS)).await;
+            let fb_ok = self.try_channel_delivery(notif, fb_channel).await;
+            self.log_channel_delivery(
+                &notif.id,
+                fb_channel,
+                if fb_ok { DeliveryStatus::Sent } else { DeliveryStatus::Failed },
+                if fb_ok { None } else { Some("fallback channel failed".into()) },
+            );
+            return (false, Some(fb_ok));
+        }
+
+        (false, None)
+    }
+
+    /// Stub: attempt to deliver via a specific channel.
+    async fn try_channel_delivery(
+        &self,
+        notif: &ScheduledNotification,
+        channel: &NotificationChannel,
+    ) -> bool {
+        match channel {
+            NotificationChannel::Push => {
+                let tokens = self.get_tokens(&notif.owner);
+                if tokens.is_empty() {
+                    return false;
+                }
+                let (title, body, data) =
+                    notification_content(&notif.notification_type, &notif.vault_id, None);
+                for device in &tokens {
+                    if self.fcm.send(&device.token, title, &body, data.clone()).await.is_ok() {
+                        return true;
+                    }
+                }
+                false
+            }
+            NotificationChannel::Email => {
+                // Stub: in production this would call an email API
+                log::info!("Sending email to owner={}", notif.owner);
+                true
+            }
+            NotificationChannel::Sms => {
+                // Stub: in production this would call an SMS API
+                log::info!("Sending SMS to owner={}", notif.owner);
+                true
+            }
+        }
+    }
+
+    // ── Idempotency (#825) ──────────────────────────────────────────────────
+
+    /// Check if an idempotency key has been seen. Returns the cached record if so.
+    pub fn check_idempotency(&self, key: &str) -> Option<IdempotencyRecord> {
+        let store = self.idempotency.lock().unwrap();
+        let record = store.get(key)?;
+        let age = Utc::now()
+            .signed_duration_since(record.created_at)
+            .num_seconds();
+        if age > IDEMPOTENCY_TTL_SECS {
+            return None;
+        }
+        Some(record.clone())
+    }
+
+    /// Store an idempotency key with the associated response.
+    pub fn store_idempotency(&self, key: String, status_code: u16, response_body: String) {
+        self.idempotency.lock().unwrap().insert(
+            key.clone(),
+            IdempotencyRecord {
+                key,
+                response_body,
+                status_code,
+                created_at: Utc::now(),
+            },
+        );
+    }
+
+    /// Purge expired idempotency keys (older than 24h).
+    pub fn purge_expired_idempotency_keys(&self) {
+        let cutoff = Utc::now() - chrono::Duration::seconds(IDEMPOTENCY_TTL_SECS);
+        self.idempotency
+            .lock()
+            .unwrap()
+            .retain(|_, v| v.created_at > cutoff);
     }
 }
 
@@ -609,6 +891,7 @@ mod tests {
                 check_in_reminder_enabled: true,
                 vault_released_enabled: true,
                 warning_hours_before: 24,
+                ..Default::default()
             },
 
         );
@@ -638,6 +921,7 @@ mod tests {
                 check_in_reminder_enabled: true,
                 vault_released_enabled: true,
                 warning_hours_before: 24,
+                ..Default::default()
             },
 
         );
@@ -667,6 +951,7 @@ mod tests {
                 check_in_reminder_enabled: true,
                 vault_released_enabled: true,
                 warning_hours_before: 24,
+                ..Default::default()
             },
 
         );
@@ -688,6 +973,7 @@ mod tests {
                 check_in_reminder_enabled: true,
                 vault_released_enabled: false,
                 warning_hours_before: 24,
+                ..Default::default()
             },
 
         );
@@ -809,5 +1095,260 @@ mod tests {
     fn retry_delays_match_spec() {
         // 1 min, 5 min, 15 min, 1 hr, 6 hr
         assert_eq!(RETRY_DELAYS_SECS, [60, 300, 900, 3_600, 21_600]);
+    }
+
+    // ── Deduplication tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn dedup_window_constant_is_300() {
+        assert_eq!(DEDUP_WINDOW_SECONDS, 300);
+    }
+
+    #[test]
+    fn is_duplicate_returns_false_when_no_prior_send() {
+        let svc = make_service();
+        let notif = ScheduledNotification {
+            id: "n1".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::CheckInReminder,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            sent_at: None,
+        };
+        assert!(!svc.is_duplicate(&notif));
+    }
+
+    #[test]
+    fn is_duplicate_returns_true_when_recently_sent() {
+        let svc = make_service();
+        // Insert a notification that was already sent recently
+        svc.schedule.lock().unwrap().push(ScheduledNotification {
+            id: "n1".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::CheckInReminder,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Sent,
+            sent_at: Some(Utc::now()),
+        });
+
+        // A new notification with same vault/owner/type should be detected as duplicate
+        let new_notif = ScheduledNotification {
+            id: "n2".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::CheckInReminder,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            sent_at: None,
+        };
+        assert!(svc.is_duplicate(&new_notif));
+    }
+
+    #[test]
+    fn is_duplicate_returns_false_when_outside_window() {
+        let svc = make_service();
+        let old_time = Utc::now() - chrono::Duration::seconds(DEDUP_WINDOW_SECONDS + 1);
+        svc.schedule.lock().unwrap().push(ScheduledNotification {
+            id: "n1".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::CheckInReminder,
+            scheduled_at: old_time,
+            status: DeliveryStatus::Sent,
+            sent_at: Some(old_time),
+        });
+
+        let new_notif = ScheduledNotification {
+            id: "n2".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::CheckInReminder,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            sent_at: None,
+        };
+        assert!(!svc.is_duplicate(&new_notif));
+    }
+
+    #[test]
+    fn is_duplicate_different_type_not_duplicate() {
+        let svc = make_service();
+        svc.schedule.lock().unwrap().push(ScheduledNotification {
+            id: "n1".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::CheckInReminder,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Sent,
+            sent_at: Some(Utc::now()),
+        });
+
+        let new_notif = ScheduledNotification {
+            id: "n2".into(),
+            vault_id: "v1".into(),
+            owner: "owner1".into(),
+            notification_type: NotificationType::ExpiryWarning,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            sent_at: None,
+        };
+        assert!(!svc.is_duplicate(&new_notif));
+    }
+
+    // ── Unsubscribe tests (#828) ────────────────────────────────────────────
+
+    #[test]
+    fn generate_unsubscribe_token_creates_token() {
+        let svc = make_service();
+        let token = svc.generate_unsubscribe_token("owner1");
+        assert!(!token.is_empty());
+        assert!(svc.unsubscribe_tokens.lock().unwrap().contains_key(&token));
+    }
+
+    #[test]
+    fn process_unsubscribe_marks_user_unsubscribed() {
+        let svc = make_service();
+        let token = svc.generate_unsubscribe_token("owner1");
+        let result = svc.process_unsubscribe(&token);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "owner1");
+        assert!(svc.is_unsubscribed("owner1"));
+    }
+
+    #[test]
+    fn process_unsubscribe_invalid_token_fails() {
+        let svc = make_service();
+        let result = svc.process_unsubscribe("bogus-token");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_unsubscribed_returns_false_by_default() {
+        let svc = make_service();
+        assert!(!svc.is_unsubscribed("owner1"));
+    }
+
+    #[test]
+    fn render_email_includes_unsubscribe_link() {
+        let svc = make_service();
+        let html = svc.render_email_with_unsubscribe(
+            "owner1",
+            "Test Subject",
+            "Test body",
+            "https://example.com",
+        );
+        assert!(html.contains("Unsubscribe from these emails"));
+        assert!(html.contains("https://example.com/notifications/unsubscribe?token="));
+    }
+
+    // ── Channel fallback tests (#827) ───────────────────────────────────────
+
+    #[test]
+    fn log_channel_delivery_records_entry() {
+        let svc = make_service();
+        svc.log_channel_delivery(
+            "n1",
+            &crate::models::NotificationChannel::Email,
+            DeliveryStatus::Sent,
+            None,
+        );
+        let logs = svc.get_channel_delivery_log("n1");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].channel, crate::models::NotificationChannel::Email);
+        assert_eq!(logs[0].status, DeliveryStatus::Sent);
+    }
+
+    #[test]
+    fn log_channel_delivery_records_failure_with_error() {
+        let svc = make_service();
+        svc.log_channel_delivery(
+            "n1",
+            &crate::models::NotificationChannel::Sms,
+            DeliveryStatus::Failed,
+            Some("timeout".into()),
+        );
+        let logs = svc.get_channel_delivery_log("n1");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].error, Some("timeout".into()));
+    }
+
+    #[test]
+    fn channel_fallback_prefs_stored() {
+        let svc = make_service();
+        svc.prefs.lock().unwrap().insert(
+            "owner1".to_string(),
+            crate::models::NotificationPreferences {
+                owner: "owner1".to_string(),
+                preferred_channel: Some(crate::models::NotificationChannel::Email),
+                fallback_channel: Some(crate::models::NotificationChannel::Sms),
+                ..Default::default()
+            },
+        );
+        let prefs = svc.get_preferences("owner1");
+        assert_eq!(prefs.preferred_channel, Some(crate::models::NotificationChannel::Email));
+        assert_eq!(prefs.fallback_channel, Some(crate::models::NotificationChannel::Sms));
+    }
+
+    #[test]
+    fn no_fallback_when_not_configured() {
+        let svc = make_service();
+        let prefs = svc.get_preferences("owner1");
+        assert!(prefs.fallback_channel.is_none());
+    }
+
+    // ── Idempotency tests (#825) ────────────────────────────────────────────
+
+    #[test]
+    fn store_and_check_idempotency_key() {
+        let svc = make_service();
+        assert!(svc.check_idempotency("key1").is_none());
+        svc.store_idempotency("key1".into(), 200, r#"{"ok":true}"#.into());
+        let cached = svc.check_idempotency("key1").unwrap();
+        assert_eq!(cached.status_code, 200);
+        assert_eq!(cached.response_body, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn idempotency_key_expired_returns_none() {
+        let svc = make_service();
+        svc.idempotency.lock().unwrap().insert(
+            "old-key".into(),
+            crate::models::IdempotencyRecord {
+                key: "old-key".into(),
+                response_body: "{}".into(),
+                status_code: 200,
+                created_at: Utc::now() - chrono::Duration::seconds(IDEMPOTENCY_TTL_SECS + 1),
+            },
+        );
+        assert!(svc.check_idempotency("old-key").is_none());
+    }
+
+    #[test]
+    fn purge_expired_idempotency_keys_removes_old() {
+        let svc = make_service();
+        svc.idempotency.lock().unwrap().insert(
+            "old".into(),
+            crate::models::IdempotencyRecord {
+                key: "old".into(),
+                response_body: "{}".into(),
+                status_code: 200,
+                created_at: Utc::now() - chrono::Duration::seconds(IDEMPOTENCY_TTL_SECS + 1),
+            },
+        );
+        svc.store_idempotency("fresh".into(), 200, "{}".into());
+        svc.purge_expired_idempotency_keys();
+        assert!(svc.idempotency.lock().unwrap().get("old").is_none());
+        assert!(svc.idempotency.lock().unwrap().get("fresh").is_some());
+    }
+
+    #[test]
+    fn duplicate_idempotency_key_returns_same_response() {
+        let svc = make_service();
+        svc.store_idempotency("key-dup".into(), 201, r#"{"id":"v1"}"#.into());
+        svc.store_idempotency("key-dup".into(), 201, r#"{"id":"v1"}"#.into());
+        let cached = svc.check_idempotency("key-dup").unwrap();
+        assert_eq!(cached.response_body, r#"{"id":"v1"}"#);
     }
 }

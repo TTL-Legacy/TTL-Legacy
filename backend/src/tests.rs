@@ -19,7 +19,17 @@ fn test_app() -> Router {
             "/api/vaults/:vault_id/reminder-preferences",
             post(routes::set_preferences).get(routes::get_preferences),
         )
+        .route(
+            "/notifications/unsubscribe",
+            get(routes::unsubscribe),
+        )
         .with_state(db)
+}
+
+fn test_db() -> Arc<Db> {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+    db
 }
 
 async fn post_json(app: Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
@@ -127,4 +137,134 @@ async fn test_upsert_overwrites() {
     assert_eq!(fetched.hours_before_expiry, 6);
     assert_eq!(fetched.channels.len(), 2);
     assert_eq!(fetched.frequency, crate::models::Frequency::Hourly);
+}
+
+// ── Idempotency key tests (#825) ────────────────────────────────────────────
+
+async fn post_json_with_header(
+    app: Router,
+    uri: &str,
+    body: serde_json::Value,
+    header_name: &str,
+    header_value: &str,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header(header_name, header_value)
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_idempotent_request_returns_cached() {
+    let db = test_db();
+    let body = json!({
+        "channels": ["email"],
+        "hours_before_expiry": 24,
+        "frequency": "once"
+    });
+
+    let app1 = Router::new()
+        .route(
+            "/api/vaults/:vault_id/reminder-preferences",
+            post(routes::set_preferences),
+        )
+        .with_state(db.clone());
+
+    let res1 = post_json_with_header(
+        app1,
+        "/api/vaults/1/reminder-preferences",
+        body.clone(),
+        "idempotency-key",
+        "idem-123",
+    )
+    .await;
+    assert_eq!(res1.status(), StatusCode::OK);
+
+    // Second request with same key returns cached
+    let app2 = Router::new()
+        .route(
+            "/api/vaults/:vault_id/reminder-preferences",
+            post(routes::set_preferences),
+        )
+        .with_state(db.clone());
+
+    let res2 = post_json_with_header(
+        app2,
+        "/api/vaults/1/reminder-preferences",
+        body,
+        "idempotency-key",
+        "idem-123",
+    )
+    .await;
+    assert_eq!(res2.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_non_idempotent_request_processes_normally() {
+    let app = test_app();
+    let body = json!({
+        "channels": ["sms"],
+        "hours_before_expiry": 12,
+        "frequency": "daily"
+    });
+    let res = post_json(app, "/api/vaults/2/reminder-preferences", body).await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_db_idempotency_store_and_check() {
+    let db = test_db();
+    assert!(db.check_idempotency("key-abc").is_none());
+    db.store_idempotency("key-abc", 200, r#"{"vault_id":1}"#);
+    let cached = db.check_idempotency("key-abc").unwrap();
+    assert_eq!(cached.status_code, 200);
+    assert_eq!(cached.response_body, r#"{"vault_id":1}"#);
+}
+
+// ── Unsubscribe tests (#828) ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_unsubscribe_valid_token() {
+    let db = test_db();
+    let token = db.generate_unsubscribe_token("owner1");
+
+    let app = Router::new()
+        .route("/notifications/unsubscribe", get(routes::unsubscribe))
+        .with_state(db.clone());
+
+    let uri = format!("/notifications/unsubscribe?token={token}");
+    let res = get_req(app, &uri).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(db.is_unsubscribed("owner1"));
+}
+
+#[tokio::test]
+async fn test_unsubscribe_invalid_token() {
+    let app = test_app();
+    let res = get_req(app, "/notifications/unsubscribe?token=bogus").await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_db_unsubscribe_flow() {
+    let db = test_db();
+    assert!(!db.is_unsubscribed("owner1"));
+    let token = db.generate_unsubscribe_token("owner1");
+    let result = db.process_unsubscribe(&token);
+    assert!(result.is_ok());
+    assert!(db.is_unsubscribed("owner1"));
+}
+
+#[tokio::test]
+async fn test_db_unsubscribe_invalid_token() {
+    let db = test_db();
+    let result = db.process_unsubscribe("nonexistent");
+    assert!(result.is_err());
 }

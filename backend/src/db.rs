@@ -454,6 +454,23 @@ impl Db {
                 owner_id        INTEGER PRIMARY KEY,
                 last_active_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS idempotency_keys (
+                key          TEXT PRIMARY KEY,
+                status_code  INTEGER NOT NULL,
+                response_body TEXT NOT NULL,
+                created_at   TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS unsubscribe_tokens (
+                token      TEXT PRIMARY KEY,
+                owner      TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS unsubscribed_users (
+                owner TEXT PRIMARY KEY
+            );
             "#,
         )?;
         Ok(())
@@ -505,11 +522,9 @@ let binding = self.conn.lock().unwrap();
     }
 
     pub fn all(&self) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
-let binding = self.conn.lock().unwrap();
+        let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
-        "SELECT vault_id, channels, hours_before_expiry, frequency FROM reminder_preferences",
-
-
+            "SELECT vault_id, channels, hours_before_expiry, frequency FROM reminder_preferences",
         )?;
         let iter = stmt.query_map([], |r| {
             let channels_str: String = r.get(1)?;
@@ -529,6 +544,87 @@ let binding = self.conn.lock().unwrap();
             out.push(item?);
         }
         Ok(out)
+    }
+
+    // ── Idempotency (#825) ──────────────────────────────────────────────────
+
+    pub fn store_idempotency(&self, key: &str, status_code: u16, response_body: &str) {
+        let _ = self.conn.lock().unwrap().execute(
+            r#"INSERT OR REPLACE INTO idempotency_keys (key, status_code, response_body, created_at)
+               VALUES (?1, ?2, ?3, ?4)"#,
+            params![key, status_code as i64, response_body, chrono::Utc::now().to_rfc3339()],
+        );
+    }
+
+    pub fn check_idempotency(&self, key: &str) -> Option<crate::models::IdempotencyRecord> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding
+            .prepare("SELECT key, status_code, response_body, created_at FROM idempotency_keys WHERE key = ?1")
+            .ok()?;
+        stmt.query_row(params![key], |r| {
+            let created_str: String = r.get(3)?;
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+            let age = chrono::Utc::now().signed_duration_since(created_at).num_seconds();
+            if age > 86_400 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(crate::models::IdempotencyRecord {
+                key: r.get(0)?,
+                status_code: r.get::<_, i64>(1)? as u16,
+                response_body: r.get(2)?,
+                created_at,
+            })
+        })
+        .ok()
+    }
+
+    // ── Unsubscribe (#828) ──────────────────────────────────────────────────
+
+    pub fn store_unsubscribe_token(&self, token: &str, owner: &str) {
+        let _ = self.conn.lock().unwrap().execute(
+            r#"INSERT OR REPLACE INTO unsubscribe_tokens (token, owner, created_at)
+               VALUES (?1, ?2, ?3)"#,
+            params![token, owner, chrono::Utc::now().to_rfc3339()],
+        );
+    }
+
+    pub fn process_unsubscribe(&self, token: &str) -> Result<String, String> {
+        let conn = self.conn.lock().unwrap();
+        let owner: String = conn
+            .query_row(
+                "SELECT owner FROM unsubscribe_tokens WHERE token = ?1",
+                params![token],
+                |r| r.get(0),
+            )
+            .map_err(|_| "invalid or expired unsubscribe token".to_string())?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO unsubscribed_users (owner) VALUES (?1)",
+            params![&owner],
+        )
+        .map_err(|e| e.to_string())?;
+
+        Ok(owner)
+    }
+
+    pub fn is_unsubscribed(&self, owner: &str) -> bool {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM unsubscribed_users WHERE owner = ?1",
+                params![owner],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn generate_unsubscribe_token(&self, owner: &str) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        self.store_unsubscribe_token(&token, owner);
+        token
     }
 }
 

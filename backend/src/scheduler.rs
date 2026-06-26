@@ -26,6 +26,8 @@ pub async fn run(db: Arc<Db>) {
                     Frequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
                     Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
                     Frequency::Hourly => ttl_hours <= window,
+                    Frequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
+                    Frequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
                 };
 
                 if should_notify {

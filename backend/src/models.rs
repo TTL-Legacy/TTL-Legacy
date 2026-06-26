@@ -21,6 +21,8 @@ pub enum Frequency {
     Once,
     Daily,
     Hourly,
+    Weekly,
+    Monthly,
 }
 
 /// Persisted reminder preferences stored by `Db`.
@@ -101,6 +103,12 @@ pub struct NotificationPreferences {
     pub vault_released_enabled: bool,
     /// Hours before expiry to send the warning (default 24).
     pub warning_hours_before: u64,
+    /// Preferred delivery channel (#827).
+    pub preferred_channel: Option<NotificationChannel>,
+    /// Fallback channel if the preferred channel fails (#827).
+    pub fallback_channel: Option<NotificationChannel>,
+    /// Whether this user has unsubscribed from email notifications (#828).
+    pub unsubscribed: bool,
 }
 
 impl Default for NotificationPreferences {
@@ -111,8 +119,31 @@ impl Default for NotificationPreferences {
             check_in_reminder_enabled: true,
             vault_released_enabled: true,
             warning_hours_before: 24,
+            preferred_channel: None,
+            fallback_channel: None,
+            unsubscribed: false,
         }
     }
+}
+
+// ── Unsubscribe support (#828) ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnsubscribeToken {
+    pub token: String,
+    pub owner: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// ── Channel fallback delivery log (#827) ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelDeliveryLog {
+    pub notification_id: String,
+    pub channel: NotificationChannel,
+    pub status: DeliveryStatus,
+    pub attempted_at: DateTime<Utc>,
+    pub error: Option<String>,
 }
 
 
@@ -127,6 +158,7 @@ pub struct ScheduledNotification {
     /// Unix timestamp when this should fire.
     pub scheduled_at: DateTime<Utc>,
     pub status: DeliveryStatus,
+    pub sent_at: Option<DateTime<Utc>>,
 }
 
 /// Delivery record written after each send attempt.
@@ -426,39 +458,8 @@ pub enum NotificationFrequency {
     Monthly,
 }
 
-/// HTTP-layer preferences (matches routes/tests).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReminderPreferences {
-    pub vault_id: u64,
-    pub channels: Vec<Channel>,
-    pub hours_before_expiry: u32,
-    pub frequency: Frequency,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultSetPreferencesRequest {
-    pub channels: Vec<Channel>,
-    pub hours_before_expiry: u32,
-    pub frequency: Frequency,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Channel {
-    Email,
-    Sms,
-    Push,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Frequency {
-    Once,
-    Daily,
-    Weekly,
-    Hourly,
-    Monthly,
-}
+/// Alias used by handlers/db for vault-scoped notification preferences.
+pub type VaultNotificationPreferences = NotificationPreferences;
 
 
 
@@ -468,5 +469,13 @@ pub struct NotificationPreferencesRequest {
     pub frequency: NotificationFrequency,
 }
 
+// ── Idempotency Key support (#825) ──────────────────────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdempotencyRecord {
+    pub key: String,
+    pub response_body: String,
+    pub status_code: u16,
+    pub created_at: DateTime<Utc>,
+}
 
