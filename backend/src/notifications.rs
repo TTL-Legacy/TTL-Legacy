@@ -69,6 +69,8 @@ pub struct FcmClient {
     http: reqwest::Client,
     server_key: String,
     project_id: String,
+    /// Override the FCM base URL (used in tests to point at a mock server).
+    pub base_url: String,
 }
 
 impl FcmClient {
@@ -77,6 +79,7 @@ impl FcmClient {
             http: reqwest::Client::new(),
             server_key,
             project_id,
+            base_url: "https://fcm.googleapis.com".to_string(),
         }
     }
 
@@ -106,8 +109,8 @@ impl FcmClient {
         });
 
         let url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
+            "{}/v1/projects/{}/messages:send",
+            self.base_url, self.project_id
         );
 
         let resp = self
