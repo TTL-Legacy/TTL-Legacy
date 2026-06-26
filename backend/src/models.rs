@@ -20,8 +20,12 @@ pub enum Channel {
 pub enum Frequency {
     Once,
     Daily,
+    Weekly,
     Hourly,
+    Monthly,
 }
+
+pub type VaultNotificationPreferences = NotificationPreferences;
 
 /// Persisted reminder preferences stored by `Db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,42 +429,6 @@ pub enum NotificationFrequency {
     Weekly,
     Monthly,
 }
-
-/// HTTP-layer preferences (matches routes/tests).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReminderPreferences {
-    pub vault_id: u64,
-    pub channels: Vec<Channel>,
-    pub hours_before_expiry: u32,
-    pub frequency: Frequency,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultSetPreferencesRequest {
-    pub channels: Vec<Channel>,
-    pub hours_before_expiry: u32,
-    pub frequency: Frequency,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Channel {
-    Email,
-    Sms,
-    Push,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Frequency {
-    Once,
-    Daily,
-    Weekly,
-    Hourly,
-    Monthly,
-}
-
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NotificationPreferencesRequest {

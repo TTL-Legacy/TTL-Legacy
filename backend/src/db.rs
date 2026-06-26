@@ -414,20 +414,68 @@ impl Db {
 
 use rusqlite::{params, Connection};
 
-/// SQLite-backed DB used by the axum reminder-preferences API.
-///
-/// This is the contract expected by `backend/src/main.rs`, `routes.rs`,
-/// `scheduler.rs`, and `tests.rs`.
+pub struct PoolConfig {
+    pub min: u32,
+    pub max: u32,
+    pub timeout_secs: u32,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            min: 2,
+            max: 10,
+            timeout_secs: 30,
+        }
+    }
+}
+
+impl PoolConfig {
+    pub fn from_env() -> Self {
+        Self {
+            min: std::env::var("DB_POOL_MIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
+            max: std::env::var("DB_POOL_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            timeout_secs: std::env::var("DB_POOL_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+        }
+    }
+}
+
 pub struct Db {
     conn: std::sync::Mutex<Connection>,
+    pool_config: PoolConfig,
 }
 
 impl Db {
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
+        Self::open_with_pool_config(path, &PoolConfig::default())
+    }
+
+    pub fn open_with_pool_config(path: &str, config: &PoolConfig) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(config.timeout_secs as u64))?;
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
+            pool_config: PoolConfig {
+                min: config.min,
+                max: config.max,
+                timeout_secs: config.timeout_secs,
+            },
         })
+    }
+
+    pub fn check_connectivity(&self) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("SELECT 1")?;
+        Ok(())
     }
 
 
