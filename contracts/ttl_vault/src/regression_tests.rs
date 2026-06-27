@@ -283,3 +283,63 @@ fn regression_vault_isolation() {
     assert_eq!(balance_1, 100_000i128, "Vault 1 balance should be independent");
     assert_eq!(balance_2, 50_000i128, "Vault 2 balance should be independent");
 }
+
+/// Regression test for Issue #853: Vault ID uniqueness under concurrent creation
+/// Previously: No regression test existed for vault ID counter consistency
+/// Ensures vault IDs are unique across multiple sequential creates
+#[test]
+fn test_vault_ids_are_unique_across_multiple_creates() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+
+    // Create 100 vaults and collect IDs
+    let mut vault_ids = alloc::vec::Vec::new();
+    for _ in 0..100 {
+        let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+        vault_ids.push(vault_id);
+    }
+
+    // Assert all IDs are distinct
+    for i in 0..vault_ids.len() {
+        for j in (i + 1)..vault_ids.len() {
+            assert_ne!(
+                vault_ids[i], vault_ids[j],
+                "Vault IDs must be unique: vault {} and {} have same ID {}",
+                i, j, vault_ids[i]
+            );
+        }
+    }
+
+    // Assert vault_count matches
+    assert_eq!(client.vault_count(), 100, "Vault count must equal number of created vaults");
+}
+
+/// Regression test for Issue #853: Vault ID counter consistency after failed creation
+/// Previously: No regression test existed for counter behavior on failed creates
+/// Ensures the counter does not advance when create_vault fails
+#[test]
+fn test_vault_id_counter_is_consistent_after_failure() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+
+    // Count should start at 0
+    assert_eq!(client.vault_count(), 0, "Initial count should be 0");
+
+    // Successful create
+    let vault_1 = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    assert_eq!(vault_1, 1, "First vault should have ID 1");
+    assert_eq!(client.vault_count(), 1, "Count should be 1 after first create");
+
+    // Failed create (owner == beneficiary)
+    let result = client.try_create_vault(&owner, &owner, &100u64, &None);
+    assert!(result.is_err(), "Create with owner == beneficiary should fail");
+    assert_eq!(client.vault_count(), 1, "Count must not advance on failed create");
+
+    // Successful create again
+    let vault_2 = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    assert_eq!(vault_2, 2, "Second vault should have ID 2 (counter must not have advanced)");
+    assert_eq!(client.vault_count(), 2, "Count should be 2 after second create");
+
+    // Verify both vaults exist with correct IDs
+    assert!(client.vault_exists(&vault_1), "Vault 1 should exist");
+    assert!(client.vault_exists(&vault_2), "Vault 2 should exist");
+    assert!(!client.vault_exists(&3), "Vault 3 should not exist");
+}
