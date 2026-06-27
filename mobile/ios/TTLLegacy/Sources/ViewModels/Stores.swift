@@ -46,6 +46,7 @@ final class VaultStore: ObservableObject {
     @Published var vaults: [Vault] = []
     @Published var isLoading = false
     @Published var error: String?
+    @Published var pendingDeepLink: UniversalLinkRouter.DeepLink?
 
     func load() async {
         isLoading = true; error = nil

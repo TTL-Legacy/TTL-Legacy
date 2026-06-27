@@ -56,6 +56,23 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         completionHandler()
     }
 
+    // Fires immediately to warn the user their vault TTL is under 24 hours (called from background refresh).
+    func scheduleTTLWarning(vaultID: String, ttlRemaining: UInt64) {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: ["ttl-warning-\(vaultID)"])
+
+        let content = UNMutableNotificationContent()
+        content.title = "Vault Expiring Soon"
+        content.body = "Your vault expires in less than 24 hours. Open the app to check in and keep it active."
+        content.sound = .default
+        content.userInfo = ["vault_id": vaultID]
+        content.categoryIdentifier = "CHECK_IN"
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
+        let request = UNNotificationRequest(identifier: "ttl-warning-\(vaultID)", content: content, trigger: trigger)
+        center.add(request)
+    }
+
     func registerNotificationCategories() {
         let checkInAction = UNNotificationAction(identifier: "CHECK_IN_ACTION", title: "Check In", options: .foreground)
         let category = UNNotificationCategory(identifier: "CHECK_IN", actions: [checkInAction],

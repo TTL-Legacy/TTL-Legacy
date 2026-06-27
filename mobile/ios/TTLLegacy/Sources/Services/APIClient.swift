@@ -82,6 +82,11 @@ final class APIClient {
         try await post(path: "/vaults/\(vaultID)/withdraw", body: ["amount": amount])
     }
 
+    func acceptBeneficiary(vaultID: String, token: String) async throws {
+        let body = ["vault_id": vaultID, "token": token]
+        let _: EmptyBody = try await post(path: "/vaults/\(vaultID)/accept", body: body)
+    }
+
     func getTTL(vaultID: String) async throws -> UInt64 {
         let result: [String: UInt64] = try await get(path: "/vaults/\(vaultID)/ttl")
         return result["ttl_remaining"] ?? 0

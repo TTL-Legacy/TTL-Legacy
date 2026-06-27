@@ -88,6 +88,7 @@ struct VaultListView: View {
     @EnvironmentObject var vaultStore: VaultStore
     @EnvironmentObject var authStore: AuthStore
     @State private var showCreate = false
+    @State private var showDeepLinkSheet = false
 
     var body: some View {
         NavigationStack {
@@ -116,6 +117,14 @@ struct VaultListView: View {
             }
             .task { await vaultStore.load() }
             .sheet(isPresented: $showCreate) { CreateVaultView() }
+            .sheet(isPresented: $showDeepLinkSheet, onDismiss: { vaultStore.pendingDeepLink = nil }) {
+                if let link = vaultStore.pendingDeepLink {
+                    DeepLinkView(link: link)
+                }
+            }
+            .onChange(of: vaultStore.pendingDeepLink) { _, link in
+                if link != nil { showDeepLinkSheet = true }
+            }
         }
     }
 }
@@ -166,6 +175,7 @@ struct VaultDetailView: View {
     let vault: Vault
     @EnvironmentObject var vaultStore: VaultStore
     @State private var isCheckingIn = false
+    @State private var biometricError: String?
 
     var body: some View {
         List {
@@ -182,6 +192,9 @@ struct VaultDetailView: View {
                     Label(isCheckingIn ? "Checking in…" : "Check In Now", systemImage: "checkmark.circle.fill")
                 }
                 .disabled(isCheckingIn || vault.status != .active)
+                if let error = biometricError {
+                    Text(error).foregroundStyle(.red).font(.caption)
+                }
             }
         }
         .navigationTitle("Vault")
@@ -189,9 +202,15 @@ struct VaultDetailView: View {
     }
 
     private func checkIn() {
+        biometricError = nil
         isCheckingIn = true
         Task {
-            await vaultStore.checkIn(vault: vault)
+            do {
+                try await BiometricService.shared.authenticate(reason: "Confirm vault check-in")
+                await vaultStore.checkIn(vault: vault)
+            } catch {
+                biometricError = error.localizedDescription
+            }
             isCheckingIn = false
         }
     }
@@ -251,6 +270,92 @@ struct CreateVaultView: View {
                 dismiss()
             } catch { self.error = error.localizedDescription }
             isCreating = false
+        }
+    }
+}
+
+// MARK: - Deep Link Views
+
+struct DeepLinkView: View {
+    let link: UniversalLinkRouter.DeepLink
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationStack {
+            switch link {
+            case .vaultInvitation(let vaultID):
+                VaultInvitationView(vaultID: vaultID)
+            case .beneficiaryAcceptance(let vaultID, let token):
+                BeneficiaryAcceptanceView(vaultID: vaultID, token: token)
+            }
+        }
+    }
+}
+
+struct VaultInvitationView: View {
+    let vaultID: String
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "envelope.open.fill").font(.system(size: 56)).foregroundStyle(.blue)
+            Text("Vault Invitation").font(.title.bold())
+            Text("You have been invited to a vault.\nVault ID: \(vaultID.prefix(16))…")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            Button("Open App") { dismiss() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(32)
+        .navigationTitle("Invitation")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
+    }
+}
+
+struct BeneficiaryAcceptanceView: View {
+    let vaultID: String
+    let token: String
+    @Environment(\.dismiss) var dismiss
+    @State private var isAccepting = false
+    @State private var error: String?
+    @State private var accepted = false
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "checkmark.seal.fill").font(.system(size: 56)).foregroundStyle(.green)
+            Text("Accept Beneficiary Role").font(.title.bold())
+            Text("You have been nominated as a beneficiary for vault \(vaultID.prefix(16))…")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+            if accepted {
+                Label("Accepted", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            } else {
+                if let error { Text(error).foregroundStyle(.red).font(.caption) }
+                Button(action: accept) {
+                    Label(isAccepting ? "Accepting…" : "Accept", systemImage: "hand.thumbsup.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isAccepting)
+            }
+        }
+        .padding(32)
+        .navigationTitle("Beneficiary Acceptance")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
+    }
+
+    private func accept() {
+        isAccepting = true
+        Task {
+            do {
+                try await APIClient.shared.acceptBeneficiary(vaultID: vaultID, token: token)
+                accepted = true
+            } catch {
+                self.error = error.localizedDescription
+            }
+            isAccepting = false
         }
     }
 }
