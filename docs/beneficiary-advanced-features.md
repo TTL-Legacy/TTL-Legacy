@@ -169,3 +169,20 @@ Event:
 |-----------|------------------------------|
 | `ben_rot` | `(effective_timestamp)`      |
 
+
+---
+
+## BPS Sum Invariant
+
+**Invariant:** After any sequence of `set_beneficiaries`, cap application, floor enforcement, or ranking operations, the sum of all allocated basis points across a vault's beneficiary list must equal exactly **10 000**.
+
+This is enforced at the contract level: `set_beneficiaries` returns `ContractError::InvalidBps` if the provided entries do not sum to 10 000. Cap and floor logic operates on absolute token amounts and does not alter BPS values stored in the vault.
+
+### Tested invariants
+
+| Test | Description |
+|------|-------------|
+| `bps_sum_invariant_after_set_beneficiaries` | BPS sum equals 10 000 after a multi-beneficiary set |
+| `bps_sum_invariant_after_cap_application` | Stored BPS remains 10 000 after caps are configured |
+| `bps_sum_invariant_set_rejects_non_10000` | `set_beneficiaries` rejects any split that doesn't sum to 10 000 |
+| `prop_bps_sum_invariant_after_set_beneficiaries` | Proptest: random valid splits always yield a stored sum of 10 000 |

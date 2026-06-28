@@ -1,0 +1,17 @@
+[package]
+name = "ttl-vault-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "fuzz_vesting"
+path = "src/fuzz_vesting.rs"
+test = false
+doc = false
