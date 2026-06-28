@@ -38,4 +38,5 @@ jsonwebtoken = "9"
 
 [dev-dependencies]
 tokio-test = "0.4"
+mockito = "1.4"
 

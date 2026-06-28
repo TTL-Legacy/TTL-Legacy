@@ -135,3 +135,35 @@ proptest! {
         prop_assert!(release_count <= 1);
     }
 }
+
+// --- Issue #849: vault_ttl_ledgers property tests ---
+
+/// Constants mirrored from lib.rs for property testing.
+const VAULT_TTL_LEDGERS_MIN: u32 = 200_000;
+const MAX_PERSISTENT_TTL: u32 = 3_110_400;
+const LEDGER_SECOND: u32 = 5;
+
+fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
+    let ledgers = (check_in_interval as u32)
+        .saturating_mul(2)
+        .saturating_div(LEDGER_SECOND);
+    ledgers.clamp(VAULT_TTL_LEDGERS_MIN, MAX_PERSISTENT_TTL)
+}
+
+proptest! {
+    /// vault_ttl_ledgers must never exceed MAX_PERSISTENT_TTL.
+    #[test]
+    fn prop_vault_ttl_never_exceeds_max(interval in 0u64..u64::MAX) {
+        prop_assert!(vault_ttl_ledgers(interval) <= MAX_PERSISTENT_TTL);
+    }
+
+    /// vault_ttl_ledgers must be monotonically non-decreasing: a >= b => f(a) >= f(b).
+    #[test]
+    fn prop_vault_ttl_monotonically_non_decreasing(
+        a in 0u64..u64::MAX / 2,
+        b in 0u64..u64::MAX / 2,
+    ) {
+        let (big, small) = if a >= b { (a, b) } else { (b, a) };
+        prop_assert!(vault_ttl_ledgers(big) >= vault_ttl_ledgers(small));
+    }
+}

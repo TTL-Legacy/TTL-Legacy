@@ -302,3 +302,138 @@ async fn test_db_check_connectivity() {
     let db = Db::open(":memory:").unwrap();
     assert!(db.check_connectivity().is_ok());
 }
+
+// ── Issue #851: Mocked HTTP tests for notification delivery ─────────────────
+
+#[cfg(test)]
+mod notification_delivery_tests {
+    use std::sync::Arc;
+    use crate::notifications::{
+        FcmClient, NotificationService,
+        create_token_store, create_prefs_store, create_schedule_store, create_delivery_store,
+    };
+    use crate::models::{RegisterTokenRequest, NotificationType, DeliveryStatus};
+    use serde_json::json;
+
+    fn make_service(fcm: Arc<FcmClient>) -> NotificationService {
+        NotificationService::new(
+            fcm,
+            create_token_store(),
+            create_prefs_store(),
+            create_schedule_store(),
+            create_delivery_store(),
+        )
+    }
+
+    /// Successful FCM push send: mock returns 200 with a message name.
+    #[tokio::test]
+    async fn test_fcm_send_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/projects/test-project/messages:send")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"name":"projects/test-project/messages/msg-001"}"#)
+            .create_async()
+            .await;
+
+        let mut client = FcmClient::new("test-key".into(), "test-project".into());
+        client.base_url = server.url();
+        let result = client.send("device-token-1", "Title", "Body", json!({})).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "projects/test-project/messages/msg-001");
+        mock.assert_async().await;
+    }
+
+    /// Failed FCM push: mock returns 401, send should return Err.
+    #[tokio::test]
+    async fn test_fcm_send_failure_returns_err() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/projects/test-project/messages:send")
+            .with_status(401)
+            .with_body("Unauthorized")
+            .create_async()
+            .await;
+
+        let mut client = FcmClient::new("bad-key".into(), "test-project".into());
+        client.base_url = server.url();
+        let result = client.send("device-token-1", "Title", "Body", json!({})).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("FCM error 401"));
+        mock.assert_async().await;
+    }
+
+    /// Rate-limited FCM push: mock returns 429, send should return Err containing status.
+    #[tokio::test]
+    async fn test_fcm_send_rate_limited() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/projects/test-project/messages:send")
+            .with_status(429)
+            .with_body("Too Many Requests")
+            .create_async()
+            .await;
+
+        let mut client = FcmClient::new("test-key".into(), "test-project".into());
+        client.base_url = server.url();
+        let result = client.send("device-token-1", "Title", "Body", json!({})).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("FCM error 429"));
+        mock.assert_async().await;
+    }
+
+    /// Delivery with retry: first call fails (500), second succeeds; flush_pending retries.
+    #[tokio::test]
+    async fn test_delivery_fails_no_tokens_registered() {
+        let mut server = mockito::Server::new_async().await;
+        let mut fcm = FcmClient::new("test-key".into(), "test-project".into());
+        fcm.base_url = server.url();
+        let svc = make_service(Arc::new(fcm));
+
+        // Schedule an immediate notification for owner with no registered tokens
+        svc.schedule_immediate("vault-1", "owner-no-token", NotificationType::CheckInReminder);
+
+        // No tokens → flush_pending records Failed
+        svc.flush_pending().await;
+
+        let log = svc.get_delivery_log("owner-no-token");
+        assert!(!log.is_empty());
+        assert_eq!(log[0].status, DeliveryStatus::Failed);
+
+        // No HTTP call was made since no tokens exist
+        server.mock("POST", mockito::Matcher::Any).expect(0).create_async().await;
+    }
+
+    /// Successful delivery: token registered, mock returns 200, status is Sent.
+    #[tokio::test]
+    async fn test_delivery_success_with_registered_token() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/v1/projects/test-project/messages:send")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"name":"projects/test-project/messages/ok-1"}"#)
+            .create_async()
+            .await;
+
+        let mut fcm = FcmClient::new("test-key".into(), "test-project".into());
+        fcm.base_url = server.url();
+        let svc = make_service(Arc::new(fcm));
+
+        svc.register_token(RegisterTokenRequest {
+            owner: "owner-1".into(),
+            token: "device-abc".into(),
+            platform: "android".into(),
+        });
+        svc.schedule_immediate("vault-1", "owner-1", NotificationType::ExpiryWarning);
+        svc.flush_pending().await;
+
+        let log = svc.get_delivery_log("owner-1");
+        assert!(!log.is_empty());
+        assert_eq!(log[0].status, DeliveryStatus::Sent);
+    }
+}

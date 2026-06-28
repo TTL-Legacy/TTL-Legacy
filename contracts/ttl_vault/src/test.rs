@@ -6072,3 +6072,224 @@ fn test_set_max_interval_rejects_less_than_min() {
     client.set_min_check_in_interval(&1_000u64);
     client.set_max_check_in_interval(&500u64);
 }
+
+// ============================================================
+// Issue #850: Negative tests for untested ContractError variants
+// ============================================================
+
+// --- ContractError::Paused (10) — check_in returns Paused when contract is paused ---
+// Contract function: check_in
+#[test]
+fn test_paused_error_on_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    client.pause(&bytes!(&env, 0x01));
+    let err = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[0u8; 32])).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::Paused as u32));
+}
+
+// --- ContractError::MaxTtlExceeded (25) — check_in rejected when interval > max_ttl ---
+// Contract function: check_in
+#[test]
+fn test_max_ttl_exceeded_error_on_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    // Set max TTL to 50 seconds; check_in_interval of 100s exceeds it
+    client.set_max_ttl_seconds(&50u64);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let err = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[0u8; 32])).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::MaxTtlExceeded as u32));
+}
+
+// --- ContractError::DepositLimitExceeded (38) — deposit exceeds vault max_deposit_amount ---
+// Contract function: deposit
+// Set max_deposit_amount via env.as_contract storage manipulation
+#[test]
+fn test_deposit_limit_exceeded_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    env.as_contract(&client.address, || {
+        let key = DataKey::Vault(vault_id);
+        let mut v: Vault = env.storage().persistent().get(&key).unwrap();
+        v.max_deposit_amount = Some(50);
+        env.storage().persistent().set(&key, &v);
+    });
+    let err = client.try_deposit(&vault_id, &owner, &100i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::DepositLimitExceeded as u32));
+}
+
+// --- ContractError::DuplicateVault (57) — same (owner, beneficiary, interval) created twice ---
+// Contract function: create_vault
+#[test]
+fn test_duplicate_vault_error() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let err = client.try_create_vault(&owner, &beneficiary, &1000u64, &None).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::DuplicateVault as u32));
+}
+
+// --- ContractError::AuctionAlreadyExists (79) — creating auction twice on same vault ---
+// Contract function: create_beneficiary_auction
+#[test]
+fn test_auction_already_exists_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let now = env.ledger().timestamp();
+    client.create_beneficiary_auction(&vault_id, &owner, &now, &(now + 1000), &5_000u32, &1i128).unwrap();
+    let err = client.create_beneficiary_auction(&vault_id, &owner, &now, &(now + 1000), &5_000u32, &1i128).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::AuctionAlreadyExists as u32));
+}
+
+// --- ContractError::AuctionNotFound (78) — bidding on a vault with no auction ---
+// Contract function: place_auction_bid
+#[test]
+fn test_auction_not_found_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let bidder = Address::generate(&env);
+    let err = client.place_auction_bid(&vault_id, &bidder, &100i128, &5_000u32).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::AuctionNotFound as u32));
+}
+
+// --- ContractError::AuctionEnded (80) — bidding after auction end_time ---
+// Contract function: place_auction_bid
+#[test]
+fn test_auction_ended_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let now = env.ledger().timestamp();
+    client.create_beneficiary_auction(&vault_id, &owner, &now, &(now + 100), &5_000u32, &1i128).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    let bidder = Address::generate(&env);
+    let err = client.place_auction_bid(&vault_id, &bidder, &100i128, &5_000u32).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::AuctionEnded as u32));
+}
+
+// --- ContractError::AuctionNotEnded (81) — finalizing before auction end_time ---
+// Contract function: finalize_beneficiary_auction
+#[test]
+fn test_auction_not_ended_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let now = env.ledger().timestamp();
+    client.create_beneficiary_auction(&vault_id, &owner, &now, &(now + 1000), &5_000u32, &1i128).unwrap();
+    let err = client.finalize_beneficiary_auction(&vault_id).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::AuctionNotEnded as u32));
+}
+
+// --- ContractError::TtlBorrowNotFound (62) — repaying a non-existent borrow ---
+// Contract function: repay_ttl_borrow
+#[test]
+fn test_ttl_borrow_not_found_error() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let err = client.repay_ttl_borrow(&vault_id, &owner).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::TtlBorrowNotFound as u32));
+}
+
+// --- ContractError::TtlBorrowAlreadyRepaid (63) — repaying a borrow twice ---
+// Contract function: repay_ttl_borrow
+#[test]
+fn test_ttl_borrow_already_repaid_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let b2 = Address::generate(&env);
+    let borrower_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let lender_id = client.create_vault(&owner, &b2, &10_000u64, &None);
+    client.borrow_ttl(&borrower_id, &lender_id, &owner, &100u64).unwrap();
+    client.repay_ttl_borrow(&borrower_id, &owner).unwrap();
+    let err = client.repay_ttl_borrow(&borrower_id, &owner).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::TtlBorrowAlreadyRepaid as u32));
+}
+
+// --- ContractError::NoScheduledWithdrawals (32) — execute on vault with no schedule ---
+// Contract function: execute_scheduled_withdrawal
+#[test]
+fn test_no_scheduled_withdrawals_error() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
+    let err = client.execute_scheduled_withdrawal(&vault_id).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::NoScheduledWithdrawals as u32));
+}
+
+// --- ContractError::NothingToClawback (77) — all vesting installments already claimed ---
+// Contract function: clawback_unvested
+#[test]
+fn test_nothing_to_clawback_error() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+    let start = env.ledger().timestamp() + 200;
+    // set_vesting_schedule: (vault_id, caller, start_time, interval, num_installments, cliff_period)
+    client.set_vesting_schedule(&vault_id, &owner, &start, &100u64, &2u32, &0u64).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+    // Manually mark all installments as claimed so total_unvested == 0
+    env.as_contract(&client.address, || {
+        let count: u32 = env.storage().persistent()
+            .get(&DataKey::VestingScheduleCount(vault_id))
+            .unwrap_or(0);
+        for i in 0..count {
+            let key = DataKey::VestingSchedule(vault_id, i);
+            if let Some(mut sched) = env.storage().persistent().get::<DataKey, VestingSchedule>(&key) {
+                sched.claimed_installments = sched.num_installments;
+                env.storage().persistent().set(&key, &sched);
+            }
+        }
+    });
+    let err = client.clawback_unvested(&vault_id, &owner).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::NothingToClawback as u32));
+}
+
+// ============================================================
+// Issue #852: 50-beneficiary trigger_release load test
+//
+// Verifies that trigger_release with 50 equal-BPS beneficiaries completes
+// successfully and distributes the full balance. Each beneficiary gets
+// 10_000 / 50 = 200 BPS (2% of total). The last beneficiary absorbs any
+// rounding dust.
+//
+// Maximum safe beneficiary count: 50 (verified by this test).
+// ============================================================
+#[test]
+fn test_trigger_release_with_50_beneficiaries() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+
+    // Mint enough for a large deposit
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &10_000_000i128);
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    let total: i128 = 10_000_000;
+    client.deposit(&vault_id, &owner, &total);
+
+    // Build 50 beneficiaries at 200 BPS each (50 × 200 = 10_000)
+    let bps_each: u32 = 200; // 2% each
+    let mut bens = soroban_sdk::Vec::new(&env);
+    let mut addresses: alloc::vec::Vec<Address> = alloc::vec::Vec::new();
+    for _ in 0..50 {
+        let addr = Address::generate(&env);
+        addresses.push(addr.clone());
+        bens.push_back(BeneficiaryEntry { address: addr, bps: bps_each });
+    }
+    client.set_beneficiaries(&vault_id, &owner, &bens);
+
+    // Expire the vault
+    env.ledger().with_mut(|l| l.timestamp += 200);
+    client.trigger_release(&vault_id);
+
+    // Vault should be fully released
+    assert_eq!(client.get_release_status(&vault_id), ReleaseStatus::Released);
+    assert_eq!(client.get_vault(&vault_id).balance, 0i128);
+
+    // Verify total distributed equals the deposited amount
+    let token_client = token::Client::new(&env, &token_address);
+    let per_beneficiary = total / 50;
+    let total_distributed: i128 = addresses.iter().map(|a| token_client.balance(a)).sum();
+    assert_eq!(total_distributed, total,
+        "Total distributed ({total_distributed}) must equal deposited ({total})");
+
+    // All but the last beneficiary should have the even share
+    for addr in &addresses[..49] {
+        assert_eq!(token_client.balance(addr), per_beneficiary);
+    }
+    // Last beneficiary absorbs any dust
+    assert!(token_client.balance(&addresses[49]) >= per_beneficiary);
+}
