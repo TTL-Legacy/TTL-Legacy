@@ -61,6 +61,23 @@ This Soroban implementation makes TTL-Legacy:
 ./scripts/test.sh
 ```
 
+### Local Development Setup (Docker)
+
+For fastest local setup, use Docker Compose:
+
+```bash
+docker-compose up -d
+```
+
+This will start:
+- **PostgreSQL** on `localhost:5432`
+- **Backend** on `localhost:3000`
+- **Stellar Quickstart** on `localhost:8000`
+
+The `docker-compose.override.yml` configures development-specific settings (standalone Stellar, loose auth, mounted volumes).
+
+Database health check ensures the service is ready before the backend starts.
+
 ### Setup Environment
 
 Copy the example environment file:

@@ -1,0 +1,50 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ttl-legacy-db
+    environment:
+      POSTGRES_USER: ttl_user
+      POSTGRES_PASSWORD: ttl_password
+      POSTGRES_DB: ttl_legacy
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ttl_user -d ttl_legacy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ttl-legacy-backend
+    environment:
+      DATABASE_URL: postgres://ttl_user:ttl_password@db:5432/ttl_legacy
+      RUST_LOG: info
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+
+  stellar-quickstart:
+    image: stellar/quickstart:latest
+    container_name: stellar-quickstart
+    environment:
+      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+    ports:
+      - "8000:8000"
+      - "11626:11626"
+    volumes:
+      - quickstart_data:/var/lib/stellar
+
+volumes:
+  postgres_data:
+  quickstart_data:
