@@ -77,6 +77,7 @@ use types::{
     TokenWeight, TokenRebalanceConfig, TOKEN_REBALANCE_TOPIC, TOKEN_REBALANCED_TOPIC,
     BeneficiaryPool, POOL_CREATED_TOPIC,
     ADMIN_TRANSFER_PROPOSED_TOPIC, ADMIN_TRANSFER_COMPLETED_TOPIC,
+    EMERGENCY_FREEZE_TOPIC, FREEZE_RESOLVED_TOPIC,
     PauseRecord,
 };
 #[cfg(test)]
@@ -1241,6 +1242,9 @@ impl TtlVaultContract {
         if vault.is_paused {
             return Err(ContractError::Paused);
         }
+        if Self::is_vault_frozen(env.clone(), vault_id) {
+            return Err(ContractError::VaultFrozen);
+        }
         if caller != vault.owner && !Self::is_check_in_delegate(&env, vault_id, &caller) {
             return Err(ContractError::NotOwner);
         }
@@ -1372,6 +1376,7 @@ impl TtlVaultContract {
         if vault.is_paused {
             panic_with_error!(&env, ContractError::Paused);
         }
+        Self::assert_not_frozen(&env, vault_id);
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
         }
@@ -2056,6 +2061,7 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             panic_with_error!(&env, ContractError::AlreadyReleased);
         }
+        Self::assert_not_frozen(&env, vault_id);
         // We only block vetoes on trigger before the vault has expired.
         // Note: release entrypoint is for the Expiry trigger and thus requires expiry,
         // but manual release can occur at arbitrary times.
@@ -5845,7 +5851,43 @@ impl TtlVaultContract {
         }
     }
 
-    // --- Issue #379: Conditional Release Logic ---
+    // --- Issue #870: Emergency Vault Freeze by Admin ---
+
+    /// Freezes a specific vault, blocking all state-changing operations on it.
+    /// Only the admin can call this. The vault must exist.
+    pub fn freeze_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env);
+        // Ensure vault exists
+        Self::load_vault(&env, vault_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultFrozen(vault_id), &true);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((EMERGENCY_FREEZE_TOPIC, vault_id), true);
+        Ok(())
+    }
+
+    /// Unfreezes a previously frozen vault, allowing operations to resume.
+    /// Only the admin can call this.
+    pub fn unfreeze_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env);
+        // Ensure vault exists
+        Self::load_vault(&env, vault_id);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::VaultFrozen(vault_id));
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((FREEZE_RESOLVED_TOPIC, vault_id), false);
+        Ok(())
+    }
+
+    /// Returns true if the vault is currently frozen by the admin.
+    pub fn is_vault_frozen(env: Env, vault_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultFrozen(vault_id))
+            .unwrap_or(false)
+    }
 
     /// Sets the release condition for a vault.
     ///
@@ -6685,6 +6727,17 @@ impl TtlVaultContract {
     fn require_admin(env: &Env) {
         let admin = Self::load_admin(env);
         admin.require_auth();
+    }
+
+    fn assert_not_frozen(env: &Env, vault_id: u64) {
+        let frozen: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultFrozen(vault_id))
+            .unwrap_or(false);
+        if frozen {
+            panic_with_error!(env, ContractError::VaultFrozen);
+        }
     }
 
     fn load_admin(env: &Env) -> Address {
