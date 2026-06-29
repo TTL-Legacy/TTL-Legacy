@@ -93,6 +93,8 @@ mod beneficiary_auction_tests;
 mod bps_invariant_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod trigger_release_bench_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -133,6 +135,11 @@ const MAX_ACCELERATE_SECONDS: u64 = 2_592_000;
 
 /// Time-lock delay for admin transfers in seconds (24 hours) — Issue #813.
 const ADMIN_TRANSFER_TIMELOCK: u64 = 86_400;
+
+/// Maximum number of beneficiaries allowed per vault — Issue #872.
+/// Derived from benchmark data: 20 beneficiaries stays safely below the 100M
+/// Soroban instruction limit; 50 approaches it. Capped at 20 for headroom.
+pub const MAX_BENEFICIARIES: u32 = 20;
 
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
@@ -238,6 +245,8 @@ pub enum ContractError {
     AuctionEnded = 80,
     AuctionNotEnded = 81,
     InvalidVestingSchedule = 82,
+    // Issue #872: beneficiary count guard
+    TooManyBeneficiaries = 83,
 }
 
 #[contract]
@@ -2546,6 +2555,9 @@ impl TtlVaultContract {
             caller.require_auth();
             if beneficiaries.is_empty() {
                 return Err(ContractError::InvalidBps);
+            }
+            if beneficiaries.len() > MAX_BENEFICIARIES {
+                return Err(ContractError::TooManyBeneficiaries);
             }
             let mut vault = Self::load_vault(&env, vault_id);
             if caller != vault.owner {
