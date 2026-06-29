@@ -437,6 +437,8 @@ pub enum DataKey {
     BeneficiaryAuctionCount,
     // Issue #796: open proposals tracking
     OpenProposals(u64),
+    // Issue #870: per-vault admin freeze flag
+    VaultFrozen(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
