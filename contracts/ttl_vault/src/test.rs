@@ -1557,6 +1557,19 @@ fn test_check_in_extends_owner_index_ttl() {
 }
 
 #[test]
+fn test_check_in_rejects_expired_vault() {
+    let (env, owner, _, _, _, client) = setup();
+    let interval = 100u64;
+    let vault_id = client.create_vault(&owner, &Address::generate(&env), &interval, &None);
+
+    // Advance past check-in interval to expire the vault
+    env.ledger().with_mut(|l| l.timestamp += interval + 1);
+
+    let err = client.try_check_in(&vault_id, &owner).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::VaultExpired as u32));
+}
+
+#[test]
 fn test_get_active_vaults_by_beneficiary_excludes_released() {
     let (env, owner, beneficiary, _, _, client) = setup();
 

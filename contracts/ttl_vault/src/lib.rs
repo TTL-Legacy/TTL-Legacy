@@ -1247,7 +1247,12 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
-        
+        // Prevent owner from resetting an already-expired vault, which would
+        // silently block the beneficiary from calling trigger_release.
+        if Self::is_expired(env.clone(), vault_id) {
+            return Err(ContractError::VaultExpired);
+        }
+
         // Save original state for rollback on failure - Issue #391
         let original_last_check_in = vault.last_check_in;
         
