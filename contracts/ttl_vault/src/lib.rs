@@ -67,7 +67,6 @@ use types::{
     VestingCatchUpConfig, VestingBonusConfig,
     VESTING_CATCHUP_SET_TOPIC, VESTING_CATCHUP_CLAIMED_TOPIC,
     VESTING_BONUS_SET_TOPIC, VESTING_BONUS_CLAIMED_TOPIC,
-    TokenConversion, TokenStaking, YieldDistributionMode, YieldDistributionConfig,
     TOKEN_CONVERSION_TOPIC, TOKEN_WHITELIST_VALIDATED_TOPIC,
     TOKEN_STAKING_TOPIC, TOKEN_UNSTAKING_TOPIC,
     YIELD_DISTRIBUTED_TOPIC, YIELD_REINVESTED_TOPIC,
@@ -93,6 +92,8 @@ mod beneficiary_auction_tests;
 mod bps_invariant_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod grace_period_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -238,6 +239,7 @@ pub enum ContractError {
     AuctionEnded = 80,
     AuctionNotEnded = 81,
     InvalidVestingSchedule = 82,
+    GracePeriodActive = 83,
 }
 
 #[contract]
@@ -952,6 +954,7 @@ impl TtlVaultContract {
             max_check_in_interval: env.storage().instance().get(&DataKey::MaxCheckInInterval),
             max_ttl_seconds: env.storage().instance().get(&DataKey::MaxTtlSeconds).unwrap_or(315_360_000),
             ttl_decay_rate: env.storage().instance().get(&DataKey::TtlDecayRate).unwrap_or(0),
+            release_grace_period_seconds: env.storage().instance().get(&DataKey::ReleaseGracePeriodSeconds).unwrap_or(0),
         }
     }
 
@@ -1017,6 +1020,7 @@ impl TtlVaultContract {
         }
         env.storage().instance().set(&DataKey::MaxTtlSeconds, &config.max_ttl_seconds);
         env.storage().instance().set(&DataKey::TtlDecayRate, &config.ttl_decay_rate);
+        env.storage().instance().set(&DataKey::ReleaseGracePeriodSeconds, &config.release_grace_period_seconds);
         env.storage().instance().remove(&DataKey::PendingProtocolConfig);
         env.storage().instance().remove(&DataKey::ProtocolConfigProposedAt);
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -2062,6 +2066,17 @@ impl TtlVaultContract {
         // Here we keep the existing expiry gate.
         if !Self::is_expired(env.clone(), vault_id) {
             panic_with_error!(&env, ContractError::NotExpired);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut hibernated = 0u64;
+        if let Some(h) = env.storage().persistent().get::<DataKey, HibernationEntry>(&DataKey::Hibernation(vault_id)) {
+            hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
+        }
+        let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
+        let grace_period = env.storage().instance().get::<DataKey, u64>(&DataKey::ReleaseGracePeriodSeconds).unwrap_or(0);
+        if now < expiry_time + grace_period {
+            panic_with_error!(&env, ContractError::GracePeriodActive);
         }
 
         // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
@@ -4728,7 +4743,7 @@ impl TtlVaultContract {
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
-    pub fn beneficiary_veto_release_condition(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+    pub fn veto_release_condition(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
         // Only primary beneficiary (vault.beneficiary)

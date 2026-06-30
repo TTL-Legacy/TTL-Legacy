@@ -352,6 +352,7 @@ pub enum DataKey {
     ArchivedVault(u64),
     MaxTtlSeconds,
     TtlDecayRate,
+    ReleaseGracePeriodSeconds,
     BridgeConfig(u32),
     TokenConversion(u64),
     TokenStaking(u64),
@@ -411,10 +412,7 @@ pub enum DataKey {
     VestingCatchUp(u64),
     // Issue #546: vesting bonus
     VestingBonus(u64),
-    // Issue #581: token conversion
-    TokenConversion(u64),
-    // Issue #583: token staking
-    TokenStaking(u64),
+
     // Issue #584: yield distribution config
     YieldDistributionConfig(u64),
     // Issue #585: token lending
@@ -1203,54 +1201,6 @@ pub struct VestingBonusConfig {
     pub on_time_window_seconds: u64,
 }
 
-/// Token conversion configuration - Issue #581.
-#[contracttype]
-#[derive(Clone)]
-pub struct TokenConversion {
-    pub vault_id: u64,
-    pub from_token: Address,
-    pub to_token: Address,
-    /// Conversion rate in basis points (10000 = 1:1).
-    pub conversion_rate: i128,
-    pub enabled: bool,
-    pub created_at: u64,
-}
-
-/// Token staking configuration - Issue #583.
-#[contracttype]
-#[derive(Clone)]
-pub struct TokenStaking {
-    pub vault_id: u64,
-    pub staking_pool: Address,
-    pub staked_amount: i128,
-    pub staking_start: u64,
-    /// Annual yield in basis points (e.g., 500 = 5% APY).
-    pub annual_yield_bps: u32,
-    pub is_active: bool,
-}
-
-/// Yield distribution mode - Issue #584.
-#[contracttype]
-#[derive(Clone)]
-pub enum YieldDistributionMode {
-    /// Send all yield to the beneficiary.
-    DistributeToBeneficiary,
-    /// Reinvest all yield back into the vault balance.
-    Reinvest,
-    /// Send `beneficiary_bps` basis points to the beneficiary; reinvest the rest.
-    Split(u32),
-}
-
-/// Yield distribution config for a vault - Issue #584.
-#[contracttype]
-#[derive(Clone)]
-pub struct YieldDistributionConfig {
-    pub vault_id: u64,
-    pub mode: YieldDistributionMode,
-    pub last_distribution: u64,
-    pub total_distributed: i128,
-    pub total_reinvested: i128,
-}
 
 /// Token lending record - Issue #585.
 /// Tracks a loan of vault tokens lent out for interest income.
@@ -1408,4 +1358,5 @@ pub struct ProtocolConfig {
     pub max_check_in_interval: Option<u64>,
     pub max_ttl_seconds: u64,
     pub ttl_decay_rate: u32,
+    pub release_grace_period_seconds: u64,
 }
