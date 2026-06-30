@@ -1,0 +1,274 @@
+name: Testnet Smoke Test
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 02:00 UTC nightly
+  workflow_dispatch:
+
+env:
+  STELLAR_CLI_VERSION: "21.4.0"
+
+jobs:
+  smoke-test:
+    name: Stellar Testnet Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
+
+      - name: Build contract WASM
+        run: cargo build --package ttl-vault --target wasm32-unknown-unknown --release
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSfL \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /tmp
+          sudo mv /tmp/stellar /usr/local/bin/stellar
+          stellar --version
+
+      # Generate per-run key names so parallel runs don't collide in the
+      # local stellar-cli config store.
+      - name: Set up test accounts
+        run: |
+          set -euo pipefail
+          SUFFIX="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          # --- Admin: deploys and initializes the contract ---
+          if [ -n "${{ secrets.TESTNET_ADMIN_SECRET }}" ]; then
+            stellar keys add "smoke-admin-${SUFFIX}" \
+              --secret-key "${{ secrets.TESTNET_ADMIN_SECRET }}"
+          else
+            stellar keys generate "smoke-admin-${SUFFIX}" --network testnet
+          fi
+          ADMIN_ADDR=$(stellar keys address "smoke-admin-${SUFFIX}")
+          curl -sSf "https://friendbot.stellar.org?addr=${ADMIN_ADDR}" > /dev/null
+          sleep 5
+
+          # --- Owner: create_vault / deposit / check_in / cancel_vault ---
+          if [ -n "${{ secrets.TESTNET_OWNER_SECRET }}" ]; then
+            stellar keys add "smoke-owner-${SUFFIX}" \
+              --secret-key "${{ secrets.TESTNET_OWNER_SECRET }}"
+          else
+            stellar keys generate "smoke-owner-${SUFFIX}" --network testnet
+          fi
+          OWNER_ADDR=$(stellar keys address "smoke-owner-${SUFFIX}")
+          curl -sSf "https://friendbot.stellar.org?addr=${OWNER_ADDR}" > /dev/null
+          sleep 5
+
+          # --- Beneficiary: address only, no funding needed ---
+          stellar keys generate "smoke-bene-${SUFFIX}" --network testnet
+          BENE_ADDR=$(stellar keys address "smoke-bene-${SUFFIX}")
+
+          echo "KEY_SUFFIX=${SUFFIX}"     >> "$GITHUB_ENV"
+          echo "ADMIN_ADDR=${ADMIN_ADDR}" >> "$GITHUB_ENV"
+          echo "OWNER_ADDR=${OWNER_ADDR}" >> "$GITHUB_ENV"
+          echo "BENE_ADDR=${BENE_ADDR}"   >> "$GITHUB_ENV"
+
+          echo "Admin:       ${ADMIN_ADDR}"
+          echo "Owner:       ${OWNER_ADDR}"
+          echo "Beneficiary: ${BENE_ADDR}"
+
+      - name: Deploy contract
+        run: |
+          set -euo pipefail
+          CONTRACT_ID=$(stellar contract deploy \
+            --wasm target/wasm32-unknown-unknown/release/ttl_vault.wasm \
+            --source "smoke-admin-${KEY_SUFFIX}" \
+            --network testnet)
+          echo "CONTRACT_ID=${CONTRACT_ID}" >> "$GITHUB_ENV"
+          echo "Deployed: ${CONTRACT_ID}"
+
+      - name: Save contract address artifact
+        run: |
+          mkdir -p smoke-results
+          cat > smoke-results/contract.txt <<EOF
+          contract_id=${CONTRACT_ID}
+          run_id=${{ github.run_id }}
+          timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          admin=${ADMIN_ADDR}
+          owner=${OWNER_ADDR}
+          EOF
+          cat smoke-results/contract.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-${{ github.run_id }}
+          path: smoke-results/
+          retention-days: 7
+
+      - name: Initialize contract
+        run: |
+          set -euo pipefail
+          XLM_TOKEN=$(stellar contract id asset --asset native --network testnet)
+          echo "XLM_TOKEN=${XLM_TOKEN}" >> "$GITHUB_ENV"
+
+          stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-admin-${KEY_SUFFIX}" \
+            --network testnet \
+            -- initialize \
+            --xlm_token "${XLM_TOKEN}" \
+            --admin "${ADMIN_ADDR}"
+
+          echo "Initialized with native XLM SAC: ${XLM_TOKEN}"
+
+      - name: Smoke — create vault
+        run: |
+          set -euo pipefail
+          VAULT_ID=$(stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- create_vault \
+            --owner "${OWNER_ADDR}" \
+            --beneficiary "${BENE_ADDR}" \
+            --check_in_interval 86400 \
+            --token_address null)
+
+          # Strip any surrounding quotes from the returned u64
+          VAULT_ID="${VAULT_ID//\"/}"
+          echo "VAULT_ID=${VAULT_ID}" >> "$GITHUB_ENV"
+          echo "Created vault: ${VAULT_ID}"
+
+      - name: Smoke — deposit
+        run: |
+          set -euo pipefail
+          # 10 XLM expressed in stroops (1 XLM = 10_000_000 stroops)
+          stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- deposit \
+            --vault_id "${VAULT_ID}" \
+            --from "${OWNER_ADDR}" \
+            --amount 100000000
+          echo "Deposited 10 XLM into vault ${VAULT_ID}"
+
+      - name: Smoke — check-in
+        run: |
+          set -euo pipefail
+          # Any deterministic 32-byte value works as a passkey hash in the smoke test
+          PASSKEY_HASH=$(echo -n "ttl-legacy-smoke-test" | sha256sum | awk '{print $1}')
+
+          stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- check_in \
+            --vault_id "${VAULT_ID}" \
+            --caller "${OWNER_ADDR}" \
+            --passkey_hash "${PASSKEY_HASH}"
+
+          echo "Checked in (passkey: ${PASSKEY_HASH})"
+
+      - name: Smoke — get TTL remaining
+        run: |
+          set -euo pipefail
+          TTL=$(stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- get_ttl_remaining \
+            --vault_id "${VAULT_ID}")
+
+          echo "TTL remaining: ${TTL}"
+
+          if [ "${TTL}" = "null" ] || [ -z "${TTL}" ]; then
+            echo "::error::get_ttl_remaining returned null — vault has already expired"
+            exit 1
+          fi
+
+          echo "::notice::Smoke test passed. Vault ${VAULT_ID} TTL: ${TTL}s remaining"
+
+      # Runs even on failure so we don't leave funded vaults open on testnet.
+      - name: Cleanup — cancel vault
+        if: always()
+        run: |
+          if [ -z "${VAULT_ID:-}" ] || [ -z "${CONTRACT_ID:-}" ]; then
+            echo "Nothing to clean up (vault or contract not created)"
+            exit 0
+          fi
+          stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- cancel_vault \
+            --vault_id "${VAULT_ID}" \
+            --caller "${OWNER_ADDR}" \
+            && echo "Vault ${VAULT_ID} cancelled (refund returned to owner)" \
+            || echo "Warning: cancel_vault failed — vault may already be cancelled or deposit never landed"
+
+      # Opens a GitHub issue on first failure; comments on the existing open
+      # issue for repeated failures so the tracker stays clean.
+      - name: Alert — file failure issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const date = new Date().toISOString().split('T')[0];
+            const failureLabel = 'testnet-smoke-failure';
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: failureLabel,
+              state: 'open',
+              per_page: 1,
+            });
+
+            if (open.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body: `Repeated failure on **${date}** → [Run ${context.runId}](${runUrl})`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🚨 Testnet smoke test failed (${date})`,
+                body: [
+                  '## Testnet Smoke Test Failure',
+                  '',
+                  `**Run:** [${context.runId}](${runUrl})`,
+                  `**Date:** ${new Date().toISOString()}`,
+                  `**Trigger:** ${context.eventName}`,
+                  '',
+                  'The nightly testnet smoke test failed. Sequence tested:',
+                  '',
+                  '1. Build `ttl_vault` WASM',
+                  '2. Deploy to Stellar Testnet',
+                  '3. Initialize contract (native XLM token + admin)',
+                  '4. `create_vault` (owner, beneficiary, 24 h interval)',
+                  '5. `deposit` 10 XLM',
+                  '6. `check_in`',
+                  '7. `get_ttl_remaining` — assert non-null',
+                  '8. `cancel_vault` (cleanup)',
+                  '',
+                  'Check the workflow run for the failing step and investigate',
+                  'deployment fees, contract init, token setup, or network issues.',
+                  '',
+                  'Close this issue once the root cause is resolved.',
+                ].join('\n'),
+                labels: ['infrastructure', failureLabel],
+              });
+            }

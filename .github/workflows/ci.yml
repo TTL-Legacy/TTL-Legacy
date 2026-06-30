@@ -49,6 +49,13 @@ jobs:
       - name: Run security audit
         run: cargo audit --deny warnings
 
+      - name: Scan for secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: detect --source . --config .gitleaks.toml --redact --fail
+
       - name: Validate OpenAPI specification
         run: |
           if command -v spectacle &> /dev/null; then
