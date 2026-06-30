@@ -25,14 +25,30 @@ services:
     container_name: ttl-legacy-backend
     environment:
       DATABASE_URL: postgres://ttl_user:ttl_password@db:5432/ttl_legacy
+      REDIS_URL: redis://redis:6379
+      NODE_ID: backend-primary
+      CONSENSUS_STRATEGY: last_write_wins
       RUST_LOG: info
     ports:
       - "3000:3000"
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       - ./backend/src:/app/src
+
+  redis:
+    image: redis:7-alpine
+    container_name: ttl-legacy-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   stellar-quickstart:
     image: stellar/quickstart:latest

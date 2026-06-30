@@ -36,6 +36,9 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # JWT authentication for WebSocket connections
 jsonwebtoken = "9"
 
+# Distributed cache for multi-node consensus checks
+redis = "0.27"
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockito = "1.4"

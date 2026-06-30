@@ -11,16 +11,33 @@ use serde_json::json;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 
-use crate::{db::{Db, PoolConfig}, routes};
+use crate::{
+    consensus::{ConflictStrategy, InMemoryBackend, NodeCache},
+    db::{Db, PoolConfig},
+    routes,
+    AppState,
+};
+
+fn test_state(db: Arc<Db>) -> AppState {
+    db.migrate().unwrap();
+    let backend: Arc<InMemoryBackend> = Arc::new(InMemoryBackend::new());
+    let consensus = Arc::new(NodeCache::new(
+        "test-node",
+        backend,
+        ConflictStrategy::LastWriteWins,
+    ));
+    AppState { db, consensus }
+}
 
 fn test_app() -> Router {
     test_app_with_db(Arc::new(Db::open(":memory:").unwrap()))
 }
 
 fn test_app_with_db(db: Arc<Db>) -> Router {
-    db.migrate().unwrap();
+    let state = test_state(db);
     Router::new()
         .route("/health", get(health_handler))
+        .route("/health/consensus", get(consensus_health_handler))
         .route("/ready", get(ready_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
@@ -36,7 +53,7 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
             "/notifications/unsubscribe",
             get(routes::unsubscribe),
         )
-        .with_state(db)
+        .with_state(state)
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -46,13 +63,33 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn ready_handler(State(db): State<Arc<Db>>) -> Result<Json<serde_json::Value>, StatusCode> {
-    match db.check_connectivity() {
+async fn ready_handler(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.db.check_connectivity() {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
             "database": "connected",
         }))),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+async fn consensus_health_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.consensus.check_and_resolve() {
+        Ok(report) => {
+            let status = if report.consistent { "ok" } else { "degraded" };
+            Ok(Json(serde_json::json!({
+                "status": status,
+                "cache_consistent": report.consistent,
+                "node_id": report.node_id,
+                "strategy": report.strategy,
+                "conflicts_detected": report.conflicts.len(),
+                "conflicts_resolved": report.conflicts_resolved,
+                "keys_checked": report.keys_checked,
+            })))
+        }
         Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
@@ -191,6 +228,60 @@ async fn test_ready_endpoint() {
     assert_eq!(json["database"], "connected");
 }
 
+// ── #962: Multi-node consensus health check tests ────────────────────────────
+
+#[tokio::test]
+async fn test_consensus_health_endpoint_consistent() {
+    let app = test_app();
+    let res = get_req(app, "/health/consensus").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["cache_consistent"], true);
+    assert_eq!(json["node_id"], "test-node");
+    assert_eq!(json["strategy"], "last_write_wins");
+    assert_eq!(json["conflicts_detected"], 0);
+}
+
+#[tokio::test]
+async fn test_consensus_health_detects_and_resolves_divergence() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    let backend: Arc<InMemoryBackend> = Arc::new(InMemoryBackend::new());
+    let consensus = Arc::new(NodeCache::new(
+        "test-node",
+        Arc::clone(&backend),
+        ConflictStrategy::LastWriteWins,
+    ));
+    consensus.put("vault:99", "authoritative").unwrap();
+    consensus.set_local_entry(crate::consensus::CacheEntry {
+        key: "vault:99".to_string(),
+        value: "stale".to_string(),
+        node_id: "test-node".to_string(),
+        updated_at: chrono::Utc.timestamp_millis_opt(1).unwrap(),
+        version: 1,
+    });
+
+    let state = AppState {
+        db: Arc::clone(&db),
+        consensus,
+    };
+    db.migrate().unwrap();
+
+    let app = Router::new()
+        .route("/health/consensus", get(consensus_health_handler))
+        .with_state(state);
+
+    let res = get_req(app, "/health/consensus").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["cache_consistent"], false);
+    assert_eq!(json["conflicts_detected"], 1);
+    assert_eq!(json["conflicts_resolved"], 1);
+}
+
 // ── #822: Pool configuration tests ───────────────────────────────────────────
 
 #[tokio::test]
@@ -212,8 +303,7 @@ async fn test_db_open_with_pool_config() {
 
 #[tokio::test]
 async fn test_cors_allowed_origin() {
-    let db = Arc::new(Db::open(":memory:").unwrap());
-    db.migrate().unwrap();
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
 
     let cors = CorsLayer::new()
         .allow_origin("http://example.com".parse::<HeaderValue>().unwrap())
@@ -222,7 +312,7 @@ async fn test_cors_allowed_origin() {
     let app = Router::new()
         .route("/health", get(health_handler))
         .layer(cors)
-        .with_state(db);
+        .with_state(state);
 
     let res = app
         .oneshot(
@@ -246,8 +336,7 @@ async fn test_cors_allowed_origin() {
 
 #[tokio::test]
 async fn test_cors_rejected_origin() {
-    let db = Arc::new(Db::open(":memory:").unwrap());
-    db.migrate().unwrap();
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
 
     let cors = CorsLayer::new()
         .allow_origin("http://allowed.com".parse::<HeaderValue>().unwrap())
@@ -256,7 +345,7 @@ async fn test_cors_rejected_origin() {
     let app = Router::new()
         .route("/health", get(health_handler))
         .layer(cors)
-        .with_state(db);
+        .with_state(state);
 
     let res = app
         .oneshot(
