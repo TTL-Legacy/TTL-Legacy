@@ -29,6 +29,49 @@ Types: `feat`, `fix`, `test`, `docs`, `refactor`
 - Lint: `cargo clippy --package ttl-vault -- -D warnings`
 - Audit: `cargo audit`
 
+## Clippy Lint Policy
+
+We use a shared Clippy configuration so lint rules apply consistently across all
+workspace crates and match CI.
+
+### Running Clippy Locally
+
+```bash
+# Primary contract (same as CI)
+cargo clippy --package ttl-vault -- -D warnings
+
+# Any other workspace crate
+cargo clippy --package zk-verifier -- -D warnings
+cargo clippy --package ttl-legacy-backend -- -D warnings
+```
+
+The `-D warnings` flag promotes all warnings (including `clippy::pedantic`) to
+errors, matching CI behavior.
+
+### Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `.clippy.toml` | Clippy thresholds (complexity, argument counts, etc.) |
+| `Cargo.toml` `[workspace.lints.clippy]` | Lint levels, including `clippy::pedantic` and selective allows |
+
+Every workspace member opts in via `[lints] workspace = true` in its `Cargo.toml`.
+
+### Pedantic Lints
+
+The workspace enables `clippy::pedantic` at the warn level. Pedantic lints catch
+style and correctness issues beyond Clippy defaults. A set of **selective allows**
+in the root `Cargo.toml` documents accepted patterns for Soroban contracts (for
+example integer casts in ledger math, large contract APIs, and test helpers).
+
+To propose a new allow, add it to `[workspace.lints.clippy]` with a brief comment
+and explain the accepted pattern in your PR.
+
+### CI Integration
+
+CI runs `cargo clippy --package ttl-vault -- -D warnings` on every PR. Builds fail
+if any Clippy warning remains after the shared configuration is applied.
+
 ## Security Audit Process
 
 We use `cargo audit` to automatically detect and report security vulnerabilities in dependencies.
