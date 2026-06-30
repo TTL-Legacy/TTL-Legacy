@@ -147,6 +147,11 @@ async fn main() {
                 .delete(routes::delete_preferences),
         )
         .route(
+            "/api/vaults/:vault_id/subscriptions",
+            post(routes::set_subscription)
+                .delete(routes::delete_subscription),
+        )
+        .route(
             "/api/vaults/:vault_id/reminders",
             get(routes::list_vault_reminders),
         )

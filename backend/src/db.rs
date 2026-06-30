@@ -2,6 +2,7 @@ use crate::models::{
     Vault, VaultEvent, AuditEntry, SearchQuery, SearchResult, VaultStatus,
     VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
     ReminderPreferences, Channel, Frequency,
+    Subscription, SubscriptionChannel, SubscriptionFrequency,
 };
 
 use chrono::Utc;
@@ -764,6 +765,62 @@ impl Db {
             out.push(item?);
         }
         Ok(out)
+    }
+
+    pub fn upsert_subscription(&self, sub: &Subscription) -> Result<(), rusqlite::Error> {
+        let channels_json = serde_json::to_string(&sub.channels).unwrap();
+        let frequency_json = serde_json::to_string(&sub.frequency).unwrap();
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO vault_subscriptions (vault_id, owner, channels, frequency)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(vault_id) DO UPDATE SET
+              owner = excluded.owner,
+              channels = excluded.channels,
+              frequency = excluded.frequency
+            "#,
+            params![
+                sub.vault_id as i64,
+                sub.owner,
+                channels_json,
+                frequency_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_subscription(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM vault_subscriptions WHERE vault_id = ?1",
+            params![vault_id as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_subscription(&self, vault_id: u64) -> Result<Option<Subscription>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT vault_id, owner, channels, frequency
+               FROM vault_subscriptions
+               WHERE vault_id = ?1"#,
+        )?;
+        let row = stmt.query_row(params![vault_id as i64], |r| {
+            let channels_str: String = r.get(2)?;
+            let frequency_str: String = r.get(3)?;
+            let channels: Vec<SubscriptionChannel> = serde_json::from_str(&channels_str).unwrap_or_default();
+            let frequency: SubscriptionFrequency = serde_json::from_str(&frequency_str).unwrap();
+            Ok(Subscription {
+                vault_id: r.get::<_, i64>(0)? as u64,
+                owner: r.get(1)?,
+                channels,
+                frequency,
+            })
+        });
+        match row {
+            Ok(sub) => Ok(Some(sub)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     // ── Idempotency (#825) ──────────────────────────────────────────────────

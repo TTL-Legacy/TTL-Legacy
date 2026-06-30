@@ -368,6 +368,8 @@ pub enum DataKey {
     OwnerVaultCount(Address),
     // Issue #472: state transition audit trail
     StateTransitionLog(u64),
+    VaultSnapshot(u64, u64),
+    VaultSnapshotTimestamps(u64),
     // Issue #482: TTL prediction history
     CheckInHistory(u64),
     CheckInStreak(u64),
@@ -1382,3 +1384,13 @@ pub struct ProtocolConfig {
     /// reject metadata bytes that are not valid UTF-8 — Issue #871.
     pub require_utf8_metadata: bool,
 }
+
+/// Vault state snapshot at a specific point in time.
+#[contracttype]
+#[derive(Clone)]
+pub struct VaultSnapshot {
+    pub vault: Vault,
+    pub timestamp: u64,
+    pub content_hash: BytesN<32>,
+}
+

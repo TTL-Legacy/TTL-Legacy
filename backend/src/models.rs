@@ -523,6 +523,42 @@ pub struct NotificationPreferencesRequest {
     pub frequency: NotificationFrequency,
 }
 
+// ── Vault Notification Subscription System ──────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriptionChannel {
+    Email,
+    Sms,
+    Webhook,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriptionFrequency {
+    Once,
+    Daily,
+    Weekly,
+    Hourly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Subscription {
+    pub vault_id: u64,
+    pub owner: String,
+    pub channels: Vec<SubscriptionChannel>,
+    pub frequency: SubscriptionFrequency,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SetSubscriptionRequest {
+    pub owner: String,
+    pub channels: Vec<SubscriptionChannel>,
+    pub frequency: SubscriptionFrequency,
+}
+
+
 // ── Idempotency Key support (#825) ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

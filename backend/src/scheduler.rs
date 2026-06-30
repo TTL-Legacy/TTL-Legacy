@@ -23,17 +23,43 @@ pub async fn run(db: Arc<Db>) {
                     let ttl_hours = fetch_ttl_remaining(prefs.vault_id).await;
                     let window = prefs.hours_before_expiry;
 
-                    let should_notify = match prefs.frequency {
-                        Frequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
-                        Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
-                        Frequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
-                        Frequency::Hourly => ttl_hours <= window,
-                        Frequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
+                    let subscription = db.get_subscription(prefs.vault_id).ok().flatten();
+
+                    use crate::models::SubscriptionFrequency;
+                    let should_notify = if let Some(ref sub) = subscription {
+                        match sub.frequency {
+                            SubscriptionFrequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
+                            SubscriptionFrequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
+                            SubscriptionFrequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
+                            SubscriptionFrequency::Hourly => ttl_hours <= window,
+                            SubscriptionFrequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
+                        }
+                    } else {
+                        match prefs.frequency {
+                            Frequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
+                            Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
+                            Frequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
+                            Frequency::Hourly => ttl_hours <= window,
+                            Frequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
+                        }
                     };
 
                     if should_notify {
                         for channel in &prefs.channels {
-                            send_reminder(prefs.vault_id, channel, ttl_hours).await;
+                            let deliver_on_channel = if let Some(ref sub) = subscription {
+                                use crate::models::SubscriptionChannel;
+                                match channel {
+                                    crate::models::Channel::Email => sub.channels.contains(&SubscriptionChannel::Email),
+                                    crate::models::Channel::Sms => sub.channels.contains(&SubscriptionChannel::Sms),
+                                    crate::models::Channel::Push => false,
+                                }
+                            } else {
+                                true
+                            };
+
+                            if deliver_on_channel {
+                                send_reminder(prefs.vault_id, channel, ttl_hours).await;
+                            }
                         }
                     }
                 }

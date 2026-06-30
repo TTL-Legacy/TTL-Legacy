@@ -56,6 +56,11 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
                 .delete(routes::delete_preferences),
         )
         .route(
+            "/api/vaults/:vault_id/subscriptions",
+            post(routes::set_subscription)
+                .delete(routes::delete_subscription),
+        )
+        .route(
             "/api/vaults/:vault_id/reminders",
             get(routes::list_vault_reminders),
         )
@@ -401,6 +406,51 @@ async fn test_db_check_connectivity() {
     let db = Db::open(":memory:").unwrap();
     assert!(db.check_connectivity().is_ok());
 }
+
+#[tokio::test]
+async fn test_subscription_endpoints() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    let app = test_app_with_db(Arc::clone(&db));
+
+    // 1. Create a subscription via POST
+    let body = json!({
+        "owner": "owner_123",
+        "channels": ["email", "sms"],
+        "frequency": "weekly"
+    });
+    let res = post_json(app.clone(), "/api/vaults/42/subscriptions", body).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Verify it was saved in the DB
+    let sub = db.get_subscription(42).unwrap().unwrap();
+    assert_eq!(sub.vault_id, 42);
+    assert_eq!(sub.owner, "owner_123");
+    assert_eq!(sub.channels, vec![crate::models::SubscriptionChannel::Email, crate::models::SubscriptionChannel::Sms]);
+    assert_eq!(sub.frequency, crate::models::SubscriptionFrequency::Weekly);
+
+    // 2. Try to POST with empty channels (should fail with UNPROCESSABLE_ENTITY)
+    let bad_body = json!({
+        "owner": "owner_123",
+        "channels": [],
+        "frequency": "daily"
+    });
+    let res_bad = post_json(app.clone(), "/api/vaults/42/subscriptions", bad_body).await;
+    assert_eq!(res_bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // 3. Remove the subscription via DELETE
+    let delete_req = Request::builder()
+        .method("DELETE")
+        .uri("/api/vaults/42/subscriptions")
+        .body(Body::empty())
+        .unwrap();
+    let res_delete = app.clone().oneshot(delete_req).await.unwrap();
+    assert_eq!(res_delete.status(), StatusCode::NO_CONTENT);
+
+    // Verify it was removed from the DB
+    let deleted_sub = db.get_subscription(42).unwrap();
+    assert!(deleted_sub.is_none());
+}
+
 
 // ── Issue #851: Mocked HTTP tests for notification delivery ─────────────────
 
