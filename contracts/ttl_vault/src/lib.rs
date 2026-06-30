@@ -21,7 +21,7 @@ use types::{
     ProofOfLifeEntry, ReleaseVoteEntry,
     BeneficiaryRotationEntry,
     WithdrawalLimit, WithdrawalTracker, WhitelistEntry, WithdrawalReversal,
-    EXPIRY_WARNING_THRESHOLD, BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC, BENEFICIARY_TIER_SET_TOPIC,
+    EXPIRY_WARNING_THRESHOLD, TTL_WARNING_TOPIC, BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC, BENEFICIARY_TIER_SET_TOPIC,
     BENEFICIARY_WATERFALL_TOPIC, BENEFICIARY_REBALANCED_TOPIC, CANCEL_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, VESTING_CANCELLED_TOPIC, DEPOSIT_TOPIC, OWNERSHIP_TOPIC, PAUSE_TOPIC, PING_EXPIRY_TOPIC,
     RELEASE_TOPIC, SET_BENEFICIARIES_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MIN_INTERVAL_TOPIC,
@@ -1345,6 +1345,11 @@ impl TtlVaultContract {
         env.storage().persistent().remove(&DataKey::CountdownFired(vault_id));
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
+        // Emit TTL warning if the vault's check-in interval is below the expiry threshold.
+        // After a successful check-in, remaining TTL equals check_in_interval.
+        if vault.check_in_interval < EXPIRY_WARNING_THRESHOLD {
+            env.events().publish((TTL_WARNING_TOPIC, vault_id), vault.check_in_interval);
+        }
         Ok(())
     }
     ///
