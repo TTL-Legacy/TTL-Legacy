@@ -208,16 +208,16 @@ fn test_auction_bid_ordering() {
 
     env.ledger().set_timestamp((start + 10) as u64);
 
-    let mut bidders = vec![];
-    let mut bids = vec![];
+    let mut bidders = vec![&env];
+    let mut bids = vec![&env];
 
     // Place 5 bids in random order
     for i in 0..5 {
         let bidder = Address::generate(&env);
         let amount = 300_000i128 + (i as i128 * 100_000i128);
         client.place_auction_bid(&vault_id, &bidder, &amount, &2_000u32);
-        bidders.push(bidder);
-        bids.push(amount);
+        bidders.push_back(bidder);
+        bids.push_back(amount);
     }
 
     let auction = client.get_beneficiary_auction(&vault_id).unwrap();
@@ -226,8 +226,8 @@ fn test_auction_bid_ordering() {
     // Verify all bids recorded
     for i in 0..5 {
         let bid = auction.bids.get(i).unwrap();
-        assert_eq!(bid.bidder, bidders[i]);
-        assert_eq!(bid.bid_amount, bids[i]);
+        assert_eq!(bid.bidder, bidders.get(i).unwrap());
+        assert_eq!(bid.bid_amount, bids.get(i).unwrap());
     }
 }
 

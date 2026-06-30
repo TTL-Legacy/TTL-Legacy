@@ -8,9 +8,11 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
+    audit,
     db::Db,
     error::AppError,
-    models::{ReminderPreferences, SetPreferencesRequest},
+    handlers::{parse_scenario_types, simulate_release_handler},
+    models::{ReminderPreferences, SetPreferencesRequest, SimulateReleaseQuery, SimulateReleaseResponse},
 };
 
 #[derive(Deserialize)]
@@ -19,10 +21,11 @@ pub struct RemindersQuery {
 }
 
 pub async fn list_vault_reminders(
-    State(db): State<Arc<Db>>,
+    State(state): State<Arc<AppState>>,
     Path(vault_id): Path<u64>,
     Query(query): Query<RemindersQuery>,
 ) -> Result<Json<Vec<ReminderPreferences>>, AppError> {
+    let db = &state.db;
     let records = if query.include_deleted.unwrap_or(false) {
         db.all_reminders_including_deleted(vault_id)?
     } else {
@@ -35,19 +38,20 @@ pub async fn list_vault_reminders(
 }
 
 pub async fn delete_preferences(
-    State(db): State<Arc<Db>>,
+    State(state): State<Arc<AppState>>,
     Path(vault_id): Path<u64>,
 ) -> Result<StatusCode, AppError> {
-    db.soft_delete_reminder(vault_id)?;
+    state.db.soft_delete_reminder(vault_id)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn set_preferences(
-    State(db): State<Arc<Db>>,
+    State(state): State<Arc<AppState>>,
     Path(vault_id): Path<u64>,
     headers: HeaderMap,
     Json(body): Json<SetPreferencesRequest>,
 ) -> Result<(StatusCode, Json<ReminderPreferences>), AppError> {
+    let db = &state.db;
     if body.channels.is_empty() {
         return Err(AppError::InvalidInput("channels must not be empty".into()));
     }
@@ -85,9 +89,10 @@ pub async fn set_preferences(
 }
 
 pub async fn get_preferences(
-    State(db): State<Arc<Db>>,
+    State(state): State<Arc<AppState>>,
     Path(vault_id): Path<u64>,
 ) -> Result<Json<ReminderPreferences>, AppError> {
+    let db = &state.db;
     match db.get(vault_id) {
         Ok(prefs) => Ok(Json(prefs)),
         Err(_e) => Err(AppError::NotFound),
@@ -102,9 +107,10 @@ pub struct UnsubscribeQuery {
 }
 
 pub async fn unsubscribe(
-    State(db): State<Arc<Db>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<UnsubscribeQuery>,
 ) -> Result<(StatusCode, String), AppError> {
+    let db = &state.db;
     match db.process_unsubscribe(&query.token) {
         Ok(owner) => Ok((
             StatusCode::OK,
@@ -116,3 +122,31 @@ pub async fn unsubscribe(
     }
 }
 
+
+// ── Release Simulator endpoint ────────────────────────────────────────────────
+
+/// GET /api/vaults/:vault_id/simulate-release?scenarios=no_check_ins,consistent_check_ins,missed_check_in_dates&missed_count=2
+pub async fn simulate_release(
+    State(db): State<Arc<Db>>,
+    Path(vault_id): Path<String>,
+    Query(query): Query<SimulateReleaseQuery>,
+) -> Result<Json<SimulateReleaseResponse>, AppError> {
+    let scenarios = parse_scenario_types(query.scenarios.as_deref());
+    if scenarios.is_empty() {
+        return Err(AppError::InvalidInput(
+            "No valid scenarios requested. Use: no_check_ins, consistent_check_ins, missed_check_in_dates".into(),
+        ));
+    }
+
+    let missed_count = query.missed_count.unwrap_or(1);
+
+    let result = simulate_release_handler(
+        &db.vault_store,
+        &vault_id,
+        scenarios,
+        missed_count,
+    )
+    .map_err(|_| AppError::NotFound)?;
+
+    Ok(Json(result))
+}
