@@ -82,7 +82,7 @@ Related documents: [Threat Model & Security](security.md) · [Security Policy](.
 
 ## 10. Upgrade & Versioning
 
-- [ ] Contract version is stored and readable via `get_version`
+- [ ] Contract version is stored and readable via `get_contract_version`
 - [ ] Any upgrade path preserves existing vault data layout
 - [ ] Breaking storage key changes are documented and migration tested
 

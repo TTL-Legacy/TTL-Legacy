@@ -35,6 +35,8 @@ tags:
     description: Share vault access with other users
   - name: Vault Backup
     description: Backup and recovery operations
+  - name: Release Simulator
+    description: Project vault release dates under different check-in behaviour scenarios
 
 paths:
   /health:
@@ -716,6 +718,90 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/vaults/{vault_id}/simulate-release:
+    get:
+      summary: Simulate vault release scenarios
+      description: >
+        Projects when a vault will release to its beneficiary under one or more
+        check-in behaviour scenarios. Useful for owners who want to understand
+        the impact of their check-in habits on release timing.
+      operationId: simulateVaultRelease
+      tags:
+        - Release Simulator
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          description: The ID of the vault to simulate
+          schema:
+            type: string
+          example: vault-abc-123
+        - name: scenarios
+          in: query
+          required: false
+          description: >
+            Comma-separated list of scenarios to run. Defaults to all three when
+            omitted. Valid values: `no_check_ins`, `consistent_check_ins`,
+            `missed_check_in_dates`.
+          schema:
+            type: string
+            example: "no_check_ins,missed_check_in_dates"
+        - name: missed_count
+          in: query
+          required: false
+          description: >
+            For the `missed_check_in_dates` scenario: number of consecutive
+            check-ins the owner misses before stopping entirely. Defaults to 1.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 2
+      responses:
+        '200':
+          description: Simulation results for the requested scenarios
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimulateReleaseResponse'
+              example:
+                vault_id: "vault-abc-123"
+                current_ttl_remaining: 86400
+                check_in_interval: 2592000
+                last_check_in: "2026-06-29T10:00:00Z"
+                simulated_at: "2026-06-30T06:39:00Z"
+                scenarios:
+                  - scenario: "no_check_ins"
+                    description: "Owner performs no further check-ins. Vault releases when the current TTL expires."
+                    projected_release_at: "2026-07-01T06:39:00Z"
+                    seconds_until_release: 86400
+                    confidence: "high"
+                    notes: "Current TTL remaining: 86400 seconds (1.0 days)."
+                  - scenario: "consistent_check_ins"
+                    description: "Owner checks in consistently at the configured interval. Vault does not release."
+                    projected_release_at: "2126-06-30T06:39:00Z"
+                    seconds_until_release: -1
+                    confidence: "high"
+                    notes: "With a check-in interval of 2592000 seconds (30.0 days), consistent check-ins prevent vault release indefinitely."
+                  - scenario: "missed_check_in_dates"
+                    description: "Owner misses 1 consecutive check-in(s), then stops entirely."
+                    projected_release_at: "2026-08-01T06:39:00Z"
+                    seconds_until_release: 2678400
+                    confidence: "medium"
+                    notes: "Each missed check-in adds 2592000 seconds (30.0 days) to the release window. 1 missed check-in(s) → 2592000 additional seconds."
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid scenario name(s) specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ErrorResponse:
@@ -1187,6 +1273,95 @@ components:
       required:
         - backup_id
         - encryption_key
+
+    ScenarioType:
+      type: string
+      enum:
+        - no_check_ins
+        - consistent_check_ins
+        - missed_check_in_dates
+      description: >
+        The check-in behaviour scenario to simulate.
+
+        - `no_check_ins` — owner never checks in again; vault releases when current TTL expires.
+        - `consistent_check_ins` — owner checks in at every interval indefinitely; vault never releases.
+        - `missed_check_in_dates` — owner misses N consecutive check-ins, then stops.
+
+    ScenarioResult:
+      type: object
+      description: Projected release outcome for a single scenario
+      properties:
+        scenario:
+          $ref: '#/components/schemas/ScenarioType'
+        description:
+          type: string
+          description: Human-readable description of the scenario assumptions
+        projected_release_at:
+          type: string
+          format: date-time
+          description: >
+            Projected UTC timestamp when the vault will release under this scenario.
+            For `consistent_check_ins`, this is a far-future sentinel value.
+        seconds_until_release:
+          type: integer
+          format: int64
+          description: >
+            Seconds from simulation time until projected release.
+            -1 means the vault will never release under this scenario.
+        confidence:
+          type: string
+          enum: [high, medium, low]
+          description: >
+            Confidence in the projection.
+            `high` — deterministic given vault state.
+            `medium` — 1–2 missed check-ins assumed.
+            `low` — 3+ missed check-ins assumed (higher uncertainty).
+        notes:
+          type: string
+          description: Additional context about the scenario's assumptions and calculations
+      required:
+        - scenario
+        - description
+        - projected_release_at
+        - seconds_until_release
+        - confidence
+        - notes
+
+    SimulateReleaseResponse:
+      type: object
+      description: Response containing simulation results for one or more release scenarios
+      properties:
+        vault_id:
+          type: string
+          description: The ID of the vault that was simulated
+        current_ttl_remaining:
+          type: integer
+          format: int64
+          nullable: true
+          description: Current TTL remaining in seconds; null if not known or already expired
+        check_in_interval:
+          type: integer
+          format: int64
+          description: The vault's configured check-in interval in seconds
+        last_check_in:
+          type: string
+          format: date-time
+          description: Timestamp of the last recorded check-in
+        scenarios:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioResult'
+          description: Simulation results, one per requested scenario
+        simulated_at:
+          type: string
+          format: date-time
+          description: Timestamp when this simulation was generated
+      required:
+        - vault_id
+        - check_in_interval
+        - last_check_in
+        - scenarios
+        - simulated_at
 
   securitySchemes:
     ApiKeyAuth:

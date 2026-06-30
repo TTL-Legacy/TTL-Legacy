@@ -3,6 +3,9 @@ name = "ttl-legacy-backend"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [dependencies]
 actix-web = "4"
 actix-rt = "2"
@@ -36,12 +39,8 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 # JWT authentication for WebSocket connections
 jsonwebtoken = "9"
 
-# Two-factor authentication
-totp-rs = { version = "5", default-features = false, features = ["gen_secret", "otpauth", "sha1"] }
-rand = "0.8"
-hmac = "0.12"
-sha1 = "0.10"
-once_cell = "1"
+# Distributed cache for multi-node consensus checks
+redis = "0.27"
 
 [dev-dependencies]
 tokio-test = "0.4"

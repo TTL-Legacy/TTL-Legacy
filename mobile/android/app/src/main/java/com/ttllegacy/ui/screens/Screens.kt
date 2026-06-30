@@ -20,6 +20,7 @@ import com.ttllegacy.models.TwoFactorStatus
 import com.ttllegacy.models.Enable2FARequest
 import com.ttllegacy.models.Verify2FARequest
 import com.ttllegacy.services.BiometricHelper
+import com.ttllegacy.services.VaultDeepLinkAction
 import com.ttllegacy.ui.AuthViewModel
 import com.ttllegacy.ui.VaultViewModel
 import com.ttllegacy.ui.TwoFactorViewModel
@@ -317,6 +318,111 @@ fun BeneficiaryAcceptanceScreen(
         ) {
             Text("Decline")
         }
+    }
+}
+
+// MARK: - Vault Deep Link Screen
+
+@Composable
+fun VaultDeepLinkScreen(
+    vaultId: String,
+    actionPath: String,
+    onDone: () -> Unit,
+    vm: VaultViewModel = hiltViewModel()
+) {
+    val action = VaultDeepLinkAction.fromPathSegment(actionPath)
+    val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    var isProcessing by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) { vm.load() }
+
+    val vault = state.vaults.find { it.id == vaultId }
+    val (title, description) = when (action) {
+        VaultDeepLinkAction.CHECK_IN -> "Check In" to "Confirm check-in for vault ${vaultId.take(12)}…"
+        VaultDeepLinkAction.WITHDRAW -> "Withdraw" to "Withdraw funds from vault ${vaultId.take(12)}…"
+        VaultDeepLinkAction.VIEW_DETAILS -> "Vault Details" to "View details for vault ${vaultId.take(12)}…"
+        VaultDeepLinkAction.MANAGE_BENEFICIARY -> "Manage Beneficiary" to "Update beneficiary for vault ${vaultId.take(12)}…"
+        null -> "Vault Link" to "Unrecognised vault action."
+    }
+
+    if (action == VaultDeepLinkAction.VIEW_DETAILS && vault != null) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(12.dp))
+            VaultCard(vault = vault, onClick = {}, onCheckIn = {})
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("Done") }
+        }
+        return
+    }
+
+    val displayError = error ?: if (action == VaultDeepLinkAction.VIEW_DETAILS && vault == null) {
+        "Vault not found"
+    } else {
+        null
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Spacer(Modifier.height(8.dp))
+        Text(description, style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        displayError?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(24.dp))
+        when (action) {
+            VaultDeepLinkAction.CHECK_IN -> {
+                Button(
+                    onClick = {
+                        if (vault == null) {
+                            error = "Vault not found"
+                            return@Button
+                        }
+                        isProcessing = true
+                        error = null
+                        BiometricHelper(context as ComponentActivity).authenticate(
+                            title = "Confirm Check-In",
+                            subtitle = "Vault ${vault.id.take(12)}…",
+                            onSuccess = {
+                                vm.checkIn(vault.id)
+                                isProcessing = false
+                                onDone()
+                            },
+                            onError = { err ->
+                                error = err
+                                isProcessing = false
+                            }
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isProcessing && vault != null
+                ) { Text(if (isProcessing) "Processing…" else "Check In") }
+            }
+            VaultDeepLinkAction.WITHDRAW -> {
+                Button(
+                    onClick = { error = "Withdrawal is not yet available in the mobile app." },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Withdraw") }
+            }
+            VaultDeepLinkAction.MANAGE_BENEFICIARY -> {
+                Button(
+                    onClick = { error = "Beneficiary management is not yet available in the mobile app." },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Manage Beneficiary") }
+            }
+            VaultDeepLinkAction.VIEW_DETAILS, null -> Unit
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onDone, modifier = Modifier.fillMaxWidth()) { Text("Done") }
     }
 }
 

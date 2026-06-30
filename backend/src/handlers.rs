@@ -1,6 +1,6 @@
 use crate::models::*;
 use crate::db::*;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
@@ -446,6 +446,8 @@ pub fn set_notification_preferences_handler(
         .ok_or_else(|| "Vault not found".to_string())?;
 
     // Map HTTP channels into legacy boolean flags.
+    let preferred = request.channels.first().cloned();
+    let fallback = request.channels.get(1).cloned();
     let prefs = NotificationPreferences {
         owner: vault_id.to_string(),
         expiry_warning_enabled: request
@@ -462,6 +464,9 @@ pub fn set_notification_preferences_handler(
             .any(|c| matches!(c, NotificationChannel::Push)),
         warning_hours_before: 24,
         locale: None,
+        preferred_channel: preferred,
+        fallback_channel: fallback,
+        unsubscribed: false,
     };
 
     set_notification_preferences(notif_store, prefs.clone());
@@ -982,4 +987,171 @@ mod tests {
         };
         assert!(set_notification_preferences_handler(&store, &notif_store, "v1", req).is_err());
     }
+}
+
+// ── Release Simulator ────────────────────────────────────────────────────────
+
+/// Parse a comma-separated `scenarios` query param into a `Vec<ScenarioType>`.
+/// Returns all three scenarios when the param is absent or empty.
+pub fn parse_scenario_types(raw: Option<&str>) -> Vec<ScenarioType> {
+    match raw {
+        None | Some("") => vec![
+            ScenarioType::NoCheckIns,
+            ScenarioType::ConsistentCheckIns,
+            ScenarioType::MissedCheckInDates,
+        ],
+        Some(s) => s
+            .split(',')
+            .filter_map(|part| match part.trim() {
+                "no_check_ins" => Some(ScenarioType::NoCheckIns),
+                "consistent_check_ins" => Some(ScenarioType::ConsistentCheckIns),
+                "missed_check_in_dates" => Some(ScenarioType::MissedCheckInDates),
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
+/// Calculate the release date for a single scenario given vault state at `now`.
+///
+/// * `ttl_remaining_secs` — current TTL left in seconds (0 means already expired)
+/// * `check_in_interval`  — vault's configured check-in interval in seconds
+/// * `missed_count`       — for `MissedCheckInDates`: how many consecutive
+///   check-ins are missed before the owner stops entirely
+pub fn simulate_scenario(
+    now: DateTime<Utc>,
+    scenario: ScenarioType,
+    ttl_remaining_secs: u64,
+    check_in_interval: u64,
+    missed_count: u32,
+) -> ScenarioResult {
+    match scenario {
+        // Owner stops checking in immediately — vault releases when current TTL runs out.
+        ScenarioType::NoCheckIns => {
+            let release_at = now + chrono::Duration::seconds(ttl_remaining_secs as i64);
+            let seconds_until = ttl_remaining_secs as i64;
+            ScenarioResult {
+                scenario: ScenarioType::NoCheckIns,
+                description: "Owner performs no further check-ins. \
+                    Vault releases when the current TTL expires."
+                    .to_string(),
+                projected_release_at: release_at,
+                seconds_until_release: seconds_until,
+                confidence: "high".to_string(),
+                notes: format!(
+                    "Current TTL remaining: {} seconds ({:.1} days).",
+                    ttl_remaining_secs,
+                    ttl_remaining_secs as f64 / 86_400.0
+                ),
+            }
+        }
+
+        // Owner keeps checking in every `check_in_interval` seconds indefinitely.
+        // The vault never releases under this scenario.
+        ScenarioType::ConsistentCheckIns => {
+            // 100 years in seconds as a "never" sentinel
+            let never_secs: i64 = 100 * 365 * 24 * 3600;
+            let far_future = now + chrono::Duration::seconds(never_secs);
+            ScenarioResult {
+                scenario: ScenarioType::ConsistentCheckIns,
+                description: "Owner checks in consistently at the configured interval. \
+                    Vault does not release."
+                    .to_string(),
+                projected_release_at: far_future,
+                seconds_until_release: -1, // -1 signals "never" to clients
+                confidence: "high".to_string(),
+                notes: format!(
+                    "With a check-in interval of {} seconds ({:.1} days), \
+                    consistent check-ins prevent vault release indefinitely.",
+                    check_in_interval,
+                    check_in_interval as f64 / 86_400.0
+                ),
+            }
+        }
+
+        // Owner misses `missed_count` consecutive check-ins, then stops.
+        // Each missed check-in adds one full `check_in_interval` to the TTL runway.
+        ScenarioType::MissedCheckInDates => {
+            let safe_missed = missed_count.max(1);
+            // After missing `safe_missed` check-ins the TTL has been running down
+            // for `safe_missed * check_in_interval` additional seconds beyond the current TTL.
+            let extra_seconds = (safe_missed as u64).saturating_mul(check_in_interval);
+            let total_seconds = ttl_remaining_secs.saturating_add(extra_seconds);
+            let release_at = now + chrono::Duration::seconds(total_seconds as i64);
+            let confidence = if safe_missed <= 2 { "medium" } else { "low" }.to_string();
+            ScenarioResult {
+                scenario: ScenarioType::MissedCheckInDates,
+                description: format!(
+                    "Owner misses {} consecutive check-in(s), then stops entirely.",
+                    safe_missed
+                ),
+                projected_release_at: release_at,
+                seconds_until_release: total_seconds as i64,
+                confidence,
+                notes: format!(
+                    "Each missed check-in adds {} seconds ({:.1} days) to the release window. \
+                    {} missed check-in(s) → {} additional seconds.",
+                    check_in_interval,
+                    check_in_interval as f64 / 86_400.0,
+                    safe_missed,
+                    extra_seconds
+                ),
+            }
+        }
+    }
+}
+
+/// Public entry point: simulate release scenarios for a vault.
+///
+/// Returns `Err` with a message when the vault is not found.
+pub fn simulate_release_handler(
+    store: &VaultStore,
+    vault_id: &str,
+    scenario_types: Vec<ScenarioType>,
+    missed_count: u32,
+) -> Result<SimulateReleaseResponse, String> {
+    let vaults = store.lock().unwrap();
+    let vault = vaults
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| format!("Vault '{}' not found", vault_id))?;
+    drop(vaults);
+
+    let now = Utc::now();
+
+    // Compute effective TTL remaining: prefer the stored value, fall back to
+    // computing from last_check_in + check_in_interval.
+    let ttl_remaining_secs: u64 = match vault.ttl_remaining {
+        Some(t) => t,
+        None => {
+            let elapsed = now
+                .signed_duration_since(vault.last_check_in)
+                .num_seconds()
+                .max(0) as u64;
+            vault.check_in_interval.saturating_sub(elapsed)
+        }
+    };
+
+    let effective_missed = missed_count.max(1);
+    let scenario_results: Vec<ScenarioResult> = scenario_types
+        .into_iter()
+        .map(|s| {
+            simulate_scenario(
+                now,
+                s,
+                ttl_remaining_secs,
+                vault.check_in_interval,
+                effective_missed,
+            )
+        })
+        .collect();
+
+    Ok(SimulateReleaseResponse {
+        vault_id: vault.id,
+        current_ttl_remaining: vault.ttl_remaining,
+        check_in_interval: vault.check_in_interval,
+        last_check_in: vault.last_check_in,
+        scenarios: scenario_results,
+        simulated_at: now,
+    })
 }

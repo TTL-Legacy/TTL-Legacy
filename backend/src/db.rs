@@ -1,7 +1,7 @@
 use crate::models::{
     Vault, VaultEvent, AuditEntry, SearchQuery, SearchResult, VaultStatus,
-    VaultBackup, VaultShare, VaultNotificationPreferences,
-    ReminderPreferences, Channel, Frequency, TwoFactorConfig, TwoFactorMethod,
+    VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
+    ReminderPreferences, Channel, Frequency,
 };
 
 use chrono::Utc;
@@ -452,6 +452,8 @@ impl PoolConfig {
 pub struct Db {
     conn: std::sync::Mutex<Connection>,
     pool_config: PoolConfig,
+    /// In-memory vault store shared across the application.
+    pub vault_store: VaultStore,
 }
 
 impl Db {
@@ -469,7 +471,18 @@ impl Db {
                 max: config.max,
                 timeout_secs: config.timeout_secs,
             },
+            vault_store: create_vault_store(),
         })
+    }
+
+    /// Insert or replace a vault in the in-memory store.
+    pub fn insert_vault(&self, vault: crate::models::Vault) {
+        self.vault_store.lock().unwrap().insert(vault.id.clone(), vault);
+    }
+
+    /// Retrieve a vault from the in-memory store by string ID.
+    pub fn get_vault(&self, vault_id: &str) -> Option<crate::models::Vault> {
+        self.vault_store.lock().unwrap().get(vault_id).cloned()
     }
 
     pub fn check_connectivity(&self) -> Result<(), rusqlite::Error> {
@@ -533,16 +546,19 @@ impl Db {
             (
                 "3",
                 r#"
-                CREATE TABLE IF NOT EXISTS two_factor_config (
-                    vault_id     TEXT PRIMARY KEY,
-                    method       TEXT NOT NULL,
-                    enabled      INTEGER NOT NULL DEFAULT 0,
-                    secret       TEXT,
-                    phone        TEXT,
-                    email        TEXT,
-                    created_at   TEXT NOT NULL,
-                    verified_at  TEXT
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp  TEXT NOT NULL,
+                    user_id    TEXT NOT NULL DEFAULT '',
+                    action     TEXT NOT NULL,
+                    resource   TEXT NOT NULL DEFAULT '',
+                    result     TEXT NOT NULL DEFAULT 'success',
+                    ip_address TEXT NOT NULL DEFAULT '',
+                    details    TEXT
                 );
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id   ON audit_logs(user_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_action    ON audit_logs(action);
                 "#,
             ),
         ];
@@ -774,89 +790,107 @@ impl Db {
         token
     }
 
-    // ── 2FA operations (#965) ───────────────────────────────────────────────
+    // ── Audit Log persistence (#961) ─────────────────────────────────────────
 
-    pub fn upsert_2fa_config(&self, config: &TwoFactorConfig) -> Result<(), rusqlite::Error> {
-        let enabled_i = if config.enabled { 1i64 } else { 0i64 };
-        let verified_at = config.verified_at.map(|d| d.to_rfc3339());
-        let method_str = serde_json::to_string(&config.method).unwrap();
-
+    pub fn insert_audit_log(&self, entry: &AuditLogEntry) -> Result<(), rusqlite::Error> {
         self.conn.lock().unwrap().execute(
             r#"
-            INSERT INTO two_factor_config (vault_id, method, enabled, secret, phone, email, created_at, verified_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            ON CONFLICT(vault_id) DO UPDATE SET
-                method = excluded.method,
-                enabled = excluded.enabled,
-                secret = excluded.secret,
-                phone = excluded.phone,
-                email = excluded.email,
-                created_at = excluded.created_at,
-                verified_at = excluded.verified_at
+            INSERT INTO audit_logs (timestamp, user_id, action, resource, result, ip_address, details)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
-                config.vault_id,
-                method_str,
-                enabled_i,
-                config.secret,
-                config.phone,
-                config.email,
-                config.created_at.to_rfc3339(),
-                verified_at,
+                entry.timestamp.to_rfc3339(),
+                entry.user_id,
+                entry.action,
+                entry.resource,
+                entry.result,
+                entry.ip_address,
+                entry.details.as_ref().map(|d| d.to_string()),
             ],
         )?;
         Ok(())
     }
 
-    pub fn get_2fa_config(&self, vault_id: &str) -> Result<Option<TwoFactorConfig>, rusqlite::Error> {
-        let binding = self.conn.lock().unwrap();
-        let mut stmt = binding.prepare(
-            r#"
-            SELECT vault_id, method, enabled, secret, phone, email, created_at, verified_at
-            FROM two_factor_config
-            WHERE vault_id = ?1
-            "#,
-        )?;
+    pub fn query_audit_logs(&self, query: &AuditLogQuery) -> Result<Vec<AuditLogEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
 
-        let row_res = stmt.query_row(params![vault_id], |r| {
-            let method_str: String = r.get(1)?;
-            let method: TwoFactorMethod = serde_json::from_str(&method_str)
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?;
-            let enabled_i: i64 = r.get(2)?;
-            let created_at_str: String = r.get(6)?;
-            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e)))?;
-            let verified_at_str: Option<String> = r.get(7)?;
-            let verified_at = verified_at_str.and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(&s).ok().map(|dt| dt.with_timezone(&chrono::Utc))
-            });
+        let mut sql = String::from(
+            "SELECT id, timestamp, user_id, action, resource, result, ip_address, details FROM audit_logs WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-            Ok(TwoFactorConfig {
-                vault_id: r.get(0)?,
-                method,
-                enabled: enabled_i != 0,
-                secret: r.get(3)?,
-                phone: r.get(4)?,
-                email: r.get(5)?,
-                created_at,
-                verified_at,
-            })
-        });
-
-        match row_res {
-            Ok(c) => Ok(Some(c)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
+        if let Some(ref user_id) = query.user_id {
+            sql.push_str(" AND user_id = ?");
+            param_values.push(Box::new(user_id.clone()));
         }
+        if let Some(ref action) = query.action {
+            sql.push_str(" AND action = ?");
+            param_values.push(Box::new(action.clone()));
+        }
+        if let Some(ref resource) = query.resource {
+            sql.push_str(" AND resource = ?");
+            param_values.push(Box::new(resource.clone()));
+        }
+        if let Some(ref result_val) = query.result {
+            sql.push_str(" AND result = ?");
+            param_values.push(Box::new(result_val.clone()));
+        }
+        if let Some(after) = query.after {
+            sql.push_str(" AND timestamp >= ?");
+            param_values.push(Box::new(after.to_rfc3339()));
+        }
+        if let Some(before) = query.before {
+            sql.push_str(" AND timestamp <= ?");
+            param_values.push(Box::new(before.to_rfc3339()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(100);
+        let offset = query.offset.unwrap_or(0);
+        sql.push_str(" LIMIT ? OFFSET ?");
+        param_values.push(Box::new(limit));
+        param_values.push(Box::new(offset));
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            let timestamp_str: String = r.get(1)?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                    1, rusqlite::types::Type::Text, Box::new(e),
+                ))?;
+            let details_str: Option<String> = r.get(7)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(AuditLogEntry {
+                id: r.get(0)?,
+                timestamp,
+                user_id: r.get(2)?,
+                action: r.get(3)?,
+                resource: r.get(4)?,
+                result: r.get(5)?,
+                ip_address: r.get(6)?,
+                details,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
-    pub fn delete_2fa_config(&self, vault_id: &str) -> Result<(), rusqlite::Error> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM two_factor_config WHERE vault_id = ?1",
-            params![vault_id],
+    pub fn purge_old_audit_logs(&self, retention_days: i64) -> Result<u64, rusqlite::Error> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM audit_logs WHERE timestamp < ?1",
+            params![cutoff],
         )?;
-        Ok(())
+        Ok(count as u64)
     }
 }
 
@@ -929,4 +963,67 @@ mod tests {
         assert_eq!(result.total, 25);
         assert_eq!(result.page, 2);
     }
+}
+
+// ── Cache-aware vault accessors ───────────────────────────────────────────────
+
+use crate::cache::VaultCache;
+use crate::models::VaultSummary;
+
+/// Retrieve a `Vault` from the in-memory store, consulting the cache first.
+///
+/// On a cache miss the vault is fetched from `store`, inserted into the cache
+/// and then returned. Returns `None` if the vault does not exist in the store.
+pub fn get_vault_cached(
+    store: &VaultStore,
+    cache: &VaultCache,
+    vault_id: &str,
+) -> Option<crate::models::Vault> {
+    if let Some(v) = cache.get_vault(vault_id) {
+        return Some(v);
+    }
+    let vault = store.lock().unwrap().get(vault_id).cloned()?;
+    cache.set_vault(vault_id, vault.clone());
+    Some(vault)
+}
+
+/// Retrieve the TTL-remaining value for a vault, consulting the cache first.
+///
+/// Returns `None` if the vault does not exist in the store.
+pub fn get_ttl_remaining_cached(
+    store: &VaultStore,
+    cache: &VaultCache,
+    vault_id: &str,
+) -> Option<Option<u64>> {
+    if let Some(ttl) = cache.get_ttl_remaining(vault_id) {
+        return Some(ttl);
+    }
+    let vault = store.lock().unwrap().get(vault_id).cloned()?;
+    let ttl = vault.ttl_remaining;
+    cache.set_ttl_remaining(vault_id, ttl);
+    Some(ttl)
+}
+
+/// Retrieve a lightweight `VaultSummary` for a vault, consulting the cache
+/// first.
+///
+/// Returns `None` if the vault does not exist in the store.
+pub fn get_vault_summary_cached(
+    store: &VaultStore,
+    cache: &VaultCache,
+    vault_id: &str,
+) -> Option<VaultSummary> {
+    if let Some(s) = cache.get_vault_summary(vault_id) {
+        return Some(s);
+    }
+    let vault = store.lock().unwrap().get(vault_id).cloned()?;
+    let summary = VaultSummary::from(&vault);
+    cache.set_vault_summary(vault_id, summary.clone());
+    Some(summary)
+}
+
+/// Invalidate all cached entries for `vault_id`.  Must be called whenever
+/// a check-in or state-change event modifies vault state.
+pub fn invalidate_vault_cache(cache: &VaultCache, vault_id: &str) {
+    cache.invalidate(vault_id);
 }

@@ -1,17 +1,21 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
-    extract::State,
-    http::{HeaderValue, Method},
+    extract::{FromRef, State},
+    http::{HeaderValue, Method, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
+mod consensus;
 mod db;
 mod error;
+mod handlers;
 mod models;
+mod notifications;
 mod routes;
 mod scheduler;
 mod two_factor;
@@ -19,7 +23,20 @@ mod two_factor;
 #[cfg(test)]
 mod tests;
 
+pub use consensus::NodeCache;
 pub use db::Db;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: Arc<Db>,
+    pub consensus: Arc<NodeCache>,
+}
+
+impl FromRef<AppState> for Arc<Db> {
+    fn from_ref(state: &AppState) -> Arc<Db> {
+        Arc::clone(&state.db)
+    }
+}
 
 fn build_cors_layer() -> CorsLayer {
     let allowed_origins = std::env::var("ALLOWED_ORIGINS").unwrap_or_default();
@@ -51,14 +68,36 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn ready_handler(State(db): State<Arc<Db>>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    match db.check_connectivity() {
+async fn ready_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.db.check_connectivity() {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
             "database": "connected",
         }))),
-        Err(_) => Err(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+async fn consensus_health_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.consensus.check_and_resolve() {
+        Ok(report) => {
+            let status = if report.consistent { "ok" } else { "degraded" };
+            Ok(Json(serde_json::json!({
+                "status": status,
+                "cache_consistent": report.consistent,
+                "node_id": report.node_id,
+                "strategy": report.strategy,
+                "conflicts_detected": report.conflicts.len(),
+                "conflicts_resolved": report.conflicts_resolved,
+                "keys_checked": report.keys_checked,
+            })))
+        }
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -79,13 +118,26 @@ async fn main() {
     let db = Arc::new(Db::open_with_pool_config(":memory:", &pool_config).expect("failed to open db"));
     db.migrate().expect("migration failed");
 
+    let consensus = NodeCache::from_env();
+    tracing::info!(
+        node_id = consensus.node_id(),
+        strategy = ?consensus.strategy(),
+        "consensus cache initialized"
+    );
+
     let scheduler_db = Arc::clone(&db);
     tokio::spawn(async move {
         scheduler::run(scheduler_db).await;
     });
 
+    let state = AppState {
+        db,
+        consensus,
+    };
+
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/health/consensus", get(consensus_health_handler))
         .route("/ready", get(ready_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
@@ -98,31 +150,11 @@ async fn main() {
             get(routes::list_vault_reminders),
         )
         .route(
-            "/api/vaults/:vault_id/2fa/status",
-            get(two_factor::get_2fa_status),
-        )
-        .route(
-            "/api/vaults/:vault_id/2fa/enable",
-            post(two_factor::enable_2fa),
-        )
-        .route(
-            "/api/vaults/:vault_id/2fa/verify",
-            post(two_factor::verify_2fa),
-        )
-        .route(
-            "/api/vaults/:vault_id/2fa/disable",
-            post(two_factor::disable_2fa),
-        )
-        .route(
-            "/api/vaults/:vault_id/2fa/challenge",
-            post(two_factor::challenge_2fa),
-        )
-        .route(
-            "/api/vaults/:vault_id/2fa/session/clear",
-            post(two_factor::clear_2fa_session),
+            "/api/vaults/:vault_id/simulate-release",
+            get(routes::simulate_release),
         )
         .layer(build_cors_layer())
-        .with_state(db);
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     tracing::info!("listening on {}", listener.local_addr().unwrap());

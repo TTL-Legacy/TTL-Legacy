@@ -18,6 +18,9 @@ struct TTLLegacyApp: App {
                     await NotificationService.shared.requestPermission()
                     BackgroundRefreshService.shared.scheduleAppRefresh()
                 }
+                .onOpenURL { url in
+                    vaultStore.pendingDeepLink = UniversalLinkRouter.shared.parse(url: url)
+                }
                 .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
                     guard let url = activity.webpageURL else { return }
                     vaultStore.pendingDeepLink = UniversalLinkRouter.shared.parse(url: url)

@@ -49,6 +49,13 @@ jobs:
       - name: Run security audit
         run: cargo audit --deny warnings
 
+      - name: Scan for secrets with Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: detect --source . --config .gitleaks.toml --redact --fail
+
       - name: Validate OpenAPI specification
         run: |
           if command -v spectacle &> /dev/null; then
@@ -57,4 +64,13 @@ jobs:
           python3 -m pip install openapi-spec-validator 2>/dev/null || true
           if command -v openapi-spec-validator &> /dev/null; then
             openapi-spec-validator docs/openapi.yaml
+          fi
+
+      - name: Check version consistency
+        run: |
+          CHANGELOG_VERSION=$(grep -m 1 "^## \[" CHANGELOG.md | sed -E 's/## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
+          LIB_VERSION=$(grep -oE 'DataKey::Version.*"([0-9]+\.[0-9]+\.[0-9]+)"' contracts/ttl_vault/src/lib.rs | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$CHANGELOG_VERSION" != "$LIB_VERSION" ]; then
+            echo "Version mismatch: CHANGELOG ($CHANGELOG_VERSION) != lib.rs ($LIB_VERSION)"
+            exit 1
           fi

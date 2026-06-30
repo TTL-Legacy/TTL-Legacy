@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TTL-Legacy — Release Simulator</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2a2e3f;
+      --text:      #e2e8f0;
+      --muted:     #8892a4;
+      --accent:    #6366f1;
+      --accent-h:  #818cf8;
+      --danger:    #ef4444;
+      --warn:      #f59e0b;
+      --success:   #22c55e;
+      --radius:    0.75rem;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────────── */
+    .container { max-width: 860px; margin: 0 auto; }
+
+    header {
+      margin-bottom: 2.5rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1.5rem;
+    }
+    header h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--accent-h);
+      letter-spacing: -0.02em;
+    }
+    header p { color: var(--muted); margin-top: 0.4rem; }
+
+    /* ── Card ─────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .card-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+
+    /* ── Form ─────────────────────────────────────────────────────────── */
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 580px) { .form-grid { grid-template-columns: 1fr; } }
+
+    .field { display: flex; flex-direction: column; gap: 0.35rem; }
+    .field label { font-size: 0.85rem; color: var(--muted); font-weight: 500; }
+    .field input, .field select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 0.4rem;
+      color: var(--text);
+      font-size: 0.95rem;
+      padding: 0.5rem 0.75rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .field input:focus, .field select:focus { border-color: var(--accent); }
+
+    /* checkboxes */
+    .checkboxes { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    .checkboxes label {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.9rem; cursor: pointer; color: var(--text);
+    }
+    .checkboxes input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
+
+    .run-btn {
+      margin-top: 1.25rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 0.5rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 0.65rem 1.75rem;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .run-btn:hover { background: var(--accent-h); }
+    .run-btn:active { transform: scale(0.98); }
+    .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ── Vault meta row ───────────────────────────────────────────────── */
+    .meta-row {
+      display: flex; flex-wrap: wrap; gap: 1rem;
+      font-size: 0.85rem; color: var(--muted);
+      margin-bottom: 1.25rem;
+    }
+    .meta-row span strong { color: var(--text); }
+
+    /* ── Scenario cards ───────────────────────────────────────────────── */
+    .scenarios-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 1rem;
+    }
+
+    .scenario-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      position: relative;
+      overflow: hidden;
+    }
+    .scenario-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+    }
+    .scenario-card.high::before   { background: var(--success); }
+    .scenario-card.medium::before { background: var(--warn); }
+    .scenario-card.low::before    { background: var(--danger); }
+
+    .scenario-name {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    .scenario-release {
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 0.25rem;
+    }
+    .scenario-release.never { color: var(--success); }
+
+    .scenario-countdown {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 0.75rem;
+    }
+    .scenario-desc {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 0.6rem;
+    }
+    .scenario-notes {
+      font-size: 0.78rem;
+      color: var(--muted);
+      opacity: 0.8;
+      border-top: 1px solid var(--border);
+      padding-top: 0.6rem;
+    }
+
+    .confidence-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.2rem 0.55rem;
+      border-radius: 99px;
+      margin-bottom: 0.75rem;
+    }
+    .confidence-badge.high   { background: rgba(34,197,94,.15);  color: var(--success); }
+    .confidence-badge.medium { background: rgba(245,158,11,.15); color: var(--warn); }
+    .confidence-badge.low    { background: rgba(239,68,68,.15);  color: var(--danger); }
+
+    /* ── Status / error ───────────────────────────────────────────────── */
+    .status-msg {
+      font-size: 0.88rem;
+      padding: 0.75rem 1rem;
+      border-radius: 0.45rem;
+      margin-top: 0.75rem;
+    }
+    .status-msg.error { background: rgba(239,68,68,.12); color: var(--danger); border: 1px solid rgba(239,68,68,.3); }
+    .status-msg.info  { background: rgba(99,102,241,.1);  color: var(--accent-h); border: 1px solid rgba(99,102,241,.25); }
+
+    /* ── Spinner ─────────────────────────────────────────────────────── */
+    .spinner {
+      display: inline-block;
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,.25);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.5rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Timeline bar ─────────────────────────────────────────────────── */
+    .timeline {
+      margin-top: 1.5rem;
+    }
+    .timeline-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--muted);
+      margin-bottom: 1rem;
+    }
+    .tl-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.7rem;
+      font-size: 0.82rem;
+    }
+    .tl-label {
+      width: 175px;
+      flex-shrink: 0;
+      color: var(--muted);
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .tl-bar-track {
+      flex: 1;
+      background: var(--border);
+      border-radius: 99px;
+      height: 10px;
+      position: relative;
+    }
+    .tl-bar-fill {
+      height: 100%;
+      border-radius: 99px;
+      transition: width 0.4s ease;
+    }
+    .tl-days {
+      width: 80px;
+      flex-shrink: 0;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .never-text { color: var(--success); font-style: italic; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🕰️ Release Simulator</h1>
+    <p>Project when your TTL-Legacy vault will release to its beneficiary based on check-in behaviour scenarios.</p>
+  </header>
+
+  <!-- ── Input Card ────────────────────────────────────────────────────── -->
+  <div class="card">
+    <p class="card-title">Simulation Parameters</p>
+    <div class="form-grid">
+      <div class="field">
+        <label for="apiBase">API Base URL</label>
+        <input id="apiBase" type="text" value="http://localhost:3000" placeholder="http://localhost:3000" />
+      </div>
+      <div class="field">
+        <label for="vaultId">Vault ID</label>
+        <input id="vaultId" type="text" placeholder="e.g. vault-abc-123" />
+      </div>
+      <div class="field">
+        <label for="missedCount">Missed Check-ins (for "missed" scenario)</label>
+        <input id="missedCount" type="number" value="1" min="1" max="100" />
+      </div>
+      <div class="field" style="align-self: end;">
+        <label>Scenarios to Simulate</label>
+        <div class="checkboxes">
+          <label><input type="checkbox" id="s-no-check-ins" value="no_check_ins" checked /> No check-ins</label>
+          <label><input type="checkbox" id="s-consistent" value="consistent_check_ins" checked /> Consistent</label>
+          <label><input type="checkbox" id="s-missed" value="missed_check_in_dates" checked /> Missed dates</label>
+        </div>
+      </div>
+    </div>
+    <button class="run-btn" id="runBtn" onclick="runSimulation()">▶ Run Simulation</button>
+    <div id="statusMsg"></div>
+  </div>
+
+  <!-- ── Results ──────────────────────────────────────────────────────── -->
+  <div id="results" style="display:none;">
+    <!-- Vault meta -->
+    <div class="meta-row" id="vaultMeta"></div>
+
+    <!-- Scenario cards -->
+    <div class="card" id="scenariosCard" style="padding-bottom:1rem;">
+      <p class="card-title">Projected Release Dates</p>
+      <div class="scenarios-grid" id="scenariosGrid"></div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="card">
+      <div class="timeline">
+        <p class="timeline-title">Relative Timeline (days until release)</p>
+        <div id="timelineRows"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── Helpers ──────────────────────────────────────────────────────────── */
+
+function formatDate(isoStr) {
+  if (!isoStr) return '—';
+  const d = new Date(isoStr);
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
+  });
+}
+
+function humanDuration(seconds) {
+  if (seconds < 0) return 'Never (vault held open)';
+  if (seconds === 0) return 'Immediately (TTL already expired)';
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  if (parts.length === 0) parts.push(`${seconds}s`);
+  return parts.join(' ');
+}
+
+function scenarioLabel(key) {
+  return {
+    no_check_ins:         'No Check-ins',
+    consistent_check_ins: 'Consistent Check-ins',
+    missed_check_in_dates:'Missed Check-in Dates',
+  }[key] ?? key;
+}
+
+function barColor(confidence) {
+  return { high: '#22c55e', medium: '#f59e0b', low: '#ef4444' }[confidence] ?? '#6366f1';
+}
+
+/* ── Main simulation call ─────────────────────────────────────────────── */
+
+async function runSimulation() {
+  const btn      = document.getElementById('runBtn');
+  const statusEl = document.getElementById('statusMsg');
+  const resultsEl= document.getElementById('results');
+
+  const apiBase   = document.getElementById('apiBase').value.trim().replace(/\/$/, '');
+  const vaultId   = document.getElementById('vaultId').value.trim();
+  const missed    = document.getElementById('missedCount').value || '1';
+
+  const scenarios = ['no_check_ins', 'consistent_check_ins', 'missed_check_in_dates']
+    .filter(v => document.querySelector(`input[value="${v}"]`)?.checked);
+
+  // Validation
+  statusEl.innerHTML = '';
+  if (!vaultId) {
+    statusEl.innerHTML = '<div class="status-msg error">Please enter a Vault ID.</div>';
+    return;
+  }
+  if (scenarios.length === 0) {
+    statusEl.innerHTML = '<div class="status-msg error">Select at least one scenario.</div>';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Simulating…';
+  resultsEl.style.display = 'none';
+
+  const params = new URLSearchParams({
+    scenarios: scenarios.join(','),
+    missed_count: missed,
+  });
+  const url = `${apiBase}/api/vaults/${encodeURIComponent(vaultId)}/simulate-release?${params}`;
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ message: res.statusText }));
+      throw new Error(err.message ?? `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    renderResults(data);
+    resultsEl.style.display = 'block';
+    statusEl.innerHTML = '';
+  } catch (e) {
+    statusEl.innerHTML = `<div class="status-msg error">⚠ ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run Simulation';
+  }
+}
+
+/* ── Render ────────────────────────────────────────────────────────────── */
+
+function renderResults(data) {
+  // ── Meta row ──────────────────────────────────────────────────────────
+  const ttlDays = data.current_ttl_remaining != null
+    ? `${(data.current_ttl_remaining / 86400).toFixed(1)} days`
+    : 'unknown';
+  const intervalDays = (data.check_in_interval / 86400).toFixed(1);
+
+  document.getElementById('vaultMeta').innerHTML = `
+    <span>Vault <strong>${escHtml(data.vault_id)}</strong></span>
+    <span>TTL remaining: <strong>${escHtml(ttlDays)}</strong></span>
+    <span>Check-in interval: <strong>${intervalDays} days</strong></span>
+    <span>Last check-in: <strong>${formatDate(data.last_check_in)}</strong></span>
+    <span>Simulated at: <strong>${formatDate(data.simulated_at)}</strong></span>
+  `;
+
+  // ── Scenario cards ────────────────────────────────────────────────────
+  const grid = document.getElementById('scenariosGrid');
+  grid.innerHTML = '';
+
+  const nonNeverSeconds = data.scenarios
+    .filter(s => s.seconds_until_release >= 0)
+    .map(s => s.seconds_until_release);
+  const maxSecs = nonNeverSeconds.length > 0 ? Math.max(...nonNeverSeconds) : 1;
+
+  const timelineRows = document.getElementById('timelineRows');
+  timelineRows.innerHTML = '';
+
+  data.scenarios.forEach(s => {
+    const isNever = s.seconds_until_release < 0;
+    const days = isNever ? null : (s.seconds_until_release / 86400).toFixed(1);
+
+    // Scenario card
+    const card = document.createElement('div');
+    card.className = `scenario-card ${s.confidence}`;
+    card.innerHTML = `
+      <p class="scenario-name">${escHtml(scenarioLabel(s.scenario))}</p>
+      <span class="confidence-badge ${s.confidence}">${s.confidence} confidence</span>
+      <p class="scenario-release ${isNever ? 'never' : ''}">
+        ${isNever ? '♾ Vault never releases' : escHtml(formatDate(s.projected_release_at))}
+      </p>
+      <p class="scenario-countdown">${humanDuration(s.seconds_until_release)}</p>
+      <p class="scenario-desc">${escHtml(s.description)}</p>
+      <p class="scenario-notes">${escHtml(s.notes)}</p>
+    `;
+    grid.appendChild(card);
+
+    // Timeline row
+    const row = document.createElement('div');
+    row.className = 'tl-row';
+    const pct = isNever ? 0 : Math.round((s.seconds_until_release / maxSecs) * 100);
+    row.innerHTML = `
+      <span class="tl-label">${escHtml(scenarioLabel(s.scenario))}</span>
+      <div class="tl-bar-track">
+        <div class="tl-bar-fill" style="width:${isNever ? 100 : pct}%;background:${barColor(s.confidence)};${isNever ? 'opacity:0.3;' : ''}"></div>
+      </div>
+      <span class="tl-days ${isNever ? 'never-text' : ''}">
+        ${isNever ? 'never' : days + 'd'}
+      </span>
+    `;
+    timelineRows.appendChild(row);
+  });
+}
+
+function escHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Allow hitting Enter in the vault ID field to trigger the simulation
+document.getElementById('vaultId').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runSimulation();
+});
+</script>
+</body>
+</html>

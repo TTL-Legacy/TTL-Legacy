@@ -529,6 +529,8 @@ struct DeepLinkView: View {
                 VaultInvitationView(vaultID: vaultID)
             case .beneficiaryAcceptance(let vaultID, let token):
                 BeneficiaryAcceptanceView(vaultID: vaultID, token: token)
+            case .vaultAction(let vaultID, let action):
+                VaultActionDeepLinkView(vaultID: vaultID, action: action)
             }
         }
     }
@@ -550,6 +552,101 @@ struct VaultInvitationView: View {
         }
         .padding(32)
         .navigationTitle("Invitation")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
+    }
+}
+
+struct VaultActionDeepLinkView: View {
+    let vaultID: String
+    let action: UniversalLinkRouter.VaultAction
+    @EnvironmentObject var vaultStore: VaultStore
+    @Environment(\.dismiss) var dismiss
+    @State private var isProcessing = false
+    @State private var error: String?
+
+    private var vault: Vault? { vaultStore.vaults.first { $0.id == vaultID } }
+
+    var body: some View {
+        Group {
+            switch action {
+            case .viewDetails:
+                if let vault {
+                    VaultDetailView(vault: vault)
+                } else {
+                    vaultNotFoundContent
+                }
+            case .checkIn:
+                actionContent(
+                    title: "Check In",
+                    systemImage: "checkmark.circle.fill",
+                    description: "Confirm check-in for vault \(vaultID.prefix(16))…"
+                ) {
+                    guard let vault else { error = "Vault not found"; return }
+                    isProcessing = true
+                    error = nil
+                    Task {
+                        do {
+                            try await BiometricService.shared.authenticate(reason: "Confirm vault check-in")
+                            await vaultStore.checkIn(vault: vault)
+                            dismiss()
+                        } catch let checkInError {
+                            self.error = checkInError.localizedDescription
+                        }
+                        isProcessing = false
+                    }
+                }
+            case .withdraw:
+                actionContent(
+                    title: "Withdraw",
+                    systemImage: "arrow.up.circle.fill",
+                    description: "Withdraw funds from vault \(vaultID.prefix(16))…"
+                ) {
+                    error = "Withdrawal is not yet available in the mobile app."
+                }
+            case .manageBeneficiary:
+                actionContent(
+                    title: "Manage Beneficiary",
+                    systemImage: "person.2.fill",
+                    description: "Update the beneficiary for vault \(vaultID.prefix(16))…"
+                ) {
+                    error = "Beneficiary management is not yet available in the mobile app."
+                }
+            }
+        }
+        .task { if vaultStore.vaults.isEmpty { await vaultStore.load() } }
+    }
+
+    private var vaultNotFoundContent: some View {
+        ContentUnavailableView(
+            "Vault Not Found",
+            systemImage: "lock.slash",
+            description: Text("Vault \(vaultID.prefix(16))… could not be loaded.")
+        )
+        .navigationTitle("Vault")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
+    }
+
+    private func actionContent(
+        title: String,
+        systemImage: String,
+        description: String,
+        onAction: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 24) {
+            Image(systemName: systemImage).font(.system(size: 56)).foregroundStyle(.blue)
+            Text(title).font(.title.bold())
+            Text(description).multilineTextAlignment(.center).foregroundStyle(.secondary)
+            if let error { Text(error).foregroundStyle(.red).font(.caption) }
+            Button(action: onAction) {
+                Text(isProcessing ? "Processing…" : title).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isProcessing || (action == .checkIn && vault == nil))
+        }
+        .padding(32)
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
     }

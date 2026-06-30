@@ -128,6 +128,9 @@ pub struct NotificationPreferences {
     /// Hours before expiry to send the warning (default 24).
     pub warning_hours_before: u64,
     pub locale: Option<Locale>,
+    pub preferred_channel: Option<NotificationChannel>,
+    pub fallback_channel: Option<NotificationChannel>,
+    pub unsubscribed: bool,
 }
 
 impl Default for NotificationPreferences {
@@ -139,6 +142,9 @@ impl Default for NotificationPreferences {
             vault_released_enabled: true,
             warning_hours_before: 24,
             locale: None,
+            preferred_channel: None,
+            fallback_channel: None,
+            unsubscribed: false,
         }
     }
 }
@@ -176,6 +182,7 @@ pub struct ScheduledNotification {
     pub scheduled_at: DateTime<Utc>,
     pub status: DeliveryStatus,
     pub max_retry_attempts: u32,
+    pub sent_at: Option<DateTime<Utc>>,
 }
 
 /// Delivery record written after each send attempt.
@@ -492,55 +499,72 @@ pub struct IdempotencyRecord {
     pub created_at: DateTime<Utc>,
 }
 
-// ── 2FA models (#965) ────────────────────────────────────────────────────────
+// ── Release Simulator models ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// The scenario to simulate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TwoFactorMethod {
-    Totp,
-    Sms,
-    Email,
+pub enum ScenarioType {
+    /// Owner never checks in again — release is immediate at TTL expiry.
+    NoCheckIns,
+    /// Owner checks in consistently at their configured interval.
+    ConsistentCheckIns,
+    /// Owner misses one or more specific check-in dates before stopping.
+    MissedCheckInDates,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TwoFactorConfig {
-    pub vault_id: String,
-    pub method: TwoFactorMethod,
-    pub enabled: bool,
-    pub secret: Option<String>,
-    pub phone: Option<String>,
-    pub email: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub verified_at: Option<DateTime<Utc>>,
+impl std::fmt::Display for ScenarioType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScenarioType::NoCheckIns => write!(f, "no_check_ins"),
+            ScenarioType::ConsistentCheckIns => write!(f, "consistent_check_ins"),
+            ScenarioType::MissedCheckInDates => write!(f, "missed_check_in_dates"),
+        }
+    }
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct Enable2FARequest {
-    pub method: TwoFactorMethod,
-    pub phone: Option<String>,
-    pub email: Option<String>,
-}
-
+/// Query parameters for the simulate-release endpoint.
 #[derive(Debug, Deserialize)]
-pub struct Verify2FARequest {
-    pub otp: String,
+pub struct SimulateReleaseQuery {
+    /// Comma-separated list of scenarios to run.
+    /// e.g. `scenarios=no_check_ins,consistent_check_ins`
+    /// Defaults to all three scenarios if omitted.
+    pub scenarios: Option<String>,
+    /// For `missed_check_in_dates`: number of consecutive missed check-ins
+    /// before the owner stops (defaults to 1).
+    pub missed_count: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct Enable2FAResponse {
-    pub vault_id: String,
-    pub method: TwoFactorMethod,
-    pub secret: Option<String>,
-    pub provisioning_uri: Option<String>,
+/// Projected outcome for a single scenario.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioResult {
+    /// Which scenario this result belongs to.
+    pub scenario: ScenarioType,
+    /// Human-readable description of the scenario.
+    pub description: String,
+    /// Projected UTC timestamp when the vault will release.
+    pub projected_release_at: DateTime<Utc>,
+    /// Seconds from now until the projected release.
+    pub seconds_until_release: i64,
+    /// Confidence level: "high", "medium", or "low".
+    pub confidence: String,
+    /// Optional extra notes about this scenario's assumptions.
+    pub notes: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TwoFactorStatusResponse {
+/// Response body for GET /api/vaults/{id}/simulate-release.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SimulateReleaseResponse {
     pub vault_id: String,
-    pub enabled: bool,
-    pub method: Option<TwoFactorMethod>,
-    pub verified: bool,
-    pub phone: Option<String>,
-    pub email: Option<String>,
+    /// Current TTL remaining in seconds (None if already expired/released).
+    pub current_ttl_remaining: Option<u64>,
+    /// The vault's configured check-in interval in seconds.
+    pub check_in_interval: u64,
+    /// Timestamp of the last recorded check-in.
+    pub last_check_in: DateTime<Utc>,
+    /// Simulation results, one per requested scenario.
+    pub scenarios: Vec<ScenarioResult>,
+    /// When this simulation was generated.
+    pub simulated_at: DateTime<Utc>,
 }
 
