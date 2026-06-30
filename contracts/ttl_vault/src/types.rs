@@ -559,9 +559,9 @@ pub enum ReleaseStatus {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReleaseCondition {
-    OnExpiry,
-    OnProof(u32),
-    Tranche(Vec<(u64, u32)>),
+    TTLExpiry,
+    OwnerInitiated,
+    Oracle(Address),
 }
 
 #[contracttype]

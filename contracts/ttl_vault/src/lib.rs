@@ -2405,6 +2405,44 @@ impl TtlVaultContract {
         {
             panic_with_error!(&env, ContractError::AlreadyReleased);
         }
+        let total = vault.balance;
+        if total == 0 {
+            panic_with_error!(&env, ContractError::EmptyVault);
+        }
+
+        // Load release conditions
+        let conditions = Self::get_release_conditions(&env, vault_id);
+        let mut condition_met = false;
+        for cond in conditions.iter() {
+            match cond {
+                ReleaseCondition::TTLExpiry => {
+                    if Self::is_expired(env.clone(), vault_id) {
+                        condition_met = true;
+                    }
+                }
+                ReleaseCondition::OwnerInitiated => {
+                    if mode == ReleaseTrigger::Manual {
+                        condition_met = true;
+                    }
+                }
+                ReleaseCondition::Oracle(addr) => {
+                    if oracle::query(&env, addr).unwrap_or(false) {
+                        condition_met = true;
+                    }
+                }
+            }
+        }
+        if !condition_met {
+            panic_with_error!(&env, ContractError::ConditionsNotApproved);
+        }
+
+        Self::assert_not_paused(&env);
+        // Attempt to restore archived vault state before proceeding - Issue #443
+        Self::try_restore_archived_vault(&env, vault_id);
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            panic_with_error!(&env, ContractError::AlreadyReleased);
+        }
         // We only block vetoes on trigger before the vault has expired.
         // Note: release entrypoint is for the Expiry trigger and thus requires expiry,
         // but manual release can occur at arbitrary times.
@@ -6822,6 +6860,56 @@ impl TtlVaultContract {
     pub fn get_release_condition(env: Env, vault_id: u64) -> ReleaseCondition {
         let vault = Self::load_vault(&env, vault_id);
         vault.release_condition
+    }
+
+        /// Sets multiple release conditions for a vault.
+    /// Replaces any existing conditions.
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault identifier
+    /// * `caller` - Must be the vault owner
+    /// * `conditions` - Vector of `ReleaseCondition`s
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    pub fn set_release_conditions(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        conditions: Vec<ReleaseCondition>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReleaseConditions(vault_id), &conditions);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Helper to retrieve stored release conditions.
+    fn get_release_conditions(env: &Env, vault_id: u64) -> Vec<ReleaseCondition> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ReleaseConditions(vault_id))
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Owner‑initiated panic release.
+    /// Allows the owner to manually release a vault regardless of other conditions.
+    pub fn panic_release(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        Self::trigger_release_internal(env, vault_id, ReleaseTrigger::Manual);
+        Ok(())
     }
 
     // --- Issue #381: Vault Inheritance Chain ---
