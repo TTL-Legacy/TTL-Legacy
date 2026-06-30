@@ -65,3 +65,12 @@ jobs:
           if command -v openapi-spec-validator &> /dev/null; then
             openapi-spec-validator docs/openapi.yaml
           fi
+
+      - name: Check version consistency
+        run: |
+          CHANGELOG_VERSION=$(grep -m 1 "^## \[" CHANGELOG.md | sed -E 's/## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
+          LIB_VERSION=$(grep -oE 'DataKey::Version.*"([0-9]+\.[0-9]+\.[0-9]+)"' contracts/ttl_vault/src/lib.rs | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          if [ "$CHANGELOG_VERSION" != "$LIB_VERSION" ]; then
+            echo "Version mismatch: CHANGELOG ($CHANGELOG_VERSION) != lib.rs ($LIB_VERSION)"
+            exit 1
+          fi

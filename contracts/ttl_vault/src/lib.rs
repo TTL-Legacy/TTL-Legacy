@@ -1171,7 +1171,7 @@ impl TtlVaultContract {
     }
 
     /// Returns the contract version string set during initialization.
-    pub fn get_version(env: Env) -> String {
+    pub fn get_contract_version(env: Env) -> String {
         env.storage()
             .instance()
             .get(&DataKey::Version)

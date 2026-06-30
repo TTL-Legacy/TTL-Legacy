@@ -139,7 +139,12 @@ If a false positive is encountered, add a narrow allowlist entry to `.gitleaks.t
 
 
 
-## License
+## Versioning Policy
 
-Contributions are licensed under MIT License.
+We follow these versioning standards:
+
+- **Contract ABI**: Semantic Versioning (SemVer)
+- **Releases**: Calendar Versioning (CalVer)
+
+All contract versions must be documented in `CHANGELOG.md`.
 
