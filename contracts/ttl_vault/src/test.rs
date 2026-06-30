@@ -322,6 +322,94 @@ fn test_check_in_emits_event_with_correct_topic() {
     assert!(check_in_event.is_some(), "check_in event not emitted");
 }
 
+// ---- TTL warning event boundary tests ----
+
+/// Helper: returns true when a TTL_WARNING_TOPIC event ("ttl_warn") was emitted for `vault_id`.
+fn ttl_warning_emitted(env: &Env, vault_id: u64) -> bool {
+    env.events().all().iter().any(|e| {
+        // e.1 is the topics Vec<Val>
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(env);
+        if topics.len() < 2 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(env);
+        let topic1: Result<u64, _> = topics.get(1).unwrap().try_into_val(env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("ttl_warn")).unwrap_or(false)
+            && topic1.map(|id| id == vault_id).unwrap_or(false)
+    })
+}
+
+/// Just above threshold (interval = EXPIRY_WARNING_THRESHOLD + 1):
+/// remaining TTL after check-in equals check_in_interval, which is NOT < threshold.
+/// No TTL_WARNING_TOPIC event should be emitted.
+#[test]
+fn test_check_in_no_ttl_warning_just_above_threshold() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    // interval one second above the 24-hour warning threshold
+    let interval = EXPIRY_WARNING_THRESHOLD + 1;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    env.ledger().with_mut(|l| l.timestamp += 10);
+
+    client.check_in(&vault_id, &owner);
+
+    assert!(
+        !ttl_warning_emitted(&env, vault_id),
+        "ttl_warn must NOT fire when interval > threshold"
+    );
+}
+
+/// Exactly at threshold (interval = EXPIRY_WARNING_THRESHOLD):
+/// The condition is strict `<`, so equal does NOT trigger the warning.
+#[test]
+fn test_check_in_no_ttl_warning_at_threshold() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    // interval exactly equal to the 24-hour warning threshold
+    let interval = EXPIRY_WARNING_THRESHOLD;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    env.ledger().with_mut(|l| l.timestamp += 10);
+
+    client.check_in(&vault_id, &owner);
+
+    assert!(
+        !ttl_warning_emitted(&env, vault_id),
+        "ttl_warn must NOT fire when interval == threshold (condition is strict <)"
+    );
+}
+
+/// Just below threshold (interval = EXPIRY_WARNING_THRESHOLD - 1):
+/// TTL_WARNING_TOPIC must be emitted with the remaining TTL as payload.
+#[test]
+fn test_check_in_emits_ttl_warning_just_below_threshold() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    // interval one second below the 24-hour warning threshold
+    let interval = EXPIRY_WARNING_THRESHOLD - 1;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    env.ledger().with_mut(|l| l.timestamp += 10);
+
+    client.check_in(&vault_id, &owner);
+
+    assert!(
+        ttl_warning_emitted(&env, vault_id),
+        "ttl_warn must fire when interval < threshold"
+    );
+
+    // Verify the event payload is the remaining TTL (= check_in_interval after check-in)
+    let warning_event = env.events().all().iter().find(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        if topics.len() < 2 {
+            return false;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+        topic0.map(|s| s == soroban_sdk::symbol_short!("ttl_warn")).unwrap_or(false)
+    });
+    let payload: u64 = warning_event
+        .unwrap()
+        .2
+        .clone()
+        .into_val(&env);
+    assert_eq!(payload, interval, "ttl_warn payload should equal check_in_interval");
+}
+
 #[test]
 fn test_get_vaults_by_owner_tracks_multiple_vaults() {
     let (env, owner, beneficiary, _, _, client) = setup();
