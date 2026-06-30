@@ -36,6 +36,7 @@ use types::{
     BENEFICIARY_ACCEPTED_TOPIC, BENEFICIARY_DECLINED_TOPIC, BENEFICIARY_CONDITION_ACCEPTED_TOPIC,
     BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC, BENEFICIARY_IDENTITY_VERIFIED_TOPIC, CONFLICT_EXPIRED_TOPIC,
     SET_RECOVERY_TOPIC, RECOVERY_EXTEND_TOPIC,
+    EMERGENCY_RECOVERY_GENERATED_TOPIC, EMERGENCY_RECOVERY_USED_TOPIC,
     RESTORE_VAULT_TOPIC, PASSKEY_USAGE_TOPIC, VAULT_CLONED_TOPIC, VAULT_CLONED_OVERRIDE_TOPIC, VAULT_MERGED_TOPIC,
     MULTISIG_CONFIG_TOPIC, MULTISIG_PROPOSED_TOPIC, MULTISIG_APPROVED_TOPIC, MULTISIG_REJECTED_TOPIC,
     MULTISIG_EXECUTED_TOPIC, MULTISIG_VETOED_TOPIC, MULTISIG_SIGNER_REMOVED_TOPIC, MULTISIG_PROPOSAL_EXPIRY, OWNERSHIP_INITIATED_TOPIC, OWNERSHIP_ACCEPTED_TOPIC,
@@ -238,6 +239,9 @@ pub enum ContractError {
     AuctionEnded = 80,
     AuctionNotEnded = 81,
     InvalidVestingSchedule = 82,
+    // Issue #934: emergency vault recovery code
+    RecoveryCodeNotSet = 83,
+    InvalidRecoveryCode = 84,
 }
 
 #[contract]
@@ -7889,6 +7893,144 @@ impl TtlVaultContract {
             }
         }
         false
+    }
+
+    // --- Issue #934: Emergency Vault Recovery Code ---
+
+    /// Generates an emergency recovery code for a vault and stores its hash on-chain.
+    ///
+    /// If the owner loses access to all of their passkeys but is still alive, the
+    /// recovery code returned here (kept off-chain by the owner) can later be
+    /// supplied to [`recover_with_code`] to register a fresh passkey and regain
+    /// access.
+    ///
+    /// Only the vault owner can call this. The raw 32-byte code is produced from
+    /// the on-chain PRNG and is **returned only once** — the contract stores just
+    /// `sha256(code)`, so the code can never be reconstructed from on-chain state.
+    /// Calling this again rotates the code, invalidating any previously generated
+    /// one.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The raw 32-byte recovery code as `Bytes`. The owner must store it off-chain;
+    /// it is required by [`recover_with_code`].
+    ///
+    /// # Errors
+    /// * `ContractError::AlreadyReleased` - If the vault is not in Locked status
+    pub fn generate_recovery_code(env: Env, vault_id: u64) -> Result<Bytes, ContractError> {
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        // Generate a random 32-byte recovery code using the on-chain PRNG. Unlike
+        // a derivation from public vault state, the PRNG output cannot be predicted
+        // by an observer who only sees the stored hash.
+        let code: Bytes = env.prng().gen_len(32);
+
+        // Persist only sha256(code) — a one-way commitment.
+        let code_hash: BytesN<32> = env.crypto().sha256(&code).into();
+        let key = DataKey::RecoveryCodeHash(vault_id);
+        env.storage().persistent().set(&key, &code_hash);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish((EMERGENCY_RECOVERY_GENERATED_TOPIC, vault_id), code_hash);
+        Ok(code)
+    }
+
+    /// Restores access to a vault using its emergency recovery code.
+    ///
+    /// Intended for the case where the owner has lost access to every passkey but
+    /// is still alive. The caller supplies the off-chain `recovery_code` previously
+    /// returned by [`generate_recovery_code`] together with a fresh passkey hash
+    /// (`new_passkey_proof`). On success:
+    ///
+    /// * Every existing passkey is invalidated — the passkey list is cleared and
+    ///   the legacy primary passkey field is replaced.
+    /// * `new_passkey_proof` becomes the sole registered passkey.
+    /// * The recovery code is consumed (single use) and the liveness timer is
+    ///   reset, since a successful recovery proves the owner is alive.
+    ///
+    /// Authorization is by knowledge of the secret recovery code rather than
+    /// `require_auth`, mirroring [`use_backup_code`] which likewise treats the
+    /// secret itself as proof.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `recovery_code` - The off-chain recovery code returned by `generate_recovery_code`
+    /// * `new_passkey_proof` - Hash of the new passkey to register
+    ///
+    /// # Errors
+    /// * `ContractError::AlreadyReleased` - If the vault is not in Locked status
+    /// * `ContractError::RecoveryCodeNotSet` - If no recovery code has been generated
+    /// * `ContractError::InvalidRecoveryCode` - If the supplied code does not match
+    pub fn recover_with_code(
+        env: Env,
+        vault_id: u64,
+        recovery_code: Bytes,
+        new_passkey_proof: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let key = DataKey::RecoveryCodeHash(vault_id);
+        let stored_hash: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::RecoveryCodeNotSet)?;
+
+        let provided_hash: BytesN<32> = env.crypto().sha256(&recovery_code).into();
+        if provided_hash != stored_hash {
+            return Err(ContractError::InvalidRecoveryCode);
+        }
+
+        // Invalidate all existing passkeys and register the new one as the vault's
+        // sole passkey.
+        let now = env.ledger().timestamp();
+        let mut passkeys: Vec<PasskeyHash> = Vec::new(&env);
+        passkeys.push_back(PasskeyHash {
+            hash: new_passkey_proof.clone(),
+            added_at: now,
+            biometric_hash: None,
+        });
+        let pk_key = DataKey::VaultPasskeys(vault_id);
+        env.storage().persistent().set(&pk_key, &passkeys);
+
+        // Replace the legacy single-passkey field and reset liveness — a
+        // successful recovery is proof the owner is alive.
+        vault.passkey_hash = Some(Bytes::from_array(&env, &new_passkey_proof.to_array()));
+        vault.last_check_in = now;
+        Self::save_vault(&env, vault_id, &vault);
+
+        // Consume the recovery code so it cannot be replayed.
+        env.storage().persistent().remove(&key);
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().extend_ttl(&pk_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish((EMERGENCY_RECOVERY_USED_TOPIC, vault_id), new_passkey_proof);
+        Ok(())
+    }
+
+    /// Returns `true` if an emergency recovery code is currently set for the vault.
+    ///
+    /// Note this never exposes the code itself — only whether the one-way hash
+    /// commitment exists.
+    pub fn has_recovery_code(env: Env, vault_id: u64) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::RecoveryCodeHash(vault_id))
     }
 
     // --- Issue #401: Beneficiary Delegation ---

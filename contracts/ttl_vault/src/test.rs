@@ -6293,3 +6293,160 @@ fn test_trigger_release_with_50_beneficiaries() {
     // Last beneficiary absorbs any dust
     assert!(token_client.balance(&addresses[49]) >= per_beneficiary);
 }
+
+// ── Issue #934: Emergency Vault Recovery Code ───────────────────────────────
+
+#[test]
+fn test_generate_recovery_code_sets_commitment() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    assert!(!client.has_recovery_code(&id));
+
+    let code = client.generate_recovery_code(&id);
+    assert_eq!(code.len(), 32);
+    // A recovery commitment is now stored on-chain.
+    assert!(client.has_recovery_code(&id));
+}
+
+#[test]
+fn test_recover_with_code_invalidates_passkeys_and_registers_new() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    // Owner registers two passkeys (the devices they could be using).
+    let old_pk1 = BytesN::from_array(&env, &[1u8; 32]);
+    let old_pk2 = BytesN::from_array(&env, &[2u8; 32]);
+    client.add_passkey(&id, &owner, &old_pk1);
+    client.add_passkey(&id, &owner, &old_pk2);
+    assert!(client.is_valid_passkey(&id, &old_pk1));
+    assert!(client.is_valid_passkey(&id, &old_pk2));
+
+    // Owner generates and (off-chain) stores the recovery code.
+    let code = client.generate_recovery_code(&id);
+
+    // Later, having lost the passkeys, the owner recovers with a fresh one.
+    let new_pk = BytesN::from_array(&env, &[9u8; 32]);
+    client.recover_with_code(&id, &code, &new_pk);
+
+    // All old passkeys are invalidated; only the new passkey remains.
+    assert!(!client.is_valid_passkey(&id, &old_pk1));
+    assert!(!client.is_valid_passkey(&id, &old_pk2));
+    assert!(client.is_valid_passkey(&id, &new_pk));
+    let passkeys = client.get_vault_passkeys(&id);
+    assert_eq!(passkeys.len(), 1);
+    assert_eq!(passkeys.get(0).unwrap().hash, new_pk);
+
+    // The legacy primary passkey field is replaced with the new passkey bytes.
+    let vault = client.get_vault(&id);
+    assert_eq!(
+        vault.passkey_hash,
+        Some(Bytes::from_array(&env, &new_pk.to_array()))
+    );
+
+    // The code is single-use and has been consumed.
+    assert!(!client.has_recovery_code(&id));
+}
+
+#[test]
+fn test_recover_with_code_resets_liveness_timer() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &10_000u64, &None);
+    let code = client.generate_recovery_code(&id);
+
+    env.ledger().with_mut(|l| l.timestamp += 5_000);
+    let new_pk = BytesN::from_array(&env, &[9u8; 32]);
+    client.recover_with_code(&id, &code, &new_pk);
+
+    // Recovery is proof of life, so last_check_in is bumped to "now".
+    let vault = client.get_vault(&id);
+    assert_eq!(vault.last_check_in, env.ledger().timestamp());
+}
+
+#[test]
+fn test_recover_with_wrong_code_rejected() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    client.generate_recovery_code(&id);
+
+    let wrong = Bytes::from_array(&env, &[7u8; 32]);
+    let new_pk = BytesN::from_array(&env, &[9u8; 32]);
+    let err = client
+        .try_recover_with_code(&id, &wrong, &new_pk)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(84)); // InvalidRecoveryCode
+    // Nothing changed: the code is still set.
+    assert!(client.has_recovery_code(&id));
+}
+
+#[test]
+fn test_recover_without_code_set_rejected() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    let some_code = Bytes::from_array(&env, &[7u8; 32]);
+    let new_pk = BytesN::from_array(&env, &[9u8; 32]);
+    let err = client
+        .try_recover_with_code(&id, &some_code, &new_pk)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(83)); // RecoveryCodeNotSet
+}
+
+#[test]
+fn test_recovery_code_is_single_use() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let code = client.generate_recovery_code(&id);
+
+    let new_pk = BytesN::from_array(&env, &[9u8; 32]);
+    client.recover_with_code(&id, &code, &new_pk);
+
+    // Replaying the same code fails because it was consumed.
+    let new_pk2 = BytesN::from_array(&env, &[10u8; 32]);
+    let err = client
+        .try_recover_with_code(&id, &code, &new_pk2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(83)); // RecoveryCodeNotSet
+}
+
+#[test]
+fn test_regenerating_recovery_code_invalidates_previous() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    let first = client.generate_recovery_code(&id);
+    let second = client.generate_recovery_code(&id);
+    // PRNG output differs across calls.
+    assert_ne!(first, second);
+
+    // The first (rotated-out) code no longer works.
+    let new_pk = BytesN::from_array(&env, &[9u8; 32]);
+    let err = client
+        .try_recover_with_code(&id, &first, &new_pk)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(84)); // InvalidRecoveryCode
+
+    // The current code works.
+    client.recover_with_code(&id, &second, &new_pk);
+    assert!(client.is_valid_passkey(&id, &new_pk));
+}
+
+#[test]
+fn test_generate_recovery_code_rejected_on_released_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &1u64, &None);
+
+    // Expire and release the vault.
+    env.ledger().with_mut(|l| l.timestamp += 10);
+    client.trigger_release(&id);
+
+    let err = client
+        .try_generate_recovery_code(&id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(7)); // AlreadyReleased
+}
