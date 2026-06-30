@@ -1,6 +1,6 @@
 use crate::models::{
     Vault, VaultEvent, AuditEntry, SearchQuery, SearchResult, VaultStatus,
-    VaultBackup, VaultShare, VaultNotificationPreferences,
+    VaultBackup, VaultShare, ShareToken, VaultNotificationPreferences,
     ReminderPreferences, Channel, Frequency,
 };
 
@@ -13,6 +13,7 @@ pub type EventStore = Arc<Mutex<Vec<VaultEvent>>>;
 pub type AuditStore = Arc<Mutex<Vec<AuditEntry>>>;
 pub type BackupStore = Arc<Mutex<HashMap<String, VaultBackup>>>;
 pub type ShareStore = Arc<Mutex<Vec<VaultShare>>>;
+pub type ShareTokenStore = Arc<Mutex<HashMap<String, ShareToken>>>;
 pub type NotificationStore = Arc<Mutex<HashMap<String, VaultNotificationPreferences>>>;
 
 
@@ -36,8 +37,23 @@ pub fn create_share_store() -> ShareStore {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+pub fn create_share_token_store() -> ShareTokenStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 pub fn create_notification_store() -> NotificationStore {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+// ── Shared application state for axum routes ─────────────────────────────────
+
+pub struct AppState {
+    pub db: Arc<Db>,
+    pub vault_store: VaultStore,
+    pub event_store: EventStore,
+    pub audit_store: AuditStore,
+    pub share_store: ShareStore,
+    pub share_token_store: ShareTokenStore,
 }
 
 pub fn search_vaults(
@@ -205,6 +221,47 @@ pub fn get_vault_shares(share_store: &ShareStore, vault_id: &str) -> Vec<crate::
         .filter(|s| s.vault_id == vault_id)
         .cloned()
         .collect()
+}
+
+// ── Share token persistence ──────────────────────────────────────────────────
+
+pub fn add_share_token(store: &ShareTokenStore, token: ShareToken) {
+    store.lock().unwrap().insert(token.token.clone(), token);
+}
+
+pub fn get_share_token(store: &ShareTokenStore, token: &str) -> Option<ShareToken> {
+    store.lock().unwrap().get(token).cloned()
+}
+
+pub fn get_vault_share_tokens(store: &ShareTokenStore, vault_id: &str) -> Vec<ShareToken> {
+    store
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|t| t.vault_id == vault_id)
+        .cloned()
+        .collect()
+}
+
+pub fn revoke_share_token(store: &ShareTokenStore, token: &str) -> Option<ShareToken> {
+    let mut lock = store.lock().unwrap();
+    if let Some(t) = lock.get_mut(token) {
+        t.revoked = true;
+        Some(t.clone())
+    } else {
+        None
+    }
+}
+
+// ── Audit helper ─────────────────────────────────────────────────────────────
+
+pub fn append_audit_entry(audit_store: &AuditStore, action: &str, actor: &str, details: serde_json::Value) {
+    audit_store.lock().unwrap().push(AuditEntry {
+        timestamp: Utc::now(),
+        action: action.to_string(),
+        actor: actor.to_string(),
+        details,
+    });
 }
 
 // ── Task 4: Notification Preferences ─────────────────────────────────────────

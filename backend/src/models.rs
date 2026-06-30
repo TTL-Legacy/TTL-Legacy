@@ -458,6 +458,40 @@ pub struct ShareRequest {
     pub permission: SharePermission,
 }
 
+// ── Share tokens (temporary access tokens for read-only sharing) ─────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareToken {
+    pub token: String,
+    pub share_id: String,
+    pub vault_id: String,
+    pub shared_with: String,
+    pub permission: SharePermission,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateTokenRequest {
+    pub shared_with: String,
+    pub permission: Option<SharePermission>,
+    /// Seconds until the token expires (default 604800 = 7 days).
+    pub expiry_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShareTokenResponse {
+    pub share: VaultShare,
+    pub token: ShareToken,
+    pub access_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeTokenRequest {
+    pub token: String,
+}
+
 // ── Task 4: Notification Preferences ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

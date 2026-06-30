@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{HeaderValue, Method},
+    http::{HeaderValue, Method, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 mod db;
 mod error;
+mod handlers;
 mod models;
 mod routes;
 mod scheduler;
@@ -19,6 +20,7 @@ mod scheduler;
 mod tests;
 
 pub use db::Db;
+pub use db::AppState;
 
 fn build_cors_layer() -> CorsLayer {
     let allowed_origins = std::env::var("ALLOWED_ORIGINS").unwrap_or_default();
@@ -50,14 +52,14 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn ready_handler(State(db): State<Arc<Db>>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    match db.check_connectivity() {
+async fn ready_handler(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.db.check_connectivity() {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
             "database": "connected",
         }))),
-        Err(_) => Err(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -83,6 +85,15 @@ async fn main() {
         scheduler::run(scheduler_db).await;
     });
 
+    let state = Arc::new(AppState {
+        db: Arc::clone(&db),
+        vault_store: db::create_vault_store(),
+        event_store: db::create_event_store(),
+        audit_store: db::create_audit_store(),
+        share_store: db::create_share_store(),
+        share_token_store: db::create_share_token_store(),
+    });
+
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
@@ -96,8 +107,34 @@ async fn main() {
             "/api/vaults/:vault_id/reminders",
             get(routes::list_vault_reminders),
         )
+        // Vault sharing endpoints
+        .route(
+            "/api/vaults/:vault_id/share",
+            post(routes::share_vault),
+        )
+        .route(
+            "/api/vaults/:vault_id/shares",
+            get(routes::list_vault_shares),
+        )
+        .route(
+            "/api/vaults/:vault_id/share/tokens",
+            post(routes::generate_share_token).get(routes::list_share_tokens),
+        )
+        .route(
+            "/api/vaults/:vault_id/share/tokens/revoke",
+            post(routes::revoke_share_token),
+        )
+        // Read-only shared vault access (no auth required — uses token)
+        .route(
+            "/api/shared/vaults/{token}",
+            get(routes::access_shared_vault),
+        )
+        .route(
+            "/api/shared/vaults/{token}/export",
+            get(routes::access_shared_vault_export),
+        )
         .layer(build_cors_layer())
-        .with_state(db);
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     tracing::info!("listening on {}", listener.local_addr().unwrap());

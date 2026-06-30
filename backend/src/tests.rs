@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::State,
     http::{HeaderValue, Method, Request, StatusCode},
     routing::{delete, get, post},
     Json, Router,
@@ -11,14 +10,33 @@ use serde_json::json;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 
-use crate::{db::{Db, PoolConfig}, routes};
+use crate::{
+    db::{AppState, create_vault_store, create_event_store, create_audit_store,
+           create_share_store, create_share_token_store, Db, PoolConfig},
+    models::*,
+    routes,
+};
 
 fn test_app() -> Router {
-    test_app_with_db(Arc::new(Db::open(":memory:").unwrap()))
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+    let state = Arc::new(AppState {
+        db: Arc::clone(&db),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    build_router(state)
 }
 
-fn test_app_with_db(db: Arc<Db>) -> Router {
-    db.migrate().unwrap();
+fn test_app_with_state(state: Arc<AppState>) -> Router {
+    state.db.migrate().unwrap();
+    build_router(state)
+}
+
+fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(ready_handler))
@@ -36,7 +54,32 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
             "/notifications/unsubscribe",
             get(routes::unsubscribe),
         )
-        .with_state(db)
+        // Vault share endpoints
+        .route(
+            "/api/vaults/:vault_id/share",
+            post(routes::share_vault),
+        )
+        .route(
+            "/api/vaults/:vault_id/shares",
+            get(routes::list_vault_shares),
+        )
+        .route(
+            "/api/vaults/:vault_id/share/tokens",
+            post(routes::generate_share_token).get(routes::list_share_tokens),
+        )
+        .route(
+            "/api/vaults/:vault_id/share/tokens/revoke",
+            post(routes::revoke_share_token),
+        )
+        .route(
+            "/api/shared/vaults/{token}",
+            get(routes::access_shared_vault),
+        )
+        .route(
+            "/api/shared/vaults/{token}/export",
+            get(routes::access_shared_vault_export),
+        )
+        .with_state(state)
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -46,8 +89,8 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn ready_handler(State(db): State<Arc<Db>>) -> Result<Json<serde_json::Value>, StatusCode> {
-    match db.check_connectivity() {
+async fn ready_handler(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.db.check_connectivity() {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
@@ -436,4 +479,545 @@ mod notification_delivery_tests {
         assert!(!log.is_empty());
         assert_eq!(log[0].status, DeliveryStatus::Sent);
     }
+}
+
+// ── #966: Vault Sharing with Read-Only Access tests ─────────────────────────
+
+#[tokio::test]
+async fn test_share_vault_endpoint_creates_share() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    let app = build_router(state.clone());
+
+    // Seed a vault
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 1000,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    let res = post_json(app, "/api/vaults/vault-1/share", json!({
+        "shared_with": "lawyer@example.com",
+        "permission": "view_only",
+    })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body["vault_id"], "vault-1");
+    assert_eq!(body["shared_with"], "lawyer@example.com");
+    assert_eq!(body["permission"], "view_only");
+}
+
+#[tokio::test]
+async fn test_share_vault_missing_vault_returns_error() {
+    let app = test_app();
+    let res = post_json(app, "/api/vaults/nonexistent/share", json!({
+        "shared_with": "x@example.com",
+        "permission": "view_only",
+    })).await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_generate_share_token_creates_token_and_audit_log() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 5000,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    let app = build_router(state.clone());
+
+    let res = post_json(app, "/api/vaults/vault-1/share/tokens", json!({
+        "shared_with": "family@example.com",
+        "expiry_seconds": 3600,
+    })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body["share"]["vault_id"], "vault-1");
+    assert_eq!(body["share"]["shared_with"], "family@example.com");
+    assert_eq!(body["token"]["permission"], "view_only");
+    assert_eq!(body["token"]["revoked"], false);
+    assert!(body["token"]["token"].as_str().unwrap().len() > 0);
+    assert!(body["access_url"].as_str().unwrap().contains("/api/shared/vaults/"));
+
+    // Verify audit log was written
+    let audit = state.audit_store.lock().unwrap();
+    let share_event = audit.iter().find(|e| e.action == "share_token_generated");
+    assert!(share_event.is_some());
+}
+
+#[tokio::test]
+async fn test_revoke_share_token() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    let token_str = {
+        let token = ShareToken {
+            token: "test-token-123".into(),
+            share_id: "share-1".into(),
+            vault_id: "vault-1".into(),
+            shared_with: "reviewee@example.com".into(),
+            permission: SharePermission::ViewOnly,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::days(7),
+            revoked: false,
+        };
+        let t = token.token.clone();
+        state.share_token_store.lock().unwrap().insert(t.clone(), token);
+        t
+    };
+
+    let app = build_router(state.clone());
+
+    let res = post_json(app, "/api/vaults/vault-1/share/tokens/revoke", json!({
+        "token": token_str,
+    })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body["revoked"], true);
+
+    // Verify token is actually revoked
+    let stored = state.share_token_store.lock().unwrap();
+    let token = stored.get(&token_str).unwrap();
+    assert!(token.revoked);
+
+    // Audit log written
+    let audit = state.audit_store.lock().unwrap();
+    assert!(audit.iter().any(|e| e.action == "share_token_revoked"));
+}
+
+#[tokio::test]
+async fn test_read_only_access_via_valid_share_token() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 9999,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    state.share_token_store.lock().unwrap().insert("valid-token".into(), ShareToken {
+        token: "valid-token".into(),
+        share_id: "share-1".into(),
+        vault_id: "vault-1".into(),
+        shared_with: "reader@example.com".into(),
+        permission: SharePermission::ViewOnly,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::days(7),
+        revoked: false,
+    });
+
+    let app = build_router(state.clone());
+
+    let res = get_req(app, "/api/shared/vaults/valid-token").await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body["id"], "vault-1");
+    assert_eq!(body["balance"], 9999);
+    assert_eq!(body["owner"], "owner-1");
+
+    // Audit log written
+    let audit = state.audit_store.lock().unwrap();
+    assert!(audit.iter().any(|e| e.action == "vault_accessed_via_share"));
+}
+
+#[tokio::test]
+async fn test_read_only_access_revoked_token_returns_error() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    state.share_token_store.lock().unwrap().insert("revoked-token".into(), ShareToken {
+        token: "revoked-token".into(),
+        share_id: "share-1".into(),
+        vault_id: "vault-1".into(),
+        shared_with: "reader@example.com".into(),
+        permission: SharePermission::ViewOnly,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::days(7),
+        revoked: true,
+    });
+
+    let app = build_router(state.clone());
+    let res = get_req(app, "/api/shared/vaults/revoked-token").await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_read_only_access_expired_token_returns_error() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    state.share_token_store.lock().unwrap().insert("expired-token".into(), ShareToken {
+        token: "expired-token".into(),
+        share_id: "share-1".into(),
+        vault_id: "vault-1".into(),
+        shared_with: "reader@example.com".into(),
+        permission: SharePermission::ViewOnly,
+        created_at: Utc::now(),
+        expires_at: Utc::now() - chrono::Duration::hours(1), // expired
+        revoked: false,
+    });
+
+    let app = build_router(state.clone());
+    let res = get_req(app, "/api/shared/vaults/expired-token").await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_read_only_access_invalid_token_returns_error() {
+    let app = test_app();
+    let res = get_req(app, "/api/shared/vaults/nonexistent-token").await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_list_share_tokens() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+
+    // Insert two tokens for vault-1, one token for vault-2
+    for i in 0..2 {
+        state.share_token_store.lock().unwrap().insert(format!("token-{}", i), ShareToken {
+            token: format!("token-{}", i),
+            share_id: format!("share-{}", i),
+            vault_id: "vault-1".into(),
+            shared_with: format!("user{}@example.com", i),
+            permission: SharePermission::ViewOnly,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::days(7),
+            revoked: false,
+        });
+    }
+    state.share_token_store.lock().unwrap().insert("other-token".into(), ShareToken {
+        token: "other-token".into(),
+        share_id: "share-other".into(),
+        vault_id: "vault-2".into(),
+        shared_with: "other@example.com".into(),
+        permission: SharePermission::ViewOnly,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + chrono::Duration::days(7),
+        revoked: false,
+    });
+
+    let app = build_router(state.clone());
+    let res = get_req(app, "/api/vaults/vault-1/share/tokens").await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: Vec<serde_json::Value> = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body.len(), 2);
+}
+
+#[tokio::test]
+async fn test_list_vault_shares() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+
+    state.share_store.lock().unwrap().push(VaultShare {
+        share_id: "s1".into(),
+        vault_id: "vault-1".into(),
+        shared_with: "a@example.com".into(),
+        permission: SharePermission::ViewOnly,
+        created_at: Utc::now(),
+    });
+    state.share_store.lock().unwrap().push(VaultShare {
+        share_id: "s2".into(),
+        vault_id: "vault-1".into(),
+        shared_with: "b@example.com".into(),
+        permission: SharePermission::Admin,
+        created_at: Utc::now(),
+    });
+
+    let app = build_router(state.clone());
+    let res = get_req(app, "/api/vaults/vault-1/shares").await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: Vec<serde_json::Value> = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    assert_eq!(body.len(), 2);
+}
+
+#[tokio::test]
+async fn test_share_token_default_expiry() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    let app = build_router(state.clone());
+    let res = post_json(app, "/api/vaults/vault-1/share/tokens", json!({
+        "shared_with": "test@example.com",
+    })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    let expires_at = body["token"]["expires_at"].as_str().unwrap();
+    let expires_dt = chrono::DateTime::parse_from_rfc3339(expires_at).unwrap();
+    let expected = Utc::now() + chrono::Duration::days(7);
+    // Should be roughly 7 days from now (within tolerance)
+    let diff = (expires_dt - expected).num_seconds().abs();
+    assert!(diff < 10, "expiry should be ~7 days, diff={}s", diff);
+}
+
+#[tokio::test]
+async fn test_share_token_with_custom_expiry() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    let app = build_router(state.clone());
+    let res = post_json(app, "/api/vaults/vault-1/share/tokens", json!({
+        "shared_with": "test@example.com",
+        "expiry_seconds": 1800,
+    })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap()
+    ).unwrap();
+    let expires_at = body["token"]["expires_at"].as_str().unwrap();
+    let expires_dt = chrono::DateTime::parse_from_rfc3339(expires_at).unwrap();
+    let expected = Utc::now() + chrono::Duration::seconds(1800);
+    let diff = (expires_dt - expected).num_seconds().abs();
+    assert!(diff < 10, "expiry should be ~1800s, diff={}s", diff);
+}
+
+#[tokio::test]
+async fn test_share_vault_with_duplicate_shares_allowed() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    let app = build_router(state.clone());
+
+    // Share twice with the same person
+    for _ in 0..2 {
+        let res = post_json(app.clone(), "/api/vaults/vault-1/share", json!({
+            "shared_with": "same@example.com",
+            "permission": "view_only",
+        })).await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    let shares = state.share_store.lock().unwrap();
+    assert_eq!(shares.len(), 2);
+}
+
+#[tokio::test]
+async fn test_audit_log_entries_for_share_events() {
+    let state = Arc::new(AppState {
+        db: Arc::new(Db::open(":memory:").unwrap()),
+        vault_store: create_vault_store(),
+        event_store: create_event_store(),
+        audit_store: create_audit_store(),
+        share_store: create_share_store(),
+        share_token_store: create_share_token_store(),
+    });
+    state.db.migrate().unwrap();
+    state.vault_store.lock().unwrap().insert("vault-1".into(), Vault {
+        id: "vault-1".into(),
+        owner: "owner-1".into(),
+        beneficiary: "ben-1".into(),
+        balance: 100,
+        check_in_interval: 86400,
+        last_check_in: Utc::now(),
+        created_at: Utc::now(),
+        status: VaultStatus::Active,
+        ttl_remaining: Some(86400),
+    });
+
+    // Perform share
+    crate::handlers::share_vault_handler(
+        &state.vault_store,
+        &state.share_store,
+        &state.share_token_store,
+        &state.audit_store,
+        "vault-1",
+        ShareRequest {
+            shared_with: "audit-test@example.com".into(),
+            permission: SharePermission::ViewOnly,
+        },
+    ).unwrap();
+
+    // Verify audit entry
+    let audit = state.audit_store.lock().unwrap();
+    let entry = audit.iter().find(|e| e.action == "vault_shared").unwrap();
+    assert_eq!(entry.actor, "owner-1");
+    assert_eq!(entry.details["vault_id"], "vault-1");
+    assert_eq!(entry.details["shared_with"], "audit-test@example.com");
 }
