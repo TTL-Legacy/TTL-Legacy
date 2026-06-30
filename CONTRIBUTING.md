@@ -75,6 +75,25 @@ The CI pipeline runs `cargo audit` on every PR. Builds will fail if:
 - Any CRITICAL or HIGH severity vulnerabilities are detected
 - Accepted advisories lack proper justification
 
+### Secret Scanning
+
+We use Gitleaks in CI to prevent secrets from being committed in repository files or PR diffs.
+
+- The workflow scans the repository on every push and pull request.
+- Pull requests are scanned against the configured Gitleaks ruleset in `.gitleaks.toml`.
+- Local developers can run the same check before pushing:
+
+```bash
+# Install gitleaks if needed
+brew install gitleaks
+# or: go install github.com/gitleaks/gitleaks/v8@latest
+
+# Scan the repository
+gitleaks detect --source . --config .gitleaks.toml --redact
+```
+
+If a false positive is encountered, add a narrow allowlist entry to `.gitleaks.toml` with a clear justification.
+
 
 
 ## License

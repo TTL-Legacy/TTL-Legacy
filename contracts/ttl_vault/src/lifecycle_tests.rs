@@ -51,11 +51,11 @@ fn test_full_lifecycle_single_beneficiary() {
 
     // 3. Multiple check-ins keep vault alive
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
     assert!(!client.is_expired(&vault_id));
 
     // 4. Miss a check-in → vault expires
@@ -103,7 +103,7 @@ fn test_full_lifecycle_multi_beneficiary_bps_split() {
 
     // 5. Check-in once, then expire
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
     env.ledger().with_mut(|l| l.timestamp += interval + 1);
     assert!(client.is_expired(&vault_id));
 

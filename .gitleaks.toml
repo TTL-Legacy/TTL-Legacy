@@ -1,0 +1,16 @@
+title = "TTL-Legacy gitleaks config"
+
+[allowlist]
+  description = "Allow test/example values and documentation placeholders"
+  paths = [
+    "**/.env.example",
+    "**/README.md",
+    "**/docs/**",
+    "**/mobile/**",
+    "**/backend/src/websocket.rs"
+  ]
+  regexes = [
+    "test-secret-key-for-unit-tests",
+    "tok-secret",
+    "REMINDER_ENCRYPTION_SECRET="
+  ]

@@ -63,8 +63,8 @@ pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
 pub const RESTORE_VAULT_TOPIC: Symbol = symbol_short!("restore");
 pub const PASSKEY_USAGE_TOPIC: Symbol = symbol_short!("pk_usage");
 // Biometric binding events
-pub const BIND_PASSKEY_BIOMETRIC_TOPIC: Symbol = symbol_short!("bind_pk_bio");
-pub const UNBIND_PASSKEY_BIOMETRIC_TOPIC: Symbol = symbol_short!("ubind_pk_bio");
+pub const BIND_PASSKEY_BIOMETRIC_TOPIC: Symbol = symbol_short!("bind_pk");
+pub const UNBIND_PASSKEY_BIOMETRIC_TOPIC: Symbol = symbol_short!("ubind_pk");
 pub const BIO_CHECKIN_TOPIC: Symbol = symbol_short!("bio_ci");
 pub const VAULT_CLONED_TOPIC: Symbol = symbol_short!("v_clone");
 pub const VAULT_CLONED_OVERRIDE_TOPIC: Symbol = symbol_short!("v_clo_ov");
@@ -190,16 +190,6 @@ pub const VESTING_CATCHUP_CLAIMED_TOPIC: Symbol = symbol_short!("vest_cuc");
 pub const VESTING_BONUS_SET_TOPIC: Symbol = symbol_short!("vest_bon");
 pub const VESTING_BONUS_CLAIMED_TOPIC: Symbol = symbol_short!("vest_bonc");
 
-// Issue #581: Token Conversion
-pub const TOKEN_CONVERSION_TOPIC: Symbol = symbol_short!("tok_conv");
-// Issue #582: Token Whitelist Validation
-pub const TOKEN_WHITELIST_VALIDATED_TOPIC: Symbol = symbol_short!("tok_wl");
-// Issue #583: Token Staking
-pub const TOKEN_STAKING_TOPIC: Symbol = symbol_short!("tok_stk");
-pub const TOKEN_UNSTAKING_TOPIC: Symbol = symbol_short!("tok_unstk");
-// Issue #584: Yield Distribution
-pub const YIELD_DISTRIBUTED_TOPIC: Symbol = symbol_short!("yld_dist");
-pub const YIELD_REINVESTED_TOPIC: Symbol = symbol_short!("yld_rein");
 // Issue #585: Token Lending
 pub const TOKEN_LENDING_TOPIC: Symbol = symbol_short!("tok_lend");
 pub const TOKEN_LEND_REPAY_TOPIC: Symbol = symbol_short!("tok_lrep");
@@ -279,7 +269,7 @@ pub const WITHDRAWAL_NOTIF_TOPIC: Symbol = symbol_short!("wd_notif");
 
 // Issue #572: Withdrawal Dispute
 pub const WITHDRAWAL_DISPUTE_FILED_TOPIC: Symbol = symbol_short!("wd_disp");
-pub const WITHDRAWAL_DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("wd_disp_res");
+pub const WITHDRAWAL_DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("wd_disp_r");
 
 pub const BENEFICIARY_TRIGGER_SET_TOPIC: Symbol = symbol_short!("ben_trg");
 pub const BENEFICIARY_TIER_SET_TOPIC: Symbol = symbol_short!("ben_tier");
@@ -375,6 +365,8 @@ pub enum DataKey {
     CheckInNonce(u64),
     // Issue #480: check-in delegates
     CheckInDelegates(u64),
+    // Per-delegation nonce to prevent check-in replay attacks
+    DelegateNonce(u64, Address),
     // Issue #498: beneficiary proof of life
     ProofOfLife(u64),
     // Issue #499: beneficiary release votes
@@ -387,6 +379,8 @@ pub enum DataKey {
     BeneficiaryStatusEntry(u64, Address),
     // Issue: beneficiary veto of owner-defined release conditions before expiry
     BeneficiaryReleaseConditionVeto(u64),
+    // Track whether a vault has already been released once to prevent replayed releases
+    ReleaseAttempted(u64),
     // Hibernation: temporary suspension of check-in requirement
     Hibernation(u64),
     LastCheckInTime(u64),
@@ -411,10 +405,6 @@ pub enum DataKey {
     VestingCatchUp(u64),
     // Issue #546: vesting bonus
     VestingBonus(u64),
-    // Issue #581: token conversion
-    TokenConversion(u64),
-    // Issue #583: token staking
-    TokenStaking(u64),
     // Issue #584: yield distribution config
     YieldDistributionConfig(u64),
     // Issue #585: token lending
@@ -435,6 +425,11 @@ pub enum DataKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
+    // Issue #809: two-step protocol configuration
+    PendingProtocolConfig,
+    ProtocolConfigProposedAt,
+    // Issue #871: metadata UTF-8 enforcement
+    RequireUtf8Metadata,
     // Issue #796: open proposals tracking
     OpenProposals(u64),
 }
@@ -1124,7 +1119,7 @@ pub struct ReleaseVoteEntry {
 #[derive(Clone)]
 pub struct BeneficiaryRotationEntry {
     pub effective_timestamp: u64,
-pub new_beneficiaries: Vec<BeneficiaryEntry>,
+    pub new_beneficiaries: Vec<BeneficiaryEntry>,
 }
 
 /// Configurable countdown notification thresholds for a vault.
@@ -1201,55 +1196,6 @@ pub struct VestingBonusConfig {
     pub bonus_bps: u32,
     /// Seconds after an installment unlocks within which a claim is considered "on time".
     pub on_time_window_seconds: u64,
-}
-
-/// Token conversion configuration - Issue #581.
-#[contracttype]
-#[derive(Clone)]
-pub struct TokenConversion {
-    pub vault_id: u64,
-    pub from_token: Address,
-    pub to_token: Address,
-    /// Conversion rate in basis points (10000 = 1:1).
-    pub conversion_rate: i128,
-    pub enabled: bool,
-    pub created_at: u64,
-}
-
-/// Token staking configuration - Issue #583.
-#[contracttype]
-#[derive(Clone)]
-pub struct TokenStaking {
-    pub vault_id: u64,
-    pub staking_pool: Address,
-    pub staked_amount: i128,
-    pub staking_start: u64,
-    /// Annual yield in basis points (e.g., 500 = 5% APY).
-    pub annual_yield_bps: u32,
-    pub is_active: bool,
-}
-
-/// Yield distribution mode - Issue #584.
-#[contracttype]
-#[derive(Clone)]
-pub enum YieldDistributionMode {
-    /// Send all yield to the beneficiary.
-    DistributeToBeneficiary,
-    /// Reinvest all yield back into the vault balance.
-    Reinvest,
-    /// Send `beneficiary_bps` basis points to the beneficiary; reinvest the rest.
-    Split(u32),
-}
-
-/// Yield distribution config for a vault - Issue #584.
-#[contracttype]
-#[derive(Clone)]
-pub struct YieldDistributionConfig {
-    pub vault_id: u64,
-    pub mode: YieldDistributionMode,
-    pub last_distribution: u64,
-    pub total_distributed: i128,
-    pub total_reinvested: i128,
 }
 
 /// Token lending record - Issue #585.
@@ -1408,4 +1354,7 @@ pub struct ProtocolConfig {
     pub max_check_in_interval: Option<u64>,
     pub max_ttl_seconds: u64,
     pub ttl_decay_rate: u32,
+    /// When true, `set_vault_metadata`, `update_metadata`, and `update_metadata_versioned`
+    /// reject metadata bytes that are not valid UTF-8 — Issue #871.
+    pub require_utf8_metadata: bool,
 }
