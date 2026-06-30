@@ -28,7 +28,7 @@ thiserror = "1"
 csv = "1"
 
 # SQLite used by the axum DB contract (Db::open/migrate/upsert/get/all)
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Push notifications (FCM via HTTP v1 API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
