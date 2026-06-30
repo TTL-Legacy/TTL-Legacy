@@ -64,6 +64,9 @@ pub const BENEFICIARY_CONFLICT_RESOLVED_TOPIC: Symbol = symbol_short!("ben_res")
 pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
 pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
 pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
+// Issue #934: emergency vault recovery code
+pub const EMERGENCY_RECOVERY_GENERATED_TOPIC: Symbol = symbol_short!("erc_gen");
+pub const EMERGENCY_RECOVERY_USED_TOPIC: Symbol = symbol_short!("erc_used");
 pub const RESTORE_VAULT_TOPIC: Symbol = symbol_short!("restore");
 pub const PASSKEY_USAGE_TOPIC: Symbol = symbol_short!("pk_usage");
 // Biometric binding events
