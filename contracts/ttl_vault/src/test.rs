@@ -940,6 +940,23 @@ fn test_deposit_rejects_negative_amount() {
 }
 
 #[test]
+fn test_deposit_rejects_non_owner_depositor() {
+    // A third party should not be able to deposit into a vault they do not own.
+    // Without this guard a malicious actor can fill vault.balance to max_deposit_amount,
+    // preventing the owner from ever depositing again (griefing).
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let attacker = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    StellarAssetClient::new(&env, &token_address).mint(&attacker, &1_000i128);
+
+    let err = client.try_deposit(&vault_id, &attacker, &500i128).unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        soroban_sdk::Error::from_contract_error(ContractError::UnauthorizedDepositor as u32)
+    );
+}
+
+#[test]
 fn test_update_metadata_can_be_overwritten() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);

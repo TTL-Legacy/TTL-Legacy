@@ -1593,6 +1593,9 @@ impl TtlVaultContract {
         }
         from.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
+        if from != vault.owner {
+            panic_with_error!(&env, ContractError::UnauthorizedDepositor);
+        }
         if vault.is_paused {
             panic_with_error!(&env, ContractError::Paused);
         }
