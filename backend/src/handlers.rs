@@ -446,6 +446,8 @@ pub fn set_notification_preferences_handler(
         .ok_or_else(|| "Vault not found".to_string())?;
 
     // Map HTTP channels into legacy boolean flags.
+    let preferred = request.channels.first().cloned();
+    let fallback = request.channels.get(1).cloned();
     let prefs = NotificationPreferences {
         owner: vault_id.to_string(),
         expiry_warning_enabled: request
@@ -462,6 +464,9 @@ pub fn set_notification_preferences_handler(
             .any(|c| matches!(c, NotificationChannel::Push)),
         warning_hours_before: 24,
         locale: None,
+        preferred_channel: preferred,
+        fallback_channel: fallback,
+        unsubscribed: false,
     };
 
     set_notification_preferences(notif_store, prefs.clone());

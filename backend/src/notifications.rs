@@ -61,6 +61,9 @@ const RETRY_DELAYS_SECS: [u64; 5] = [60, 300, 900, 3_600, 21_600];
 
 pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 5;
 
+/// Window in seconds for deduplicating scheduled notifications.
+const DEDUP_WINDOW_SECONDS: i64 = 300;
+
 // ── FCM HTTP v1 client ───────────────────────────────────────────────────────
 
 /// Thin wrapper around the FCM HTTP v1 send endpoint.
@@ -316,6 +319,7 @@ impl NotificationService {
             scheduled_at: fire_at,
             status: DeliveryStatus::Pending,
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
         });
     }
 
@@ -355,6 +359,7 @@ impl NotificationService {
             scheduled_at: Utc::now(),
             status: DeliveryStatus::Pending,
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
         });
     }
 
@@ -899,6 +904,9 @@ mod tests {
                 vault_released_enabled: true,
                 warning_hours_before: 24,
                 locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
             },
 
         );
@@ -929,6 +937,9 @@ mod tests {
                 vault_released_enabled: true,
                 warning_hours_before: 24,
                 locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
             },
         );
 
@@ -958,6 +969,9 @@ mod tests {
                 vault_released_enabled: true,
                 warning_hours_before: 24,
                 locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
             },
         );
         svc.schedule_immediate("v1", "owner1", NotificationType::VaultReleased);
@@ -979,6 +993,9 @@ mod tests {
                 vault_released_enabled: false,
                 warning_hours_before: 24,
                 locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
             },
         );
         svc.schedule_immediate("v1", "owner1", NotificationType::VaultReleased);

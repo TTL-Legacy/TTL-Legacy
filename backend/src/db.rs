@@ -1,6 +1,6 @@
 use crate::models::{
     Vault, VaultEvent, AuditEntry, SearchQuery, SearchResult, VaultStatus,
-    VaultBackup, VaultShare, VaultNotificationPreferences,
+    VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
     ReminderPreferences, Channel, Frequency,
 };
 
@@ -543,6 +543,24 @@ impl Db {
                 "2",
                 "ALTER TABLE reminder_preferences ADD COLUMN deleted_at TEXT;",
             ),
+            (
+                "3",
+                r#"
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp  TEXT NOT NULL,
+                    user_id    TEXT NOT NULL DEFAULT '',
+                    action     TEXT NOT NULL,
+                    resource   TEXT NOT NULL DEFAULT '',
+                    result     TEXT NOT NULL DEFAULT 'success',
+                    ip_address TEXT NOT NULL DEFAULT '',
+                    details    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id   ON audit_logs(user_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_action    ON audit_logs(action);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -770,6 +788,109 @@ impl Db {
         let token = uuid::Uuid::new_v4().to_string();
         self.store_unsubscribe_token(&token, owner);
         token
+    }
+
+    // ── Audit Log persistence (#961) ─────────────────────────────────────────
+
+    pub fn insert_audit_log(&self, entry: &AuditLogEntry) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO audit_logs (timestamp, user_id, action, resource, result, ip_address, details)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                entry.timestamp.to_rfc3339(),
+                entry.user_id,
+                entry.action,
+                entry.resource,
+                entry.result,
+                entry.ip_address,
+                entry.details.as_ref().map(|d| d.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn query_audit_logs(&self, query: &AuditLogQuery) -> Result<Vec<AuditLogEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT id, timestamp, user_id, action, resource, result, ip_address, details FROM audit_logs WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref user_id) = query.user_id {
+            sql.push_str(" AND user_id = ?");
+            param_values.push(Box::new(user_id.clone()));
+        }
+        if let Some(ref action) = query.action {
+            sql.push_str(" AND action = ?");
+            param_values.push(Box::new(action.clone()));
+        }
+        if let Some(ref resource) = query.resource {
+            sql.push_str(" AND resource = ?");
+            param_values.push(Box::new(resource.clone()));
+        }
+        if let Some(ref result_val) = query.result {
+            sql.push_str(" AND result = ?");
+            param_values.push(Box::new(result_val.clone()));
+        }
+        if let Some(after) = query.after {
+            sql.push_str(" AND timestamp >= ?");
+            param_values.push(Box::new(after.to_rfc3339()));
+        }
+        if let Some(before) = query.before {
+            sql.push_str(" AND timestamp <= ?");
+            param_values.push(Box::new(before.to_rfc3339()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(100);
+        let offset = query.offset.unwrap_or(0);
+        sql.push_str(" LIMIT ? OFFSET ?");
+        param_values.push(Box::new(limit));
+        param_values.push(Box::new(offset));
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            let timestamp_str: String = r.get(1)?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                    1, rusqlite::types::Type::Text, Box::new(e),
+                ))?;
+            let details_str: Option<String> = r.get(7)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(AuditLogEntry {
+                id: r.get(0)?,
+                timestamp,
+                user_id: r.get(2)?,
+                action: r.get(3)?,
+                resource: r.get(4)?,
+                result: r.get(5)?,
+                ip_address: r.get(6)?,
+                details,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn purge_old_audit_logs(&self, retention_days: i64) -> Result<u64, rusqlite::Error> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM audit_logs WHERE timestamp < ?1",
+            params![cutoff],
+        )?;
+        Ok(count as u64)
     }
 }
 

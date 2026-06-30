@@ -4,6 +4,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{HeaderValue, Method, Request, StatusCode},
+    middleware,
     routing::{delete, get, post},
     Json, Router,
 };

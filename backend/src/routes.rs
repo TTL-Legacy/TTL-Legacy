@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
+    audit,
     db::Db,
     error::AppError,
     handlers::{parse_scenario_types, simulate_release_handler},
