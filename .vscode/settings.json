@@ -1,0 +1,11 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "./Cargo.toml"
+  ],
+  "rust-analyzer.cargo.allFeatures": true,
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.debug.engine": "vadimcn.vscode-lldb",
+  "rust-analyzer.lens.debug.enable": true,
+  "rust-analyzer.checkOnSave": true
+}

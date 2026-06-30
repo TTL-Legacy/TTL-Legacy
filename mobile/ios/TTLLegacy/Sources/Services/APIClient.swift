@@ -92,6 +92,33 @@ final class APIClient {
         return result["ttl_remaining"] ?? 0
     }
 
+    // MARK: - 2FA
+
+    func get2FAStatus(vaultID: String) async throws -> TwoFactorStatus {
+        try await get(path: "/vaults/\(vaultID)/2fa/status")
+    }
+
+    func enable2FA(vaultID: String, method: TwoFactorMethod, phone: String? = nil, email: String? = nil) async throws -> Enable2FAResponse {
+        let body = Enable2FARequest(method: method, phone: phone, email: email)
+        return try await post(path: "/vaults/\(vaultID)/2fa/enable", body: body)
+    }
+
+    func verify2FA(vaultID: String, otp: String) async throws {
+        let _: EmptyBody = try await post(path: "/vaults/\(vaultID)/2fa/verify", body: Verify2FARequest(otp: otp))
+    }
+
+    func disable2FA(vaultID: String) async throws {
+        let _: EmptyBody = try await post(path: "/vaults/\(vaultID)/2fa/disable", body: EmptyBody())
+    }
+
+    func challenge2FA(vaultID: String) async throws -> TwoFactorStatus {
+        try await post(path: "/vaults/\(vaultID)/2fa/challenge", body: EmptyBody())
+    }
+
+    func clear2FASession(vaultID: String) async throws {
+        let _: EmptyBody = try await post(path: "/vaults/\(vaultID)/2fa/session/clear", body: EmptyBody())
+    }
+
     // MARK: - Push Notifications
 
     func registerPushToken(_ token: String) async throws {

@@ -7,8 +7,14 @@ import androidx.lifecycle.viewModelScope
 import com.ttllegacy.api.ApiClient
 import com.ttllegacy.api.ApiResult
 import com.ttllegacy.api.TokenProvider
+import com.ttllegacy.models.*
 import com.ttllegacy.models.CreateVaultRequest
 import com.ttllegacy.models.Vault
+import com.ttllegacy.models.TwoFactorMethod
+import com.ttllegacy.models.TwoFactorStatus
+import com.ttllegacy.models.Enable2FARequest
+import com.ttllegacy.models.Enable2FAResponse
+import com.ttllegacy.models.Verify2FARequest
 import com.ttllegacy.services.CheckInSyncWorker
 import com.ttllegacy.services.NotificationHelper
 import com.ttllegacy.services.PasskeyService
@@ -56,6 +62,63 @@ class AuthViewModel @Inject constructor(
     fun signOut() {
         tokenProvider.clear()
         _state.update { it.copy(isAuthenticated = false) }
+    }
+}
+
+// --- TwoFactor ViewModel ---
+
+data class TwoFactorUiState(
+    val isLoading: Boolean = false,
+    val error: String? = null,
+    val verified: Boolean = false,
+    val setupResponse: Enable2FAResponse? = null,
+    val status: TwoFactorStatus? = null
+)
+
+@HiltViewModel
+class TwoFactorViewModel @Inject constructor(
+    private val apiClient: ApiClient
+) : ViewModel() {
+
+    private val _state = MutableStateFlow(TwoFactorUiState())
+    val state = _state.asStateFlow()
+
+    fun loadStatus(vaultId: String) = viewModelScope.launch {
+        _state.update { it.copy(isLoading = true, error = null) }
+        when (val result = apiClient.get2FAStatus(vaultId)) {
+            is ApiResult.Success -> _state.update { it.copy(status = result.data, isLoading = false) }
+            is ApiResult.Error -> _state.update { it.copy(isLoading = false, error = result.message) }
+            ApiResult.NetworkUnavailable -> _state.update { it.copy(isLoading = false, error = "No network") }
+        }
+    }
+
+    fun enable2FA(vaultId: String, method: TwoFactorMethod, phone: String?, email: String?) = viewModelScope.launch {
+        _state.update { it.copy(isLoading = true, error = null) }
+        val req = Enable2FARequest(method = method, phone = phone, email = email)
+        when (val result = apiClient.enable2FA(vaultId, req)) {
+            is ApiResult.Success -> _state.update { it.copy(setupResponse = result.data, isLoading = false) }
+            is ApiResult.Error -> _state.update { it.copy(isLoading = false, error = result.message) }
+            ApiResult.NetworkUnavailable -> _state.update { it.copy(isLoading = false, error = "No network") }
+        }
+    }
+
+    fun verify2FA(vaultId: String, otp: String) = viewModelScope.launch {
+        _state.update { it.copy(isLoading = true, error = null) }
+        val req = Verify2FARequest(otp = otp)
+        when (val result = apiClient.verify2FA(vaultId, req)) {
+            is ApiResult.Success -> _state.update { it.copy(verified = true, isLoading = false) }
+            is ApiResult.Error -> _state.update { it.copy(isLoading = false, error = result.message) }
+            ApiResult.NetworkUnavailable -> _state.update { it.copy(isLoading = false, error = "No network") }
+        }
+    }
+
+    fun disable2FA(vaultId: String) = viewModelScope.launch {
+        _state.update { it.copy(isLoading = true, error = null) }
+        when (val result = apiClient.disable2FA(vaultId)) {
+            is ApiResult.Success -> _state.update { it.copy(status = null, isLoading = false) }
+            is ApiResult.Error -> _state.update { it.copy(isLoading = false, error = result.message) }
+            ApiResult.NetworkUnavailable -> _state.update { it.copy(isLoading = false, error = "No network") }
+        }
     }
 }
 

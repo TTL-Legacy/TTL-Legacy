@@ -72,7 +72,7 @@ fn regression_checkin_extends_ttl() {
     assert!(ttl_before.is_some(), "TTL should exist after creation");
 
     env.ledger().set_sequence_number(env.ledger().sequence() + 500);
-    client.check_in(&vault_id);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
 
     let ttl_after = client.get_ttl_remaining(&vault_id);
     assert!(ttl_after.is_some(), "TTL should exist after check-in");

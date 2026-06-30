@@ -35,6 +35,16 @@
                     android:pathPrefix="/accept" />
             </intent-filter>
 
+            <!-- Deep link: ttllegacy://vault/{vault_id}/{action} (#964) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="ttllegacy"
+                    android:host="vault" />
+            </intent-filter>
+
         </activity>
 
         <service
