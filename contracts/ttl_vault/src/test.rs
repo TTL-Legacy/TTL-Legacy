@@ -4845,6 +4845,103 @@ fn test_get_check_in_streak_increments_on_time() {
     assert_eq!(streak2.best, 2);
 }
 
+// ── Issue #873: paginated check-in history access ────────────────────────────
+
+#[test]
+fn test_get_check_in_history_page_returns_first_page() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let passkey = BytesN::from_array(&env, &[1u8; 32]);
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    // Record 5 check-ins
+    for i in 0..5u64 {
+        env.ledger().with_mut(|l| l.timestamp += 1800);
+        client.check_in(&id, &owner, &passkey).unwrap();
+    }
+
+    let page = client.get_check_in_history_page(&id, &0u32, &3u32);
+    assert_eq!(page.len(), 3);
+    // Page 0 returns the 3 oldest entries
+    for i in 0..3 {
+        let entry = page.get(i).unwrap();
+        assert!(entry.timestamp > 0);
+    }
+}
+
+#[test]
+fn test_get_check_in_history_page_returns_second_page() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let passkey = BytesN::from_array(&env, &[1u8; 32]);
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    // Record 5 check-ins
+    for i in 0..5u64 {
+        env.ledger().with_mut(|l| l.timestamp += 1800);
+        client.check_in(&id, &owner, &passkey).unwrap();
+    }
+
+    let page = client.get_check_in_history_page(&id, &1u32, &3u32);
+    assert_eq!(page.len(), 2); // remaining 2 entries
+}
+
+#[test]
+fn test_get_check_in_history_page_returns_empty_for_out_of_bounds() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let passkey = BytesN::from_array(&env, &[1u8; 32]);
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    env.ledger().with_mut(|l| l.timestamp += 1800);
+    client.check_in(&id, &owner, &passkey).unwrap();
+
+    let page = client.get_check_in_history_page(&id, &10u32, &10u32);
+    assert_eq!(page.len(), 0);
+}
+
+#[test]
+fn test_get_check_in_history_page_with_full_50_entries() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let passkey = BytesN::from_array(&env, &[1u8; 32]);
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    // Record 55 check-ins (fills up 50 and drops the first 5)
+    for i in 0..55u64 {
+        env.ledger().with_mut(|l| l.timestamp += 1800);
+        client.check_in(&id, &owner, &passkey).unwrap();
+    }
+
+    let full = client.get_check_in_history(&id);
+    assert_eq!(full.len(), 50);
+
+    // Page 0 should have page_size entries
+    let page = client.get_check_in_history_page(&id, &0u32, &20u32);
+    assert_eq!(page.len(), 20);
+
+    // Page 2 (last page) should have the remaining 10
+    let page2 = client.get_check_in_history_page(&id, &2u32, &20u32);
+    assert_eq!(page2.len(), 10);
+}
+
+#[test]
+fn test_get_check_in_history_page_entries_in_chronological_order() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let passkey = BytesN::from_array(&env, &[1u8; 32]);
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    // Record 3 check-ins at known timestamps
+    env.ledger().with_mut(|l| l.timestamp += 1000);
+    client.check_in(&id, &owner, &passkey).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 2000);
+    client.check_in(&id, &owner, &passkey).unwrap();
+    env.ledger().with_mut(|l| l.timestamp += 3000);
+    client.check_in(&id, &owner, &passkey).unwrap();
+
+    let page = client.get_check_in_history_page(&id, &0u32, &3u32);
+    assert_eq!(page.len(), 3);
+    // Entries should be in chronological order
+    assert!(page.get(0).unwrap().timestamp < page.get(1).unwrap().timestamp);
+    assert!(page.get(1).unwrap().timestamp < page.get(2).unwrap().timestamp);
+}
+
 // ── Issue #481: check-in proof-of-work ───────────────────────────────────────
 
 #[test]

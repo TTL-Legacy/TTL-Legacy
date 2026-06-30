@@ -11196,19 +11196,36 @@ impl TtlVaultContract {
     /// vault will next expire. Falls back to `check_in_interval` if history is sparse.
     pub fn predict_expiry(env: Env, vault_id: u64) -> u64 {
         let vault = Self::load_vault(&env, vault_id);
-        let history: Vec<CheckInHistoryEntry> = env
+        let len: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::CheckInHistory(vault_id))
-            .unwrap_or_else(|| Vec::new(&env));
+            .get(&DataKey::CheckInHistoryLen(vault_id))
+            .unwrap_or(0);
 
-        let predicted_interval = if history.len() >= 2 {
-            // Average interval over last min(10, len) entries
-            let n = history.len().min(10) as u64;
-            let start_idx = history.len().saturating_sub(n as u32);
-            let first = history.get(start_idx).unwrap().timestamp;
-            let last = history.get(history.len() - 1).unwrap().timestamp;
-            let avg = (last - first) / (n - 1);
+        let predicted_interval = if len >= 2 {
+            let n = len.min(10);
+            let head: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CheckInHistoryHead(vault_id))
+                .unwrap_or(0);
+
+            let first_logical = len - n;
+            let first_phys = if len < 50 { first_logical } else { (head + first_logical) % 50 };
+            let last_phys = if len < 50 { len - 1 } else { (head + len - 1) % 50 };
+
+            let first_entry: CheckInHistoryEntry = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CheckInEntry(vault_id, first_phys))
+                .unwrap();
+            let last_entry: CheckInHistoryEntry = env
+                .storage()
+                .persistent()
+                .get(&DataKey::CheckInEntry(vault_id, last_phys))
+                .unwrap();
+
+            let avg = (last_entry.timestamp - first_entry.timestamp) / (n as u64 - 1);
             avg.max(1)
         } else {
             vault.check_in_interval
@@ -11220,12 +11237,69 @@ impl TtlVaultContract {
         predicted
     }
 
-    /// Returns the check-in history for a vault.
-    pub fn get_check_in_history(env: Env, vault_id: u64) -> Vec<CheckInHistoryEntry> {
-        env.storage()
+    /// Returns a paginated page of the check-in history for a vault.
+    /// Entries are returned in chronological order (oldest first).
+    /// Returns an empty vec if `page` is beyond the available entries.
+    pub fn get_check_in_history_page(
+        env: Env,
+        vault_id: u64,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<CheckInHistoryEntry> {
+        let len: u32 = env
+            .storage()
             .persistent()
-            .get(&DataKey::CheckInHistory(vault_id))
-            .unwrap_or_else(|| Vec::new(&env))
+            .get(&DataKey::CheckInHistoryLen(vault_id))
+            .unwrap_or(0);
+        let start = page * page_size;
+        if start >= len {
+            return Vec::new(&env);
+        }
+        let end = (start + page_size).min(len);
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CheckInHistoryHead(vault_id))
+            .unwrap_or(0);
+
+        let mut result: Vec<CheckInHistoryEntry> = Vec::new(&env);
+        for i in start..end {
+            let phys = if len < 50 { i } else { (head + i) % 50 };
+            if let Some(entry) = env.storage().persistent().get::<DataKey, CheckInHistoryEntry>(
+                &DataKey::CheckInEntry(vault_id, phys),
+            ) {
+                result.push_back(entry);
+            }
+        }
+        result
+    }
+
+    /// Returns the full check-in history for a vault (backward compatible).
+    pub fn get_check_in_history(env: Env, vault_id: u64) -> Vec<CheckInHistoryEntry> {
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CheckInHistoryLen(vault_id))
+            .unwrap_or(0);
+        if len == 0 {
+            return Vec::new(&env);
+        }
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CheckInHistoryHead(vault_id))
+            .unwrap_or(0);
+
+        let mut result: Vec<CheckInHistoryEntry> = Vec::new(&env);
+        for i in 0..len {
+            let phys = if len < 50 { i } else { (head + i) % 50 };
+            if let Some(entry) = env.storage().persistent().get::<DataKey, CheckInHistoryEntry>(
+                &DataKey::CheckInEntry(vault_id, phys),
+            ) {
+                result.push_back(entry);
+            }
+        }
+        result
     }
 
     /// Returns a page of check-in history for a vault.
@@ -11483,17 +11557,22 @@ impl TtlVaultContract {
     // ── Issue #482: check-in history helpers ─────────────────────────────────
 
     fn record_check_in_history(env: &Env, vault_id: u64, timestamp: u64) {
-        let key = DataKey::CheckInHistory(vault_id);
-        let mut history: Vec<CheckInHistoryEntry> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(env));
-        history.push_back(CheckInHistoryEntry { timestamp });
-        // Keep at most 50 entries to bound storage growth
-        while history.len() > 50 {
-            history.remove(0);
+        let len_key = DataKey::CheckInHistoryLen(vault_id);
+        let head_key = DataKey::CheckInHistoryHead(vault_id);
+        let mut len: u32 = env.storage().persistent().get(&len_key).unwrap_or(0);
+        let mut head: u32 = env.storage().persistent().get(&head_key).unwrap_or(0);
+        let entry = CheckInHistoryEntry { timestamp };
+
+        if len < 50 {
+            let entry_key = DataKey::CheckInEntry(vault_id, len);
+            env.storage().persistent().set(&entry_key, &entry);
+            len += 1;
+        } else {
+            let entry_key = DataKey::CheckInEntry(vault_id, head);
+            env.storage().persistent().set(&entry_key, &entry);
+            head = (head + 1) % 50;
         }
+
         let vault = Self::load_vault(env, vault_id);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, &history);

@@ -375,6 +375,12 @@ pub enum DataKey {
     VaultSnapshotTimestamps(u64),
     // Issue #482: TTL prediction history
     CheckInHistory(u64),
+    // Issue #873: individual check-in history entry for paginated access
+    CheckInEntry(u64, u32),
+    // Issue #873: ring buffer head pointer for check-in history
+    CheckInHistoryHead(u64),
+    // Issue #873: number of check-in history entries
+    CheckInHistoryLen(u64),
     CheckInStreak(u64),
     // Issue #481: proof-of-work nonce
     CheckInNonce(u64),
