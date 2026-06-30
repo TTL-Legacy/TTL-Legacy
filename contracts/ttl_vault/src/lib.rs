@@ -2598,6 +2598,13 @@ impl TtlVaultContract {
             };
             let token_client = token::Client::new(&env, &vault.token_address);
 
+            // Calculate burn amount based on vault's burn_percentage (basis points)
+            let burn_amount: i128 = (release_amount * vault.burn_percentage as i128) / 10_000;
+            let net_amount: i128 = release_amount - burn_amount;
+            if burn_amount > 0 {
+                // Emit burn event; funds are effectively removed from circulation
+                env.events().publish((BURN_EVENT_TOPIC, vault_id), burn_amount);
+            }
             if vault.beneficiaries.is_empty() {
                 token_client.transfer(
                     &env.current_contract_address(),
@@ -2613,7 +2620,8 @@ impl TtlVaultContract {
                     },
                 );
             } else {
-                Self::distribute_release_amount(&env, vault_id, &vault, release_amount, mode);
+                // Distribute net amount among beneficiaries
+                Self::distribute_release_amount(&env, vault_id, &vault, net_amount, mode);
             }
 
             // Checks-Effects-Interactions: mutate vault state BEFORE external token transfer.
@@ -5225,6 +5233,31 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((SET_SPENDING_LIMIT_TOPIC, vault_id), limit);
+    }
+
+    /// Sets the burn percentage for a vault (0-10000 basis points).
+    /// Owner-only. Pass 0 to disable burning.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    /// * `percentage` - Burn percentage in basis points (0-10_000)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if `percentage` > 10_000
+    pub fn set_burn_percentage(env: Env, vault_id: u64, percentage: u32) {
+        let mut vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+        if percentage > 10_000 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        vault.burn_percentage = percentage;
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish((SET_BURN_PERCENTAGE_TOPIC, vault_id), percentage);
+    }
+
     }
 
     /// Checks if a vault exists.

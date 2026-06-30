@@ -48,6 +48,8 @@ pub const SET_MAX_TTL_TOPIC: Symbol = symbol_short!("set_ttl");
 pub const SET_DECAY_RATE_TOPIC: Symbol = symbol_short!("set_dec");
 pub const ACCEPTANCE_DEADLINE_EXPIRED_TOPIC: Symbol = symbol_short!("acc_exp");
 pub const TTL_DECAY_TOPIC: Symbol = symbol_short!("ttl_dec");
+pub const SET_BURN_PERCENTAGE_TOPIC: Symbol = symbol_short!("set_burn_pct");
+pub const BURN_EVENT_TOPIC: Symbol = symbol_short!("burn_evt");
 pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
 pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_exp");
 pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acc");
@@ -747,6 +749,8 @@ pub struct Vault {
     pub spending_limit: Option<i128>,
     /// Penalty in basis points deducted per missed check-in interval
     pub inactivity_penalty_bps: Option<u32>,
+    /// Burn percentage in basis points (0-10000). 0 means no burn.
+    pub burn_percentage: u32,
     /// Address that receives inactivity penalty transfers
     pub penalty_recipient: Option<Address>,
 }
