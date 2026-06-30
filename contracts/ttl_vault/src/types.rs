@@ -288,6 +288,11 @@ pub const WITHDRAWAL_RATE_LIMITED_TOPIC: Symbol = symbol_short!("wd_rl");
 pub const WITHDRAWAL_ESCROW_CREATED_TOPIC: Symbol = symbol_short!("wd_esc");
 pub const WITHDRAWAL_ESCROW_VERIFIED_TOPIC: Symbol = symbol_short!("wd_ver");
 
+// Vault Partial Liquidation Before Release (TTL-Legacy);
+// Emits (vault_id, amount, ttl_remaining_before). The TTL is intentionally
+// not extended on liquidation so the countdown keeps running.
+pub const PARTIAL_LIQUIDATE_TOPIC: Symbol = symbol_short!("part_lq");
+
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 

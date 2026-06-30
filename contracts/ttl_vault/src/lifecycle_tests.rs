@@ -6,7 +6,7 @@ use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{self, StellarAssetClient},
-    vec, Address, Env,
+    vec, Address, BytesN, Env,
 };
 
 fn setup_lifecycle() -> (
@@ -153,4 +153,112 @@ fn test_full_lifecycle_with_hibernation() {
     let before = token_client.balance(&beneficiary);
     client.trigger_release(&vault_id);
     assert_eq!(token_client.balance(&beneficiary) - before, 200_000);
+}
+
+// --- Vault Partial Liquidation Before Release ---
+
+/// Owner can partially liquidate up to the percentage cap, balance is debited correctly
+#[test]
+fn test_partial_liquidate_within_limit_succeeds() {
+    let (env, owner, beneficiary, _token_address, client) = setup_lifecycle();
+    let interval = 10_000u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&vault_id, &owner, &1_000_000i128);
+
+    // Liquidate 25% = 250_000
+    client.partial_liquidate(&vault_id, &250_000i128, &25u32).unwrap();
+    assert_eq!(client.get_vault(&vault_id).balance, 750_000);
+
+    // Second liquidation at 10% bound against new balance: 75_000
+    client.partial_liquidate(&vault_id, &75_000i128, &10u32).unwrap();
+    assert_eq!(client.get_vault(&vault_id).balance, 675_000);
+}
+
+/// Owner requesting more than the percentage cap is rejected
+#[test]
+fn test_partial_liquidate_exceeds_limit_rejected() {
+    let (env, owner, beneficiary, _token_address, client) = setup_lifecycle();
+    let interval = 10_000u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&vault_id, &owner, &1_000_000i128);
+
+    // 11% of 1_000_000 = 110_000; asking 120_000 should be rejected
+    let err = client
+        .try_partial_liquidate(&vault_id, &120_000i128, &11u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::LiquidationExceedsLimit);
+
+    // Balance and TTL untouched on rejected call
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000_000);
+}
+
+/// TTL countdown is NOT extended by partial liquidation
+#[test]
+fn test_partial_liquidate_preserves_ttl() {
+    let (env, owner, beneficiary, _token_address, client) = setup_lifecycle();
+    let interval = 10_000u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&vault_id, &owner, &1_000_000i128);
+
+    // Move time forward to be partway through the interval.
+    env.ledger().with_mut(|l| l.timestamp = 8_000);
+
+    let ttl_before = client.get_ttl_remaining(&vault_id).unwrap();
+    assert_eq!(ttl_before, interval - 8_000);
+
+    // Liquidate well within the bounds (1%).
+    client.partial_liquidate(&vault_id, &5_000i128, &1u32).unwrap();
+
+    // TTL remaining must be identical after liquidation — last_check_in unchanged.
+    let ttl_after = client.get_ttl_remaining(&vault_id).unwrap();
+    assert_eq!(
+        ttl_after, ttl_before,
+        "partial_liquidate must not extend TTL"
+    );
+
+    // Balance was correctly debited.
+    assert_eq!(client.get_vault(&vault_id).balance, 995_000);
+}
+
+/// A regular `check_in` still resets TTL after partial liquidation (no interaction)
+#[test]
+fn test_partial_liquidate_then_check_in_resets_ttl() {
+    let (env, owner, beneficiary, _token_address, client) = setup_lifecycle();
+    let interval = 10_000u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&vault_id, &owner, &1_000_000i128);
+
+    env.ledger().with_mut(|l| l.timestamp = 9_000);
+    client.partial_liquidate(&vault_id, &50_000i128, &5u32).unwrap();
+
+    // Now check-in as normal and confirm TTL extends.
+    let passkey = BytesN::from_array(&env, &[0u8; 32]);
+    client.check_in(&vault_id, &owner, &passkey).unwrap();
+    let ttl_after_checkin = client.get_ttl_remaining(&vault_id).unwrap();
+    assert_eq!(ttl_after_checkin, interval);
+}
+
+/// percentage_allowed = 0 is rejected; percentage_allowed > 100 is rejected
+#[test]
+fn test_partial_liquidate_invalid_percentage_rejected() {
+    let (env, owner, beneficiary, _token_address, client) = setup_lifecycle();
+    let interval = 10_000u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&vault_id, &owner, &1_000_000i128);
+
+    let err_zero = client
+        .try_partial_liquidate(&vault_id, &1i128, &0u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err_zero, ContractError::InvalidPercentage);
+
+    let err_too_large = client
+        .try_partial_liquidate(&vault_id, &1i128, &101u32)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err_too_large, ContractError::InvalidPercentage);
+
+    // Balance unchanged.
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000_000);
 }
