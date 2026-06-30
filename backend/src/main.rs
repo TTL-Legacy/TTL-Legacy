@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 mod db;
 mod error;
+mod handlers;
 mod models;
 mod routes;
 mod scheduler;
@@ -95,6 +96,10 @@ async fn main() {
         .route(
             "/api/vaults/:vault_id/reminders",
             get(routes::list_vault_reminders),
+        )
+        .route(
+            "/api/vaults/:vault_id/simulate-release",
+            get(routes::simulate_release),
         )
         .layer(build_cors_layer())
         .with_state(db);

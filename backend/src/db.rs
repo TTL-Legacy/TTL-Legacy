@@ -452,6 +452,8 @@ impl PoolConfig {
 pub struct Db {
     conn: std::sync::Mutex<Connection>,
     pool_config: PoolConfig,
+    /// In-memory vault store shared across the application.
+    pub vault_store: VaultStore,
 }
 
 impl Db {
@@ -469,7 +471,18 @@ impl Db {
                 max: config.max,
                 timeout_secs: config.timeout_secs,
             },
+            vault_store: create_vault_store(),
         })
+    }
+
+    /// Insert or replace a vault in the in-memory store.
+    pub fn insert_vault(&self, vault: crate::models::Vault) {
+        self.vault_store.lock().unwrap().insert(vault.id.clone(), vault);
+    }
+
+    /// Retrieve a vault from the in-memory store by string ID.
+    pub fn get_vault(&self, vault_id: &str) -> Option<crate::models::Vault> {
+        self.vault_store.lock().unwrap().get(vault_id).cloned()
     }
 
     pub fn check_connectivity(&self) -> Result<(), rusqlite::Error> {
