@@ -238,6 +238,8 @@ pub enum ContractError {
     AuctionEnded = 80,
     AuctionNotEnded = 81,
     InvalidVestingSchedule = 82,
+    // Per-delegation nonce mismatch (replay attack prevention)
+    InvalidNonce = 83,
 }
 
 #[contract]
@@ -1232,7 +1234,7 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn check_in(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn check_in(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>, nonce: u64) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
@@ -1241,8 +1243,20 @@ impl TtlVaultContract {
         if vault.is_paused {
             return Err(ContractError::Paused);
         }
-        if caller != vault.owner && !Self::is_check_in_delegate(&env, vault_id, &caller) {
+        let is_delegate = caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
+        if caller != vault.owner && !is_delegate {
             return Err(ContractError::NotOwner);
+        }
+        // Enforce per-delegation nonce to prevent replay attacks
+        if is_delegate {
+            let nonce_key = DataKey::DelegateNonce(vault_id, caller.clone());
+            let expected: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
+            if nonce != expected {
+                return Err(ContractError::InvalidNonce);
+            }
+            env.storage().persistent().set(&nonce_key, &(expected + 1));
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().extend_ttl(&nonce_key, VAULT_TTL_THRESHOLD, ttl);
         }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
@@ -6471,8 +6485,8 @@ impl TtlVaultContract {
         longitude_micro: i64,
         country_code: String,
     ) -> Result<(), ContractError> {
-        // Delegate to standard check_in for all validations
-        Self::check_in(env.clone(), vault_id, caller, passkey_hash)?;
+        // Delegate to standard check_in for all validations (owner call; nonce unused)
+        Self::check_in(env.clone(), vault_id, caller, passkey_hash, 0)?;
 
         let now = env.ledger().timestamp();
         let entry = GeoCheckInEntry {

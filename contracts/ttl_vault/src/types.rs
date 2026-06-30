@@ -375,6 +375,8 @@ pub enum DataKey {
     CheckInNonce(u64),
     // Issue #480: check-in delegates
     CheckInDelegates(u64),
+    // Per-delegation nonce to prevent check-in replay attacks
+    DelegateNonce(u64, Address),
     // Issue #498: beneficiary proof of life
     ProofOfLife(u64),
     // Issue #499: beneficiary release votes
