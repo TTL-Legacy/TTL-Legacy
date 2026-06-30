@@ -422,6 +422,48 @@ pub struct TimeSeriesPoint {
     pub vaults_released: u64,
 }
 
+// ── Per-Vault Analytics (#959) ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VaultDetailAnalytics {
+    pub vault_id: String,
+    pub ttl_history: Vec<TtlHistoryPoint>,
+    pub check_in_frequency: CheckInFrequency,
+    pub withdrawal_trends: WithdrawalTrends,
+    pub beneficiary_status: BeneficiaryStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TtlHistoryPoint {
+    pub date: String,
+    pub ttl_remaining_seconds: u64,
+    pub event: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CheckInFrequency {
+    pub average_interval_seconds: u64,
+    pub total_check_ins: u64,
+    pub next_deadline: String,
+    pub days_until_deadline: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WithdrawalTrends {
+    pub total_withdrawals: i128,
+    pub withdrawal_count: u64,
+    pub average_withdrawal_amount: f64,
+    pub last_withdrawal_date: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BeneficiaryStatus {
+    pub beneficiary_address: String,
+    pub is_active: bool,
+    pub vault_status: String,
+    pub can_receive_funds: bool,
+}
+
 // ── Task 2: Backup & Recovery ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

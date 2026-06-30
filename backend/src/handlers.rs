@@ -293,6 +293,123 @@ pub fn get_vault_analytics_handler(store: &VaultStore) -> VaultAnalytics {
     compute_vault_analytics(store)
 }
 
+/// GET /api/vaults/{id}/analytics
+pub fn get_vault_detail_analytics_handler(
+    store: &VaultStore,
+    event_store: &EventStore,
+    vault_id: &str,
+) -> Result<VaultDetailAnalytics, String> {
+    let vaults = store.lock().unwrap();
+    let vault = vaults
+        .get(vault_id)
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let history = get_vault_history(event_store, vault_id);
+
+    // TTL history: last 30 days of TTL-related events
+    let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
+    let mut ttl_history: Vec<TtlHistoryPoint> = history
+        .iter()
+        .filter(|e| {
+            e.timestamp >= thirty_days_ago
+                && matches!(
+                    e.event_type,
+                    EventType::TtlUpdate | EventType::CheckIn | EventType::StatusChange
+                )
+        })
+        .map(|e| TtlHistoryPoint {
+            date: e.timestamp.format("%Y-%m-%d").to_string(),
+            ttl_remaining_seconds: e
+                .data
+                .get("ttl_remaining")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            event: format!("{:?}", e.event_type),
+        })
+        .collect();
+
+    // If no TTL events in last 30 days, add current state
+    if ttl_history.is_empty() {
+        ttl_history.push(TtlHistoryPoint {
+            date: Utc::now().format("%Y-%m-%d").to_string(),
+            ttl_remaining_seconds: vault.ttl_remaining.unwrap_or(0),
+            event: "current_state".to_string(),
+        });
+    }
+
+    // Check-in frequency
+    let check_ins: Vec<&VaultEvent> = history
+        .iter()
+        .filter(|e| matches!(e.event_type, EventType::CheckIn))
+        .collect();
+
+    let total_check_ins = check_ins.len() as u64;
+    let avg_interval = if total_check_ins > 1 {
+        let first = check_ins.first().map(|e| e.timestamp).unwrap_or(Utc::now());
+        let last = check_ins.last().map(|e| e.timestamp).unwrap_or(Utc::now());
+        let span_seconds = (last - first).num_seconds().max(1) as u64;
+        span_seconds / (total_check_ins - 1).max(1)
+    } else {
+        vault.check_in_interval
+    };
+
+    let next_deadline = vault.last_check_in + chrono::Duration::seconds(vault.check_in_interval as i64);
+    let days_until_deadline = (next_deadline - Utc::now()).num_seconds() / 86400;
+
+    let check_in_frequency = CheckInFrequency {
+        average_interval_seconds: avg_interval,
+        total_check_ins,
+        next_deadline: next_deadline.to_rfc3339(),
+        days_until_deadline,
+    };
+
+    // Withdrawal trends
+    let withdrawals: Vec<&VaultEvent> = history
+        .iter()
+        .filter(|e| matches!(e.event_type, EventType::Withdrawal))
+        .collect();
+
+    let withdrawal_count = withdrawals.len() as u64;
+    let total_withdrawals: i128 = withdrawals
+        .iter()
+        .filter_map(|e| e.data.get("amount").and_then(|v| v.as_i64()))
+        .map(|v| v as i128)
+        .sum();
+
+    let average_withdrawal_amount = if withdrawal_count > 0 {
+        total_withdrawals as f64 / withdrawal_count as f64
+    } else {
+        0.0
+    };
+
+    let last_withdrawal_date = withdrawals
+        .last()
+        .map(|e| e.timestamp.format("%Y-%m-%d").to_string());
+
+    let withdrawal_trends = WithdrawalTrends {
+        total_withdrawals,
+        withdrawal_count,
+        average_withdrawal_amount,
+        last_withdrawal_date,
+    };
+
+    // Beneficiary status
+    let beneficiary_status = BeneficiaryStatus {
+        beneficiary_address: vault.beneficiary.clone(),
+        is_active: vault.status == VaultStatus::Active,
+        vault_status: format!("{:?}", vault.status),
+        can_receive_funds: vault.status == VaultStatus::Released || vault.status == VaultStatus::Active,
+    };
+
+    Ok(VaultDetailAnalytics {
+        vault_id: vault.id.clone(),
+        ttl_history,
+        check_in_frequency,
+        withdrawal_trends,
+        beneficiary_status,
+    })
+}
+
 // ── Task 2: Backup & Recovery ─────────────────────────────────────────────────
 
 /// POST /vaults/{id}/backup
@@ -1533,6 +1650,219 @@ mod tests {
             frequency: NotificationFrequency::Daily,
         };
         assert!(set_notification_preferences_handler(&store, &notif_store, "v1", req).is_err());
+    }
+
+    // ── Per-Vault Analytics tests (#959) ──────────────────────────────────────
+
+    #[test]
+    fn test_get_vault_detail_analytics_vault_not_found() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+        let result = get_vault_detail_analytics_handler(&store, &event_store, "missing");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Vault not found"));
+    }
+
+    #[test]
+    fn test_get_vault_detail_analytics_basic() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+
+        let vault = Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1@example.com".to_string(),
+            balance: 5000,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(72000),
+        };
+        store.lock().unwrap().insert("v1".to_string(), vault);
+
+        let result = get_vault_detail_analytics_handler(&store, &event_store, "v1");
+        assert!(result.is_ok());
+        let analytics = result.unwrap();
+        assert_eq!(analytics.vault_id, "v1");
+        assert_eq!(analytics.beneficiary_status.beneficiary_address, "ben1@example.com");
+        assert!(analytics.beneficiary_status.is_active);
+        assert_eq!(analytics.beneficiary_status.vault_status, "Active");
+        assert!(analytics.beneficiary_status.can_receive_funds);
+    }
+
+    #[test]
+    fn test_get_vault_detail_analytics_with_events() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+
+        let vault = Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1@example.com".to_string(),
+            balance: 1000,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(50000),
+        };
+        store.lock().unwrap().insert("v1".to_string(), vault);
+
+        // Add some events
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::CheckIn,
+            timestamp: Utc::now() - chrono::Duration::days(5),
+            data: serde_json::json!({"ttl_remaining": 86400}),
+        });
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::Withdrawal,
+            timestamp: Utc::now() - chrono::Duration::days(2),
+            data: serde_json::json!({"amount": 500}),
+        });
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::TtlUpdate,
+            timestamp: Utc::now() - chrono::Duration::days(1),
+            data: serde_json::json!({"ttl_remaining": 50000}),
+        });
+
+        let result = get_vault_detail_analytics_handler(&store, &event_store, "v1");
+        assert!(result.is_ok());
+        let analytics = result.unwrap();
+
+        // Check TTL history
+        assert!(!analytics.ttl_history.is_empty());
+
+        // Check withdrawal trends
+        assert_eq!(analytics.withdrawal_trends.withdrawal_count, 1);
+        assert_eq!(analytics.withdrawal_trends.total_withdrawals, 500);
+        assert_eq!(analytics.withdrawal_trends.average_withdrawal_amount, 500.0);
+        assert!(analytics.withdrawal_trends.last_withdrawal_date.is_some());
+
+        // Check check-in frequency
+        assert_eq!(analytics.check_in_frequency.total_check_ins, 1);
+    }
+
+    #[test]
+    fn test_get_vault_detail_analytics_released_vault() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+
+        let vault = Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1@example.com".to_string(),
+            balance: 10000,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Released,
+            ttl_remaining: None,
+        };
+        store.lock().unwrap().insert("v1".to_string(), vault);
+
+        let result = get_vault_detail_analytics_handler(&store, &event_store, "v1");
+        assert!(result.is_ok());
+        let analytics = result.unwrap();
+        assert_eq!(analytics.beneficiary_status.vault_status, "Released");
+        assert!(analytics.beneficiary_status.can_receive_funds);
+        assert!(!analytics.beneficiary_status.is_active);
+    }
+
+    #[test]
+    fn test_get_vault_detail_analytics_ttl_history_last_30_days() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+
+        let vault = Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1@example.com".to_string(),
+            balance: 1000,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        };
+        store.lock().unwrap().insert("v1".to_string(), vault);
+
+        // Add old event (60 days ago) - should be filtered out
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::TtlUpdate,
+            timestamp: Utc::now() - chrono::Duration::days(60),
+            data: serde_json::json!({"ttl_remaining": 100000}),
+        });
+
+        // Add recent event (10 days ago) - should be included
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::TtlUpdate,
+            timestamp: Utc::now() - chrono::Duration::days(10),
+            data: serde_json::json!({"ttl_remaining": 80000}),
+        });
+
+        let result = get_vault_detail_analytics_handler(&store, &event_store, "v1");
+        assert!(result.is_ok());
+        let analytics = result.unwrap();
+
+        // Should only have the recent event (plus current_state fallback)
+        assert!(analytics.ttl_history.len() <= 2);
+        if analytics.ttl_history.len() == 2 {
+            assert!(analytics.ttl_history.iter().any(|p| p.event == "current_state"));
+        }
+    }
+
+    #[test]
+    fn test_get_vault_detail_analytics_multiple_withdrawals() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+
+        let vault = Vault {
+            id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1@example.com".to_string(),
+            balance: 10000,
+            check_in_interval: 86400,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining: Some(86400),
+        };
+        store.lock().unwrap().insert("v1".to_string(), vault);
+
+        // Add multiple withdrawals
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::Withdrawal,
+            timestamp: Utc::now() - chrono::Duration::days(10),
+            data: serde_json::json!({"amount": 1000}),
+        });
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::Withdrawal,
+            timestamp: Utc::now() - chrono::Duration::days(5),
+            data: serde_json::json!({"amount": 2000}),
+        });
+        event_store.lock().unwrap().push(VaultEvent {
+            vault_id: "v1".to_string(),
+            event_type: EventType::Withdrawal,
+            timestamp: Utc::now() - chrono::Duration::days(2),
+            data: serde_json::json!({"amount": 3000}),
+        });
+
+        let result = get_vault_detail_analytics_handler(&store, &event_store, "v1");
+        assert!(result.is_ok());
+        let analytics = result.unwrap();
+
+        assert_eq!(analytics.withdrawal_trends.withdrawal_count, 3);
+        assert_eq!(analytics.withdrawal_trends.total_withdrawals, 6000);
+        assert!((analytics.withdrawal_trends.average_withdrawal_amount - 2000.0).abs() < f64::EPSILON);
+        assert!(analytics.withdrawal_trends.last_withdrawal_date.is_some());
     }
 }
 
