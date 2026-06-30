@@ -3,7 +3,6 @@ package com.ttllegacy.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -18,12 +17,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.ttllegacy.services.VaultDeepLink
+import com.ttllegacy.services.VaultDeepLinkParser
 import com.ttllegacy.ui.screens.AuthScreen
 import com.ttllegacy.ui.screens.BeneficiaryAcceptanceScreen
+import com.ttllegacy.ui.screens.VaultDeepLinkScreen
 import com.ttllegacy.ui.screens.VaultListScreen
 import com.ttllegacy.ui.theme.TTLLegacyTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -31,7 +32,8 @@ import dagger.hilt.android.AndroidEntryPoint
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    private var pendingDeepLinkVaultId by mutableStateOf<String?>(null)
+    private var pendingBeneficiaryAcceptVaultId by mutableStateOf<String?>(null)
+    private var pendingVaultDeepLink by mutableStateOf<VaultDeepLink?>(null)
     private var showPermissionRationale by mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -41,7 +43,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        pendingDeepLinkVaultId = extractDeepLinkVaultId(intent)
+        handleIncomingIntent(intent)
 
         setContent {
             TTLLegacyTheme {
@@ -56,8 +58,10 @@ class MainActivity : ComponentActivity() {
                     }
                 )
                 AppNavigation(
-                    deepLinkVaultId = pendingDeepLinkVaultId,
-                    onDeepLinkConsumed = { pendingDeepLinkVaultId = null }
+                    beneficiaryAcceptVaultId = pendingBeneficiaryAcceptVaultId,
+                    vaultDeepLink = pendingVaultDeepLink,
+                    onBeneficiaryAcceptConsumed = { pendingBeneficiaryAcceptVaultId = null },
+                    onVaultDeepLinkConsumed = { pendingVaultDeepLink = null }
                 )
             }
         }
@@ -68,8 +72,27 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pendingDeepLinkVaultId = extractDeepLinkVaultId(intent)
+        handleIncomingIntent(intent)
     }
+
+    private fun handleIncomingIntent(intent: Intent) {
+        intent.data?.let { uri ->
+            VaultDeepLinkParser.parse(uri)?.let {
+                pendingVaultDeepLink = it
+                pendingBeneficiaryAcceptVaultId = null
+                return
+            }
+        }
+        extractBeneficiaryAcceptVaultId(intent)?.let {
+            pendingBeneficiaryAcceptVaultId = it
+            pendingVaultDeepLink = null
+        }
+    }
+
+    private fun extractBeneficiaryAcceptVaultId(intent: Intent): String? =
+        intent.data
+            ?.takeIf { it.scheme == "https" && it.host == "ttl-legacy.app" && it.path == "/accept" }
+            ?.getQueryParameter("vault_id")
 
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
@@ -81,11 +104,6 @@ class MainActivity : ComponentActivity() {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-
-    private fun extractDeepLinkVaultId(intent: Intent): String? =
-        intent.data
-            ?.takeIf { it.scheme == "https" && it.host == "ttl-legacy.app" && it.path == "/accept" }
-            ?.getQueryParameter("vault_id")
 }
 
 @Composable
@@ -116,8 +134,10 @@ private fun NotificationPermissionEffect(
 
 @Composable
 private fun AppNavigation(
-    deepLinkVaultId: String?,
-    onDeepLinkConsumed: () -> Unit
+    beneficiaryAcceptVaultId: String?,
+    vaultDeepLink: VaultDeepLink?,
+    onBeneficiaryAcceptConsumed: () -> Unit,
+    onVaultDeepLinkConsumed: () -> Unit
 ) {
     val navController = rememberNavController()
     val authVm: AuthViewModel = hiltViewModel()
@@ -128,10 +148,19 @@ private fun AppNavigation(
         else navController.navigate("auth") { popUpTo("vaults") { inclusive = true } }
     }
 
-    LaunchedEffect(deepLinkVaultId) {
-        if (deepLinkVaultId != null && authState.isAuthenticated) {
-            navController.navigate("accept/$deepLinkVaultId")
-            onDeepLinkConsumed()
+    LaunchedEffect(beneficiaryAcceptVaultId, authState.isAuthenticated) {
+        if (beneficiaryAcceptVaultId != null && authState.isAuthenticated) {
+            navController.navigate("accept/$beneficiaryAcceptVaultId")
+            onBeneficiaryAcceptConsumed()
+        }
+    }
+
+    LaunchedEffect(vaultDeepLink, authState.isAuthenticated) {
+        if (vaultDeepLink != null && authState.isAuthenticated) {
+            navController.navigate(
+                "vault/${vaultDeepLink.vaultId}/${vaultDeepLink.action.pathSegment}"
+            )
+            onVaultDeepLinkConsumed()
         }
     }
 
@@ -146,6 +175,15 @@ private fun AppNavigation(
                 vaultId = vaultId,
                 onAccepted = { navController.popBackStack() },
                 onDecline = { navController.popBackStack() }
+            )
+        }
+        composable("vault/{vaultId}/{action}") { backStack ->
+            val vaultId = backStack.arguments?.getString("vaultId") ?: return@composable
+            val action = backStack.arguments?.getString("action") ?: return@composable
+            VaultDeepLinkScreen(
+                vaultId = vaultId,
+                actionPath = action,
+                onDone = { navController.popBackStack() }
             )
         }
     }

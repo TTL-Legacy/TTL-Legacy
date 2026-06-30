@@ -8,9 +8,11 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
+    audit,
     db::Db,
     error::AppError,
-    models::{ReminderPreferences, SetPreferencesRequest},
+    handlers::{parse_scenario_types, simulate_release_handler},
+    models::{ReminderPreferences, SetPreferencesRequest, SimulateReleaseQuery, SimulateReleaseResponse},
 };
 
 #[derive(Deserialize)]
@@ -116,3 +118,31 @@ pub async fn unsubscribe(
     }
 }
 
+
+// ── Release Simulator endpoint ────────────────────────────────────────────────
+
+/// GET /api/vaults/:vault_id/simulate-release?scenarios=no_check_ins,consistent_check_ins,missed_check_in_dates&missed_count=2
+pub async fn simulate_release(
+    State(db): State<Arc<Db>>,
+    Path(vault_id): Path<String>,
+    Query(query): Query<SimulateReleaseQuery>,
+) -> Result<Json<SimulateReleaseResponse>, AppError> {
+    let scenarios = parse_scenario_types(query.scenarios.as_deref());
+    if scenarios.is_empty() {
+        return Err(AppError::InvalidInput(
+            "No valid scenarios requested. Use: no_check_ins, consistent_check_ins, missed_check_in_dates".into(),
+        ));
+    }
+
+    let missed_count = query.missed_count.unwrap_or(1);
+
+    let result = simulate_release_handler(
+        &db.vault_store,
+        &vault_id,
+        scenarios,
+        missed_count,
+    )
+    .map_err(|_| AppError::NotFound)?;
+
+    Ok(Json(result))
+}

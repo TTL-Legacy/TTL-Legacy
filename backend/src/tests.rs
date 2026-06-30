@@ -4,6 +4,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{HeaderValue, Method, Request, StatusCode},
+    middleware,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -11,16 +12,33 @@ use serde_json::json;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 
-use crate::{db::{Db, PoolConfig}, routes};
+use crate::{
+    consensus::{ConflictStrategy, InMemoryBackend, NodeCache},
+    db::{Db, PoolConfig},
+    routes,
+    AppState,
+};
+
+fn test_state(db: Arc<Db>) -> AppState {
+    db.migrate().unwrap();
+    let backend: Arc<InMemoryBackend> = Arc::new(InMemoryBackend::new());
+    let consensus = Arc::new(NodeCache::new(
+        "test-node",
+        backend,
+        ConflictStrategy::LastWriteWins,
+    ));
+    AppState { db, consensus }
+}
 
 fn test_app() -> Router {
     test_app_with_db(Arc::new(Db::open(":memory:").unwrap()))
 }
 
 fn test_app_with_db(db: Arc<Db>) -> Router {
-    db.migrate().unwrap();
+    let state = test_state(db);
     Router::new()
         .route("/health", get(health_handler))
+        .route("/health/consensus", get(consensus_health_handler))
         .route("/ready", get(ready_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
@@ -36,7 +54,7 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
             "/notifications/unsubscribe",
             get(routes::unsubscribe),
         )
-        .with_state(db)
+        .with_state(state)
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -46,13 +64,33 @@ async fn health_handler() -> Json<serde_json::Value> {
     }))
 }
 
-async fn ready_handler(State(db): State<Arc<Db>>) -> Result<Json<serde_json::Value>, StatusCode> {
-    match db.check_connectivity() {
+async fn ready_handler(State(state): State<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.db.check_connectivity() {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
             "database": "connected",
         }))),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+async fn consensus_health_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match state.consensus.check_and_resolve() {
+        Ok(report) => {
+            let status = if report.consistent { "ok" } else { "degraded" };
+            Ok(Json(serde_json::json!({
+                "status": status,
+                "cache_consistent": report.consistent,
+                "node_id": report.node_id,
+                "strategy": report.strategy,
+                "conflicts_detected": report.conflicts.len(),
+                "conflicts_resolved": report.conflicts_resolved,
+                "keys_checked": report.keys_checked,
+            })))
+        }
         Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
@@ -191,6 +229,60 @@ async fn test_ready_endpoint() {
     assert_eq!(json["database"], "connected");
 }
 
+// ── #962: Multi-node consensus health check tests ────────────────────────────
+
+#[tokio::test]
+async fn test_consensus_health_endpoint_consistent() {
+    let app = test_app();
+    let res = get_req(app, "/health/consensus").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["cache_consistent"], true);
+    assert_eq!(json["node_id"], "test-node");
+    assert_eq!(json["strategy"], "last_write_wins");
+    assert_eq!(json["conflicts_detected"], 0);
+}
+
+#[tokio::test]
+async fn test_consensus_health_detects_and_resolves_divergence() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    let backend: Arc<InMemoryBackend> = Arc::new(InMemoryBackend::new());
+    let consensus = Arc::new(NodeCache::new(
+        "test-node",
+        Arc::clone(&backend),
+        ConflictStrategy::LastWriteWins,
+    ));
+    consensus.put("vault:99", "authoritative").unwrap();
+    consensus.set_local_entry(crate::consensus::CacheEntry {
+        key: "vault:99".to_string(),
+        value: "stale".to_string(),
+        node_id: "test-node".to_string(),
+        updated_at: chrono::Utc.timestamp_millis_opt(1).unwrap(),
+        version: 1,
+    });
+
+    let state = AppState {
+        db: Arc::clone(&db),
+        consensus,
+    };
+    db.migrate().unwrap();
+
+    let app = Router::new()
+        .route("/health/consensus", get(consensus_health_handler))
+        .with_state(state);
+
+    let res = get_req(app, "/health/consensus").await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "degraded");
+    assert_eq!(json["cache_consistent"], false);
+    assert_eq!(json["conflicts_detected"], 1);
+    assert_eq!(json["conflicts_resolved"], 1);
+}
+
 // ── #822: Pool configuration tests ───────────────────────────────────────────
 
 #[tokio::test]
@@ -212,8 +304,7 @@ async fn test_db_open_with_pool_config() {
 
 #[tokio::test]
 async fn test_cors_allowed_origin() {
-    let db = Arc::new(Db::open(":memory:").unwrap());
-    db.migrate().unwrap();
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
 
     let cors = CorsLayer::new()
         .allow_origin("http://example.com".parse::<HeaderValue>().unwrap())
@@ -222,7 +313,7 @@ async fn test_cors_allowed_origin() {
     let app = Router::new()
         .route("/health", get(health_handler))
         .layer(cors)
-        .with_state(db);
+        .with_state(state);
 
     let res = app
         .oneshot(
@@ -246,8 +337,7 @@ async fn test_cors_allowed_origin() {
 
 #[tokio::test]
 async fn test_cors_rejected_origin() {
-    let db = Arc::new(Db::open(":memory:").unwrap());
-    db.migrate().unwrap();
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
 
     let cors = CorsLayer::new()
         .allow_origin("http://allowed.com".parse::<HeaderValue>().unwrap())
@@ -256,7 +346,7 @@ async fn test_cors_rejected_origin() {
     let app = Router::new()
         .route("/health", get(health_handler))
         .layer(cors)
-        .with_state(db);
+        .with_state(state);
 
     let res = app
         .oneshot(
@@ -435,5 +525,419 @@ mod notification_delivery_tests {
         let log = svc.get_delivery_log("owner-1");
         assert!(!log.is_empty());
         assert_eq!(log[0].status, DeliveryStatus::Sent);
+    }
+}
+
+// ── Simulator tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod simulator_tests {
+    use crate::db::{create_vault_store, Db};
+    use crate::handlers::{parse_scenario_types, simulate_release_handler, simulate_scenario};
+    use crate::models::{ScenarioType, Vault, VaultStatus};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::get,
+        Router,
+    };
+    use chrono::Utc;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn make_vault(id: &str, check_in_interval: u64, ttl_remaining: Option<u64>) -> Vault {
+        Vault {
+            id: id.to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "beneficiary1".to_string(),
+            balance: 5000,
+            check_in_interval,
+            last_check_in: Utc::now(),
+            created_at: Utc::now(),
+            status: VaultStatus::Active,
+            ttl_remaining,
+        }
+    }
+
+    // ── parse_scenario_types ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_none_returns_all_three() {
+        let result = parse_scenario_types(None);
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&ScenarioType::NoCheckIns));
+        assert!(result.contains(&ScenarioType::ConsistentCheckIns));
+        assert!(result.contains(&ScenarioType::MissedCheckInDates));
+    }
+
+    #[test]
+    fn test_parse_empty_string_returns_all_three() {
+        let result = parse_scenario_types(Some(""));
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_single_scenario() {
+        let result = parse_scenario_types(Some("no_check_ins"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], ScenarioType::NoCheckIns);
+    }
+
+    #[test]
+    fn test_parse_two_scenarios() {
+        let result = parse_scenario_types(Some("no_check_ins,missed_check_in_dates"));
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&ScenarioType::NoCheckIns));
+        assert!(result.contains(&ScenarioType::MissedCheckInDates));
+    }
+
+    #[test]
+    fn test_parse_ignores_unknown_scenarios() {
+        let result = parse_scenario_types(Some("no_check_ins,unknown_scenario"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], ScenarioType::NoCheckIns);
+    }
+
+    #[test]
+    fn test_parse_all_unknown_returns_empty() {
+        let result = parse_scenario_types(Some("foo,bar,baz"));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_handles_whitespace() {
+        let result = parse_scenario_types(Some(" consistent_check_ins , no_check_ins "));
+        assert_eq!(result.len(), 2);
+    }
+
+    // ── simulate_scenario — no_check_ins ────────────────────────────────────
+
+    #[test]
+    fn test_no_check_ins_release_equals_ttl_remaining() {
+        let now = Utc::now();
+        let ttl_remaining = 86_400u64; // 1 day
+        let result = simulate_scenario(now, ScenarioType::NoCheckIns, ttl_remaining, 86_400, 1);
+
+        assert_eq!(result.scenario, ScenarioType::NoCheckIns);
+        assert_eq!(result.seconds_until_release, 86_400);
+        assert_eq!(result.confidence, "high");
+
+        // projected_release_at should be approximately now + 1 day
+        let delta = result.projected_release_at.signed_duration_since(now).num_seconds();
+        assert_eq!(delta, 86_400);
+    }
+
+    #[test]
+    fn test_no_check_ins_zero_ttl_releases_now() {
+        let now = Utc::now();
+        let result = simulate_scenario(now, ScenarioType::NoCheckIns, 0, 86_400, 1);
+
+        assert_eq!(result.seconds_until_release, 0);
+        // projected_release_at should be ≈ now
+        let delta = result.projected_release_at.signed_duration_since(now).num_seconds();
+        assert_eq!(delta, 0);
+    }
+
+    // ── simulate_scenario — consistent_check_ins ────────────────────────────
+
+    #[test]
+    fn test_consistent_check_ins_never_releases() {
+        let now = Utc::now();
+        let result =
+            simulate_scenario(now, ScenarioType::ConsistentCheckIns, 86_400, 86_400, 1);
+
+        assert_eq!(result.scenario, ScenarioType::ConsistentCheckIns);
+        // -1 signals "never"
+        assert_eq!(result.seconds_until_release, -1);
+        assert_eq!(result.confidence, "high");
+        // The far-future date should be well beyond current TTL
+        let delta = result.projected_release_at.signed_duration_since(now).num_seconds();
+        assert!(delta > 86_400 * 365); // more than a year away
+    }
+
+    // ── simulate_scenario — missed_check_in_dates ───────────────────────────
+
+    #[test]
+    fn test_missed_one_check_in_adds_one_interval() {
+        let now = Utc::now();
+        let ttl_remaining = 3600u64; // 1 hour left
+        let check_in_interval = 86_400u64; // 1 day interval
+        let result = simulate_scenario(
+            now,
+            ScenarioType::MissedCheckInDates,
+            ttl_remaining,
+            check_in_interval,
+            1,
+        );
+
+        assert_eq!(result.scenario, ScenarioType::MissedCheckInDates);
+        // 1 hour TTL + 1 day missed = 1 day + 1 hour
+        let expected = ttl_remaining + check_in_interval;
+        assert_eq!(result.seconds_until_release, expected as i64);
+        assert_eq!(result.confidence, "medium");
+    }
+
+    #[test]
+    fn test_missed_two_check_ins_adds_two_intervals() {
+        let now = Utc::now();
+        let ttl_remaining = 3600u64;
+        let check_in_interval = 86_400u64;
+        let result = simulate_scenario(
+            now,
+            ScenarioType::MissedCheckInDates,
+            ttl_remaining,
+            check_in_interval,
+            2,
+        );
+
+        let expected = ttl_remaining + 2 * check_in_interval;
+        assert_eq!(result.seconds_until_release, expected as i64);
+        assert_eq!(result.confidence, "medium");
+    }
+
+    #[test]
+    fn test_missed_three_check_ins_has_low_confidence() {
+        let now = Utc::now();
+        let result = simulate_scenario(
+            now,
+            ScenarioType::MissedCheckInDates,
+            3600,
+            86_400,
+            3,
+        );
+        assert_eq!(result.confidence, "low");
+    }
+
+    #[test]
+    fn test_missed_zero_treated_as_one() {
+        let now = Utc::now();
+        let ttl_remaining = 3600u64;
+        let check_in_interval = 86_400u64;
+        // missed_count=0 should be coerced to 1
+        let result = simulate_scenario(
+            now,
+            ScenarioType::MissedCheckInDates,
+            ttl_remaining,
+            check_in_interval,
+            0,
+        );
+        let expected = ttl_remaining + check_in_interval;
+        assert_eq!(result.seconds_until_release, expected as i64);
+    }
+
+    // ── simulate_release_handler ─────────────────────────────────────────────
+
+    #[test]
+    fn test_simulate_release_handler_vault_not_found() {
+        let store = create_vault_store();
+        let result = simulate_release_handler(
+            &store,
+            "nonexistent",
+            vec![ScenarioType::NoCheckIns],
+            1,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_simulate_release_handler_returns_all_scenarios() {
+        let store = create_vault_store();
+        let vault = make_vault("vault-1", 86_400, Some(3600));
+        store.lock().unwrap().insert("vault-1".to_string(), vault);
+
+        let scenarios = vec![
+            ScenarioType::NoCheckIns,
+            ScenarioType::ConsistentCheckIns,
+            ScenarioType::MissedCheckInDates,
+        ];
+        let result = simulate_release_handler(&store, "vault-1", scenarios, 1).unwrap();
+
+        assert_eq!(result.vault_id, "vault-1");
+        assert_eq!(result.scenarios.len(), 3);
+        assert_eq!(result.check_in_interval, 86_400);
+        assert_eq!(result.current_ttl_remaining, Some(3600));
+    }
+
+    #[test]
+    fn test_simulate_release_handler_no_check_ins_matches_ttl() {
+        let store = create_vault_store();
+        let vault = make_vault("vault-2", 86_400, Some(7200));
+        store.lock().unwrap().insert("vault-2".to_string(), vault);
+
+        let result =
+            simulate_release_handler(&store, "vault-2", vec![ScenarioType::NoCheckIns], 1)
+                .unwrap();
+
+        let no_check_in_scenario = result
+            .scenarios
+            .iter()
+            .find(|s| s.scenario == ScenarioType::NoCheckIns)
+            .unwrap();
+
+        assert_eq!(no_check_in_scenario.seconds_until_release, 7200);
+        assert_eq!(no_check_in_scenario.confidence, "high");
+    }
+
+    #[test]
+    fn test_simulate_release_handler_fallback_ttl_computation() {
+        // When ttl_remaining is None, the handler computes TTL from last_check_in
+        let store = create_vault_store();
+        let mut vault = make_vault("vault-3", 3600, None); // 1 hour interval, no stored TTL
+        // last_check_in is Utc::now() so TTL should be close to 3600 seconds
+        vault.ttl_remaining = None;
+        store.lock().unwrap().insert("vault-3".to_string(), vault);
+
+        let result =
+            simulate_release_handler(&store, "vault-3", vec![ScenarioType::NoCheckIns], 1)
+                .unwrap();
+
+        let no_check_in = result
+            .scenarios
+            .iter()
+            .find(|s| s.scenario == ScenarioType::NoCheckIns)
+            .unwrap();
+
+        // TTL should be ≈3600 seconds (last_check_in just happened)
+        assert!(no_check_in.seconds_until_release >= 3590);
+        assert!(no_check_in.seconds_until_release <= 3600);
+    }
+
+    #[test]
+    fn test_simulate_release_handler_single_scenario_subset() {
+        let store = create_vault_store();
+        let vault = make_vault("vault-4", 86_400, Some(43200));
+        store.lock().unwrap().insert("vault-4".to_string(), vault);
+
+        let result = simulate_release_handler(
+            &store,
+            "vault-4",
+            vec![ScenarioType::MissedCheckInDates],
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(result.scenarios.len(), 1);
+        let s = &result.scenarios[0];
+        assert_eq!(s.scenario, ScenarioType::MissedCheckInDates);
+        // 43200 + 2 * 86400 = 43200 + 172800 = 216000
+        assert_eq!(s.seconds_until_release, 43200 + 2 * 86400);
+    }
+
+    // ── HTTP endpoint test ────────────────────────────────────────────────────
+
+    fn simulator_app() -> Router {
+        let db = Arc::new(Db::open(":memory:").unwrap());
+        db.migrate().unwrap();
+
+        // Pre-populate the in-memory vault store
+        db.insert_vault(make_vault("vault-http-1", 86_400, Some(3600)));
+
+        Router::new()
+            .route(
+                "/api/vaults/:vault_id/simulate-release",
+                get(crate::routes::simulate_release),
+            )
+            .with_state(db)
+    }
+
+    #[tokio::test]
+    async fn test_simulate_release_http_200() {
+        let app = simulator_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vaults/vault-http-1/simulate-release")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["vault_id"], "vault-http-1");
+        assert_eq!(json["scenarios"].as_array().unwrap().len(), 3);
+        assert_eq!(json["check_in_interval"], 86400);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_release_http_with_scenario_filter() {
+        let app = simulator_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vaults/vault-http-1/simulate-release?scenarios=no_check_ins")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let scenarios = json["scenarios"].as_array().unwrap();
+        assert_eq!(scenarios.len(), 1);
+        assert_eq!(scenarios[0]["scenario"], "no_check_ins");
+    }
+
+    #[tokio::test]
+    async fn test_simulate_release_http_404_unknown_vault() {
+        let app = simulator_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vaults/doesnotexist/simulate-release")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_release_http_422_bad_scenario() {
+        let app = simulator_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vaults/vault-http-1/simulate-release?scenarios=bad_scenario")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn test_simulate_release_http_with_missed_count() {
+        let app = simulator_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vaults/vault-http-1/simulate-release?scenarios=missed_check_in_dates&missed_count=3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let scenarios = json["scenarios"].as_array().unwrap();
+        assert_eq!(scenarios[0]["scenario"], "missed_check_in_dates");
+        // 3600 TTL + 3 * 86400 missed = 3600 + 259200 = 262800
+        assert_eq!(scenarios[0]["seconds_until_release"], 3600 + 3 * 86400);
+        assert_eq!(scenarios[0]["confidence"], "low");
     }
 }

@@ -176,6 +176,9 @@ struct VaultDetailView: View {
     @EnvironmentObject var vaultStore: VaultStore
     @State private var isCheckingIn = false
     @State private var biometricError: String?
+    @State private var show2FASetup = false
+    @State private var show2FAVerify = false
+    @State private var twoFactorStatus: TwoFactorStatus?
 
     var body: some View {
         List {
@@ -187,6 +190,25 @@ struct VaultDetailView: View {
                     LabeledContent("TTL Remaining", value: formatDuration(ttl))
                 }
             }
+
+            Section("Two-Factor Authentication") {
+                if let status = twoFactorStatus {
+                    if status.enabled {
+                        LabeledContent("2FA", value: status.method.map { "\($0.rawValue.uppercased())" } ?? "Enabled")
+                        LabeledContent("Verified", value: status.verified ? "Yes" : "No")
+                        if !status.verified {
+                            Button("Verify Now") { show2FAVerify = true }
+                        }
+                        Button("Disable 2FA", role: .destructive) { disable2FA() }
+                    } else {
+                        Button("Enable 2FA") { show2FASetup = true }
+                    }
+                } else {
+                    ProgressView()
+                        .task { await load2FAStatus() }
+                }
+            }
+
             Section {
                 Button(action: checkIn) {
                     Label(isCheckingIn ? "Checking in…" : "Check In Now", systemImage: "checkmark.circle.fill")
@@ -199,6 +221,37 @@ struct VaultDetailView: View {
         }
         .navigationTitle("Vault")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $show2FASetup) {
+            TwoFactorSetupView(vaultID: vault.id)
+        }
+        .sheet(isPresented: $show2FAVerify) {
+            TwoFactorVerifyView(
+                vaultID: vault.id,
+                method: twoFactorStatus?.method ?? .totp,
+                provisioningUri: nil,
+                secret: nil,
+                onVerified: { Task { await load2FAStatus() } }
+            )
+        }
+    }
+
+    private func load2FAStatus() async {
+        do {
+            twoFactorStatus = try await APIClient.shared.get2FAStatus(vaultID: vault.id)
+        } catch {
+            twoFactorStatus = nil
+        }
+    }
+
+    private func disable2FA() {
+        Task {
+            do {
+                try await APIClient.shared.disable2FA(vaultID: vault.id)
+                await load2FAStatus()
+            } catch {
+                biometricError = error.localizedDescription
+            }
+        }
     }
 
     private func checkIn() {
@@ -274,6 +327,195 @@ struct CreateVaultView: View {
     }
 }
 
+// MARK: - 2FA Views
+
+struct TwoFactorSetupView: View {
+    let vaultID: String
+    @Environment(\.dismiss) var dismiss
+    @State private var selectedMethod: TwoFactorMethod = .totp
+    @State private var phone = ""
+    @State private var email = ""
+    @State private var setupResponse: Enable2FAResponse?
+    @State private var showVerify = false
+    @State private var isSettingUp = false
+    @State private var error: String?
+    @State private var setupComplete = false
+
+    var body: some View {
+        NavigationStack {
+            if let response = setupResponse {
+                TwoFactorVerifyView(
+                    vaultID: vaultID,
+                    method: response.method,
+                    provisioningUri: response.provisioningUri,
+                    secret: response.secret,
+                    onVerified: { setupComplete = true }
+                )
+            } else {
+                Form {
+                    Section("Authentication Method") {
+                        Picker("Method", selection: $selectedMethod) {
+                            ForEach(TwoFactorMethod.allCases, id: \.self) { method in
+                                Text(methodLabel(method)).tag(method)
+                            }
+                        }
+                    }
+
+                    if selectedMethod == .sms {
+                        Section("SMS Number") {
+                            TextField("Phone number", text: $phone)
+                                .keyboardType(.phonePad)
+                        }
+                    }
+
+                    if selectedMethod == .email {
+                        Section("Email Address") {
+                            TextField("Email", text: $email)
+                                .keyboardType(.emailAddress)
+                                .autocapitalization(.none)
+                        }
+                    }
+
+                    if let error { Section { Text(error).foregroundStyle(.red).font(.caption) } }
+                }
+                .navigationTitle("Enable 2FA")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Continue") { setup() }
+                            .disabled(isSettingUp || !canContinue)
+                    }
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                }
+                .overlay { if isSettingUp { ProgressView() } }
+            }
+        }
+        .interactiveDismissDisabled(setupComplete == false)
+    }
+
+    private var canContinue: Bool {
+        switch selectedMethod {
+        case .totp: return true
+        case .sms:  return !phone.trimmingCharacters(in: .whitespaces).isEmpty
+        case .email: return !email.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    private func methodLabel(_ method: TwoFactorMethod) -> String {
+        switch method {
+        case .totp:  return "Authenticator App (TOTP)"
+        case .sms:   return "SMS Code"
+        case .email: return "Email Code"
+        }
+    }
+
+    private func setup() {
+        isSettingUp = true; error = nil
+        Task {
+            do {
+                let response = try await APIClient.shared.enable2FA(
+                    vaultID: vaultID,
+                    method: selectedMethod,
+                    phone: selectedMethod == .sms ? phone : nil,
+                    email: selectedMethod == .email ? email : nil
+                )
+                setupResponse = response
+            } catch {
+                self.error = error.localizedDescription
+            }
+            isSettingUp = false
+        }
+    }
+}
+
+struct TwoFactorVerifyView: View {
+    let vaultID: String
+    let method: TwoFactorMethod
+    let provisioningUri: String?
+    let secret: String?
+    let onVerified: () -> Void
+    @Environment(\.dismiss) var dismiss
+
+    @State private var otp = ""
+    @State private var isVerifying = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Image(systemName: iconName)
+                .font(.system(size: 56))
+                .foregroundStyle(.blue)
+
+            Text("Verify Setup").font(.title.bold())
+
+            if method == .totp, let uri = provisioningUri {
+                VStack(spacing: 8) {
+                    Text("Scan this URI in your authenticator app:").foregroundStyle(.secondary)
+                    Text(uri).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    if let secret {
+                        Label(secret, systemImage: "key.fill").font(.system(.caption, design: .monospaced))
+                    }
+                }
+            } else {
+                Text("A verification code has been sent to your \(methodLabel).").foregroundStyle(.secondary)
+            }
+
+            TextField("Enter 6-digit code", text: $otp)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.numberPad)
+                .frame(maxWidth: 200)
+                .multilineTextAlignment(.center)
+                .font(.title2)
+
+            if let error { Text(error).foregroundStyle(.red).font(.caption) }
+
+            Button(action: verify) {
+                Label(isVerifying ? "Verifying…" : "Verify", systemImage: "checkmark.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(otp.count != 6 || isVerifying)
+        }
+        .padding(32)
+        .navigationTitle("Verify 2FA")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+        }
+    }
+
+    private var iconName: String {
+        switch method {
+        case .totp:  return "lock.shield.fill"
+        case .sms:   return "message.fill"
+        case .email: return "envelope.fill"
+        }
+    }
+
+    private var methodLabel: String {
+        switch method {
+        case .totp:  return "authenticator app"
+        case .sms:   return "phone"
+        case .email: return "email"
+        }
+    }
+
+    private func verify() {
+        isVerifying = true; error = nil
+        Task {
+            do {
+                try await APIClient.shared.verify2FA(vaultID: vaultID, otp: otp)
+                onVerified()
+                dismiss()
+            } catch {
+                self.error = error.localizedDescription
+            }
+            isVerifying = false
+        }
+    }
+}
+
 // MARK: - Deep Link Views
 
 struct DeepLinkView: View {
@@ -287,6 +529,8 @@ struct DeepLinkView: View {
                 VaultInvitationView(vaultID: vaultID)
             case .beneficiaryAcceptance(let vaultID, let token):
                 BeneficiaryAcceptanceView(vaultID: vaultID, token: token)
+            case .vaultAction(let vaultID, let action):
+                VaultActionDeepLinkView(vaultID: vaultID, action: action)
             }
         }
     }
@@ -308,6 +552,101 @@ struct VaultInvitationView: View {
         }
         .padding(32)
         .navigationTitle("Invitation")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
+    }
+}
+
+struct VaultActionDeepLinkView: View {
+    let vaultID: String
+    let action: UniversalLinkRouter.VaultAction
+    @EnvironmentObject var vaultStore: VaultStore
+    @Environment(\.dismiss) var dismiss
+    @State private var isProcessing = false
+    @State private var error: String?
+
+    private var vault: Vault? { vaultStore.vaults.first { $0.id == vaultID } }
+
+    var body: some View {
+        Group {
+            switch action {
+            case .viewDetails:
+                if let vault {
+                    VaultDetailView(vault: vault)
+                } else {
+                    vaultNotFoundContent
+                }
+            case .checkIn:
+                actionContent(
+                    title: "Check In",
+                    systemImage: "checkmark.circle.fill",
+                    description: "Confirm check-in for vault \(vaultID.prefix(16))…"
+                ) {
+                    guard let vault else { error = "Vault not found"; return }
+                    isProcessing = true
+                    error = nil
+                    Task {
+                        do {
+                            try await BiometricService.shared.authenticate(reason: "Confirm vault check-in")
+                            await vaultStore.checkIn(vault: vault)
+                            dismiss()
+                        } catch let checkInError {
+                            self.error = checkInError.localizedDescription
+                        }
+                        isProcessing = false
+                    }
+                }
+            case .withdraw:
+                actionContent(
+                    title: "Withdraw",
+                    systemImage: "arrow.up.circle.fill",
+                    description: "Withdraw funds from vault \(vaultID.prefix(16))…"
+                ) {
+                    error = "Withdrawal is not yet available in the mobile app."
+                }
+            case .manageBeneficiary:
+                actionContent(
+                    title: "Manage Beneficiary",
+                    systemImage: "person.2.fill",
+                    description: "Update the beneficiary for vault \(vaultID.prefix(16))…"
+                ) {
+                    error = "Beneficiary management is not yet available in the mobile app."
+                }
+            }
+        }
+        .task { if vaultStore.vaults.isEmpty { await vaultStore.load() } }
+    }
+
+    private var vaultNotFoundContent: some View {
+        ContentUnavailableView(
+            "Vault Not Found",
+            systemImage: "lock.slash",
+            description: Text("Vault \(vaultID.prefix(16))… could not be loaded.")
+        )
+        .navigationTitle("Vault")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
+    }
+
+    private func actionContent(
+        title: String,
+        systemImage: String,
+        description: String,
+        onAction: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 24) {
+            Image(systemName: systemImage).font(.system(size: 56)).foregroundStyle(.blue)
+            Text(title).font(.title.bold())
+            Text(description).multilineTextAlignment(.center).foregroundStyle(.secondary)
+            if let error { Text(error).foregroundStyle(.red).font(.caption) }
+            Button(action: onAction) {
+                Text(isProcessing ? "Processing…" : title).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isProcessing || (action == .checkIn && vault == nil))
+        }
+        .padding(32)
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Dismiss") { dismiss() } } }
     }

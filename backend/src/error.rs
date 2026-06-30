@@ -39,6 +39,10 @@ pub enum AppError {
     NotFound,
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("2FA required")]
+    TwoFactorRequired,
+    #[error("2FA not enabled")]
+    TwoFactorNotEnabled,
 }
 
 impl IntoResponse for AppError {
@@ -47,6 +51,8 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             AppError::InvalidInput(_) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_input"),
             AppError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            AppError::TwoFactorRequired => (StatusCode::UNAUTHORIZED, "two_factor_required"),
+            AppError::TwoFactorNotEnabled => (StatusCode::BAD_REQUEST, "two_factor_not_enabled"),
         };
         ApiError::new(status, code, self.to_string()).into_response()
     }
