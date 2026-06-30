@@ -9433,6 +9433,51 @@ impl TtlVaultContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Returns a page of check-in history for a vault.
+    ///
+    /// Entries are ordered oldest-first (index 0 is the oldest stored entry).
+    /// `cursor` is the zero-based index of the first entry to return; passing
+    /// `cursor = 0` starts from the oldest entry.  `limit` is capped at 50.
+    ///
+    /// Returns an empty `Vec` when `cursor` is out of bounds or the history is
+    /// empty.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault whose check-in history to page through.
+    /// * `cursor`   - Zero-based index of the first entry to return.
+    /// * `limit`    - Maximum number of entries to return (capped at 50).
+    pub fn get_check_in_history_page(
+        env: Env,
+        vault_id: u64,
+        cursor: u64,
+        limit: u32,
+    ) -> Vec<CheckInHistoryEntry> {
+        const MAX_PAGE_SIZE: u32 = 50;
+        let page_size = limit.min(MAX_PAGE_SIZE);
+
+        let history: Vec<CheckInHistoryEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CheckInHistory(vault_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = history.len() as u64;
+
+        // cursor beyond the end of the list → return empty page
+        if cursor >= total || page_size == 0 {
+            return Vec::new(&env);
+        }
+
+        let start = cursor as u32;
+        let end = ((cursor + page_size as u64).min(total)) as u32;
+
+        let mut page = Vec::new(&env);
+        for i in start..end {
+            page.push_back(history.get(i).unwrap());
+        }
+        page
+    }
+
     /// Returns the current check-in streak for a vault.
     pub fn get_check_in_streak(env: Env, vault_id: u64) -> CheckInStreak {
         env.storage()
