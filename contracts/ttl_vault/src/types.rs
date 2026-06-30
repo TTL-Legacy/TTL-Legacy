@@ -425,6 +425,11 @@ pub enum DataKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
+    // Issue #809: two-step protocol configuration
+    PendingProtocolConfig,
+    ProtocolConfigProposedAt,
+    // Issue #871: metadata UTF-8 enforcement
+    RequireUtf8Metadata,
     // Issue #796: open proposals tracking
     OpenProposals(u64),
 }
@@ -1349,4 +1354,7 @@ pub struct ProtocolConfig {
     pub max_check_in_interval: Option<u64>,
     pub max_ttl_seconds: u64,
     pub ttl_decay_rate: u32,
+    /// When true, `set_vault_metadata`, `update_metadata`, and `update_metadata_versioned`
+    /// reject metadata bytes that are not valid UTF-8 — Issue #871.
+    pub require_utf8_metadata: bool,
 }

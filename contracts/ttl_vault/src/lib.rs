@@ -6621,6 +6621,7 @@ impl TtlVaultContract {
         if metadata.len() > MAX_CUSTOM_METADATA_LEN {
             return Err(ContractError::InvalidAmount);
         }
+        Self::require_utf8_metadata_bytes(&env, &metadata)?;
         let mut vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
@@ -8023,6 +8024,24 @@ impl TtlVaultContract {
         if metadata.len() > MAX_METADATA_LEN {
             panic_with_error!(env, ContractError::InvalidAmount);
         }
+    }
+
+    /// Validates that `bytes` are valid UTF-8 when the `RequireUtf8Metadata` flag is set.
+    /// Returns `Err(ContractError::InvalidMetadataEncoding)` on failure.
+    fn require_utf8_metadata_bytes(env: &Env, bytes: &Bytes) -> Result<(), ContractError> {
+        let enforced: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::RequireUtf8Metadata)
+            .unwrap_or(false);
+        if enforced {
+            // Convert to a slice and verify every byte sequence is valid UTF-8.
+            let raw = bytes.to_alloc_vec();
+            if core::str::from_utf8(&raw).is_err() {
+                return Err(ContractError::InvalidMetadataEncoding);
+            }
+        }
+        Ok(())
     }
 
     fn assert_token_whitelisted(env: &Env, token_address: &Address) {
