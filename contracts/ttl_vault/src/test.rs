@@ -1096,6 +1096,33 @@ fn test_update_metadata_emits_event() {
 }
 
 #[test]
+fn test_set_vault_custom_metadata_appends_history_and_limits() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let m1 = Bytes::from_array(&env, &[1u8, 2u8]);
+    let m2 = Bytes::from_array(&env, &[3u8, 4u8]);
+
+    client.set_vault_metadata(&vault_id, &owner, &m1);
+    client.set_vault_metadata(&vault_id, &owner, &m2);
+
+    let history = client.get_custom_metadata_history(&vault_id);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().metadata, m1);
+    assert_eq!(history.get(1).unwrap().metadata, m2);
+
+    // Exceed 100 entries and ensure trimming to last 100
+    for i in 0..101u8 {
+        let raw = [i, i.wrapping_add(1)];
+        let b = Bytes::from_array(&env, &raw);
+        client.set_vault_metadata(&vault_id, &owner, &b);
+    }
+
+    let history = client.get_custom_metadata_history(&vault_id);
+    assert_eq!(history.len(), 100);
+}
+
+#[test]
 fn test_get_contract_token_returns_correct_address() {
     let (_, _, _, _, token_address, client) = setup();
     assert_eq!(client.get_contract_token(), token_address);
