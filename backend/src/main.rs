@@ -108,6 +108,31 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    // Check contract version before proceeding with server startup
+    let min_contract_version = parse_min_contract_version(std::env::var("MIN_CONTRACT_VERSION").ok());
+
+    let version_result = check_contract_version(
+        || async {
+            // TODO: replace with real Soroban client call when available
+            // For now, this is a stub that returns Ok(1) so startup proceeds
+            Ok::<u32, String>(1)
+        },
+        min_contract_version,
+    )
+    .await;
+
+    tracing::info!("{}", version_result);
+
+    if let Some(err) = &version_result.error {
+        tracing::error!("Contract version check failed: {}", err);
+        std::process::exit(1);
+    }
+
+    if !version_result.compatible {
+        tracing::error!("{}", version_result);
+        std::process::exit(1);
+    }
+
     let pool_config = db::PoolConfig::from_env();
     tracing::info!(
         min = pool_config.min,
