@@ -6767,6 +6767,41 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
+        // Append to custom metadata history (limit to last 100 entries)
+        let key = DataKey::CustomMetadataHistory(vault_id);
+        let mut history: Vec<CustomMetadataEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let now = env.ledger().timestamp();
+        history.push_back(CustomMetadataEntry {
+            metadata: metadata.clone(),
+            timestamp: now,
+        });
+
+        // Trim to last 100 entries if necessary
+        if history.len() > 100 {
+            let total = history.len();
+            let start = total - 100;
+            let mut trimmed: Vec<CustomMetadataEntry> = Vec::new(&env);
+            for i in start..total {
+                trimmed.push_back(history.get(i).unwrap());
+            }
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&key, &trimmed);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        } else {
+            let ttl = vault_ttl_ledgers(vault.check_in_interval);
+            env.storage().persistent().set(&key, &history);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        }
+
         vault.custom_metadata = metadata.clone();
         Self::save_vault(&env, vault_id, &vault);
         env.storage()
@@ -6775,6 +6810,14 @@ impl TtlVaultContract {
         env.events()
             .publish((SET_METADATA_TOPIC, vault_id), metadata);
         Ok(())
+    }
+
+    /// Returns the custom metadata history (bytes + timestamp) for a vault.
+    pub fn get_custom_metadata_history(env: Env, vault_id: u64) -> Vec<CustomMetadataEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CustomMetadataHistory(vault_id))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Gets custom metadata for a vault.

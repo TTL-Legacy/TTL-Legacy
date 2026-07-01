@@ -368,6 +368,7 @@ pub enum DataKey {
     MultiSigProposal(u64, u64),
     MultiSigProposalCount(u64),
     MetadataHistory(u64),
+    CustomMetadataHistory(u64),
     OwnerVaultCount(Address),
     // Issue #472: state transition audit trail
     StateTransitionLog(u64),
@@ -936,6 +937,14 @@ pub struct MetadataVersionEntry {
     pub metadata: String,
     pub updated_at: u64,
     pub updated_by: Address,
+}
+
+/// A single custom metadata history entry (raw bytes + timestamp) - Issue #931
+#[contracttype]
+#[derive(Clone)]
+pub struct CustomMetadataEntry {
+    pub metadata: Bytes,
+    pub timestamp: u64,
 }
 
 /// Ownership transfer request
