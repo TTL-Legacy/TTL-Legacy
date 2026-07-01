@@ -212,6 +212,45 @@ final class UniversalLinkRouterTests: XCTestCase {
         XCTAssertEqual(result, .beneficiaryAcceptance(vaultID: "vault-xyz", token: ""))
     }
 
+    func test_parse_vaultDeepLink_checkIn_returnsVaultAction() {
+        let url = URL(string: "ttllegacy://vault/vault-abc-123/check-in")!
+        let result = router.parse(url: url)
+        XCTAssertEqual(result, .vaultAction(vaultID: "vault-abc-123", action: .checkIn))
+    }
+
+    func test_parse_vaultDeepLink_withdraw_returnsVaultAction() {
+        let url = URL(string: "ttllegacy://vault/vault-xyz/withdraw")!
+        let result = router.parse(url: url)
+        XCTAssertEqual(result, .vaultAction(vaultID: "vault-xyz", action: .withdraw))
+    }
+
+    func test_parse_vaultDeepLink_viewDetails_returnsVaultAction() {
+        let url = URL(string: "ttllegacy://vault/v1/view-details")!
+        let result = router.parse(url: url)
+        XCTAssertEqual(result, .vaultAction(vaultID: "v1", action: .viewDetails))
+    }
+
+    func test_parse_vaultDeepLink_manageBeneficiary_returnsVaultAction() {
+        let url = URL(string: "ttllegacy://vault/vault-42/manage-beneficiary")!
+        let result = router.parse(url: url)
+        XCTAssertEqual(result, .vaultAction(vaultID: "vault-42", action: .manageBeneficiary))
+    }
+
+    func test_parse_vaultDeepLink_unknownAction_returnsNil() {
+        let url = URL(string: "ttllegacy://vault/v1/unknown-action")!
+        XCTAssertNil(router.parse(url: url))
+    }
+
+    func test_parse_vaultDeepLink_wrongScheme_returnsNil() {
+        let url = URL(string: "https://ttl-legacy.app/vault/v1/check-in")!
+        XCTAssertNil(router.parse(url: url))
+    }
+
+    func test_parse_vaultDeepLink_wrongHost_returnsNil() {
+        let url = URL(string: "ttllegacy://other/v1/check-in")!
+        XCTAssertNil(router.parse(url: url))
+    }
+
     func test_router_isSingleton() {
         let a = UniversalLinkRouter.shared
         let b = UniversalLinkRouter.shared

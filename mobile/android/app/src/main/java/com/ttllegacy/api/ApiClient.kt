@@ -1,6 +1,10 @@
 package com.ttllegacy.api
 
 import com.ttllegacy.models.*
+import com.ttllegacy.models.TwoFactorStatus
+import com.ttllegacy.models.Enable2FARequest
+import com.ttllegacy.models.Enable2FAResponse
+import com.ttllegacy.models.Verify2FARequest
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.android.*
@@ -51,6 +55,17 @@ class ApiClient @Inject constructor(
     // Beneficiary
     suspend fun acceptBeneficiary(vaultId: String): ApiResult<Unit> =
         post("/vaults/$vaultId/accept", Unit)
+
+    // 2FA
+    suspend fun get2FAStatus(vaultId: String): ApiResult<TwoFactorStatus> = get("/vaults/$vaultId/2fa/status")
+    suspend fun enable2FA(vaultId: String, req: Enable2FARequest): ApiResult<Enable2FAResponse> =
+        post("/vaults/$vaultId/2fa/enable", req)
+    suspend fun verify2FA(vaultId: String, req: Verify2FARequest): ApiResult<Unit> =
+        post("/vaults/$vaultId/2fa/verify", req)
+    suspend fun disable2FA(vaultId: String): ApiResult<Unit> =
+        post("/vaults/$vaultId/2fa/disable", Unit)
+    suspend fun challenge2FA(vaultId: String): ApiResult<TwoFactorStatus> =
+        post("/vaults/$vaultId/2fa/challenge", Unit)
 
     // Push
     suspend fun registerPushToken(token: String): ApiResult<Unit> =

@@ -1,7 +1,8 @@
 use crate::models::{
     Vault, VaultEvent, AuditEntry, SearchQuery, SearchResult, VaultStatus,
-    VaultBackup, VaultShare, VaultNotificationPreferences,
+    VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
     ReminderPreferences, Channel, Frequency,
+    Subscription, SubscriptionChannel, SubscriptionFrequency,
 };
 
 use chrono::Utc;
@@ -13,6 +14,7 @@ pub type EventStore = Arc<Mutex<Vec<VaultEvent>>>;
 pub type AuditStore = Arc<Mutex<Vec<AuditEntry>>>;
 pub type BackupStore = Arc<Mutex<HashMap<String, VaultBackup>>>;
 pub type ShareStore = Arc<Mutex<Vec<VaultShare>>>;
+pub type ShareTokenStore = Arc<Mutex<HashMap<String, ShareToken>>>;
 pub type NotificationStore = Arc<Mutex<HashMap<String, VaultNotificationPreferences>>>;
 
 
@@ -36,8 +38,23 @@ pub fn create_share_store() -> ShareStore {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+pub fn create_share_token_store() -> ShareTokenStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 pub fn create_notification_store() -> NotificationStore {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+// ── Shared application state for axum routes ─────────────────────────────────
+
+pub struct AppState {
+    pub db: Arc<Db>,
+    pub vault_store: VaultStore,
+    pub event_store: EventStore,
+    pub audit_store: AuditStore,
+    pub share_store: ShareStore,
+    pub share_token_store: ShareTokenStore,
 }
 
 pub fn search_vaults(
@@ -205,6 +222,47 @@ pub fn get_vault_shares(share_store: &ShareStore, vault_id: &str) -> Vec<crate::
         .filter(|s| s.vault_id == vault_id)
         .cloned()
         .collect()
+}
+
+// ── Share token persistence ──────────────────────────────────────────────────
+
+pub fn add_share_token(store: &ShareTokenStore, token: ShareToken) {
+    store.lock().unwrap().insert(token.token.clone(), token);
+}
+
+pub fn get_share_token(store: &ShareTokenStore, token: &str) -> Option<ShareToken> {
+    store.lock().unwrap().get(token).cloned()
+}
+
+pub fn get_vault_share_tokens(store: &ShareTokenStore, vault_id: &str) -> Vec<ShareToken> {
+    store
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|t| t.vault_id == vault_id)
+        .cloned()
+        .collect()
+}
+
+pub fn revoke_share_token(store: &ShareTokenStore, token: &str) -> Option<ShareToken> {
+    let mut lock = store.lock().unwrap();
+    if let Some(t) = lock.get_mut(token) {
+        t.revoked = true;
+        Some(t.clone())
+    } else {
+        None
+    }
+}
+
+// ── Audit helper ─────────────────────────────────────────────────────────────
+
+pub fn append_audit_entry(audit_store: &AuditStore, action: &str, actor: &str, details: serde_json::Value) {
+    audit_store.lock().unwrap().push(AuditEntry {
+        timestamp: Utc::now(),
+        action: action.to_string(),
+        actor: actor.to_string(),
+        details,
+    });
 }
 
 // ── Task 4: Notification Preferences ─────────────────────────────────────────
@@ -452,6 +510,8 @@ impl PoolConfig {
 pub struct Db {
     conn: std::sync::Mutex<Connection>,
     pool_config: PoolConfig,
+    /// In-memory vault store shared across the application.
+    pub vault_store: VaultStore,
 }
 
 impl Db {
@@ -469,7 +529,18 @@ impl Db {
                 max: config.max,
                 timeout_secs: config.timeout_secs,
             },
+            vault_store: create_vault_store(),
         })
+    }
+
+    /// Insert or replace a vault in the in-memory store.
+    pub fn insert_vault(&self, vault: crate::models::Vault) {
+        self.vault_store.lock().unwrap().insert(vault.id.clone(), vault);
+    }
+
+    /// Retrieve a vault from the in-memory store by string ID.
+    pub fn get_vault(&self, vault_id: &str) -> Option<crate::models::Vault> {
+        self.vault_store.lock().unwrap().get(vault_id).cloned()
     }
 
     pub fn check_connectivity(&self) -> Result<(), rusqlite::Error> {
@@ -529,6 +600,24 @@ impl Db {
             (
                 "2",
                 "ALTER TABLE reminder_preferences ADD COLUMN deleted_at TEXT;",
+            ),
+            (
+                "3",
+                r#"
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp  TEXT NOT NULL,
+                    user_id    TEXT NOT NULL DEFAULT '',
+                    action     TEXT NOT NULL,
+                    resource   TEXT NOT NULL DEFAULT '',
+                    result     TEXT NOT NULL DEFAULT 'success',
+                    ip_address TEXT NOT NULL DEFAULT '',
+                    details    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id   ON audit_logs(user_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_action    ON audit_logs(action);
+                "#,
             ),
         ];
 
@@ -678,6 +767,62 @@ impl Db {
         Ok(out)
     }
 
+    pub fn upsert_subscription(&self, sub: &Subscription) -> Result<(), rusqlite::Error> {
+        let channels_json = serde_json::to_string(&sub.channels).unwrap();
+        let frequency_json = serde_json::to_string(&sub.frequency).unwrap();
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO vault_subscriptions (vault_id, owner, channels, frequency)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(vault_id) DO UPDATE SET
+              owner = excluded.owner,
+              channels = excluded.channels,
+              frequency = excluded.frequency
+            "#,
+            params![
+                sub.vault_id as i64,
+                sub.owner,
+                channels_json,
+                frequency_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_subscription(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM vault_subscriptions WHERE vault_id = ?1",
+            params![vault_id as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_subscription(&self, vault_id: u64) -> Result<Option<Subscription>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT vault_id, owner, channels, frequency
+               FROM vault_subscriptions
+               WHERE vault_id = ?1"#,
+        )?;
+        let row = stmt.query_row(params![vault_id as i64], |r| {
+            let channels_str: String = r.get(2)?;
+            let frequency_str: String = r.get(3)?;
+            let channels: Vec<SubscriptionChannel> = serde_json::from_str(&channels_str).unwrap_or_default();
+            let frequency: SubscriptionFrequency = serde_json::from_str(&frequency_str).unwrap();
+            Ok(Subscription {
+                vault_id: r.get::<_, i64>(0)? as u64,
+                owner: r.get(1)?,
+                channels,
+                frequency,
+            })
+        });
+        match row {
+            Ok(sub) => Ok(Some(sub)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     // ── Idempotency (#825) ──────────────────────────────────────────────────
 
     pub fn store_idempotency(&self, key: &str, status_code: u16, response_body: &str) {
@@ -758,6 +903,109 @@ impl Db {
         self.store_unsubscribe_token(&token, owner);
         token
     }
+
+    // ── Audit Log persistence (#961) ─────────────────────────────────────────
+
+    pub fn insert_audit_log(&self, entry: &AuditLogEntry) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO audit_logs (timestamp, user_id, action, resource, result, ip_address, details)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                entry.timestamp.to_rfc3339(),
+                entry.user_id,
+                entry.action,
+                entry.resource,
+                entry.result,
+                entry.ip_address,
+                entry.details.as_ref().map(|d| d.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn query_audit_logs(&self, query: &AuditLogQuery) -> Result<Vec<AuditLogEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT id, timestamp, user_id, action, resource, result, ip_address, details FROM audit_logs WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref user_id) = query.user_id {
+            sql.push_str(" AND user_id = ?");
+            param_values.push(Box::new(user_id.clone()));
+        }
+        if let Some(ref action) = query.action {
+            sql.push_str(" AND action = ?");
+            param_values.push(Box::new(action.clone()));
+        }
+        if let Some(ref resource) = query.resource {
+            sql.push_str(" AND resource = ?");
+            param_values.push(Box::new(resource.clone()));
+        }
+        if let Some(ref result_val) = query.result {
+            sql.push_str(" AND result = ?");
+            param_values.push(Box::new(result_val.clone()));
+        }
+        if let Some(after) = query.after {
+            sql.push_str(" AND timestamp >= ?");
+            param_values.push(Box::new(after.to_rfc3339()));
+        }
+        if let Some(before) = query.before {
+            sql.push_str(" AND timestamp <= ?");
+            param_values.push(Box::new(before.to_rfc3339()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(100);
+        let offset = query.offset.unwrap_or(0);
+        sql.push_str(" LIMIT ? OFFSET ?");
+        param_values.push(Box::new(limit));
+        param_values.push(Box::new(offset));
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            let timestamp_str: String = r.get(1)?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                    1, rusqlite::types::Type::Text, Box::new(e),
+                ))?;
+            let details_str: Option<String> = r.get(7)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(AuditLogEntry {
+                id: r.get(0)?,
+                timestamp,
+                user_id: r.get(2)?,
+                action: r.get(3)?,
+                resource: r.get(4)?,
+                result: r.get(5)?,
+                ip_address: r.get(6)?,
+                details,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn purge_old_audit_logs(&self, retention_days: i64) -> Result<u64, rusqlite::Error> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        let count = self.conn.lock().unwrap().execute(
+            "DELETE FROM audit_logs WHERE timestamp < ?1",
+            params![cutoff],
+        )?;
+        Ok(count as u64)
+    }
 }
 
 #[cfg(test)]
@@ -829,4 +1077,67 @@ mod tests {
         assert_eq!(result.total, 25);
         assert_eq!(result.page, 2);
     }
+}
+
+// ── Cache-aware vault accessors ───────────────────────────────────────────────
+
+use crate::cache::VaultCache;
+use crate::models::VaultSummary;
+
+/// Retrieve a `Vault` from the in-memory store, consulting the cache first.
+///
+/// On a cache miss the vault is fetched from `store`, inserted into the cache
+/// and then returned. Returns `None` if the vault does not exist in the store.
+pub fn get_vault_cached(
+    store: &VaultStore,
+    cache: &VaultCache,
+    vault_id: &str,
+) -> Option<crate::models::Vault> {
+    if let Some(v) = cache.get_vault(vault_id) {
+        return Some(v);
+    }
+    let vault = store.lock().unwrap().get(vault_id).cloned()?;
+    cache.set_vault(vault_id, vault.clone());
+    Some(vault)
+}
+
+/// Retrieve the TTL-remaining value for a vault, consulting the cache first.
+///
+/// Returns `None` if the vault does not exist in the store.
+pub fn get_ttl_remaining_cached(
+    store: &VaultStore,
+    cache: &VaultCache,
+    vault_id: &str,
+) -> Option<Option<u64>> {
+    if let Some(ttl) = cache.get_ttl_remaining(vault_id) {
+        return Some(ttl);
+    }
+    let vault = store.lock().unwrap().get(vault_id).cloned()?;
+    let ttl = vault.ttl_remaining;
+    cache.set_ttl_remaining(vault_id, ttl);
+    Some(ttl)
+}
+
+/// Retrieve a lightweight `VaultSummary` for a vault, consulting the cache
+/// first.
+///
+/// Returns `None` if the vault does not exist in the store.
+pub fn get_vault_summary_cached(
+    store: &VaultStore,
+    cache: &VaultCache,
+    vault_id: &str,
+) -> Option<VaultSummary> {
+    if let Some(s) = cache.get_vault_summary(vault_id) {
+        return Some(s);
+    }
+    let vault = store.lock().unwrap().get(vault_id).cloned()?;
+    let summary = VaultSummary::from(&vault);
+    cache.set_vault_summary(vault_id, summary.clone());
+    Some(summary)
+}
+
+/// Invalidate all cached entries for `vault_id`.  Must be called whenever
+/// a check-in or state-change event modifies vault state.
+pub fn invalidate_vault_cache(cache: &VaultCache, vault_id: &str) {
+    cache.invalidate(vault_id);
 }

@@ -29,8 +29,8 @@ class NotificationHelper @Inject constructor(@ApplicationContext private val con
 
     fun show(title: String, body: String, vaultId: String?) {
         val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-            vaultId?.let { putExtra("vault_id", it) }
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            vaultId?.let { data = android.net.Uri.parse("ttllegacy://vault/$it/check-in") }
         }
         val pi = PendingIntent.getActivity(context, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
