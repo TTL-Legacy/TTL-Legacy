@@ -48,16 +48,58 @@ This Soroban implementation makes TTL-Legacy:
 - Rust (1.70+)
 - Soroban CLI
 - Stellar CLI
+- [just](https://github.com/casey/just) (command runner, alternative to Make)
+
+### Using Just (Recommended)
+
+This project uses [just](https://github.com/casey/just) as a command runner to simplify common development tasks. All build, test, and deployment commands are centralized in the `Justfile`.
+
+```bash
+# Install just (if not already installed)
+# macOS: brew install just
+# Ubuntu/Debian: sudo apt install just
+# Windows: cargo install just
+# Or download from: https://github.com/casey/just/releases
+
+# See all available commands
+just --list
+
+# Build contracts
+just build
+
+# Run tests
+just test
+
+# Run clippy linter
+just clippy
+
+# Run security audit
+just audit
+
+# Start Docker services
+just docker-up
+
+# Stop Docker services
+just docker-down
+```
 
 ### Build
 
 ```bash
+# Using just (recommended)
+just build
+
+# Or using the script directly
 ./scripts/build.sh
 ```
 
 ### Test
 
 ```bash
+# Using just (recommended)
+just test
+
+# Or using the script directly
 ./scripts/test.sh
 ```
 
@@ -66,10 +108,15 @@ This Soroban implementation makes TTL-Legacy:
 For fastest local setup, use Docker Compose:
 
 ```bash
+# Using just (recommended)
+just docker-up
+
+# Or using docker-compose directly
 docker-compose up -d
 ```
 
 This will start:
+
 - **PostgreSQL** on `localhost:5432`
 - **Backend** on `localhost:3000`
 - **Stellar Quickstart** on `localhost:8000`
@@ -115,10 +162,10 @@ Network configurations are defined in `environments.toml`:
 ### Deploy to Testnet
 
 ```bash
-# Configure your testnet identity first
-stellar keys generate deployer --network testnet
+# Using just (recommended)
+just deploy-testnet
 
-# Deploy
+# Or using the script directly
 ./scripts/deploy_testnet.sh
 ```
 
@@ -126,19 +173,16 @@ stellar keys generate deployer --network testnet
 
 Required environment variables before running:
 
-| Variable | Description |
-|---|---|
-| `STELLAR_MAINNET_RPC_URL` | Mainnet RPC endpoint (e.g. `https://mainnet.sorobanrpc.com`) |
-| `DEPLOYER_IDENTITY` | Stellar CLI key name to sign the deployment (default: `deployer-mainnet`) |
+| Variable                  | Description                                                               |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `STELLAR_MAINNET_RPC_URL` | Mainnet RPC endpoint (e.g. `https://mainnet.sorobanrpc.com`)              |
+| `DEPLOYER_IDENTITY`       | Stellar CLI key name to sign the deployment (default: `deployer-mainnet`) |
 
 ```bash
-# Configure your mainnet identity first
-stellar keys generate deployer-mainnet --network mainnet
+# Using just (recommended)
+just deploy-mainnet
 
-# Set required env var
-export STELLAR_MAINNET_RPC_URL=https://mainnet.sorobanrpc.com
-
-# Deploy (will prompt for confirmation)
+# Or using the script directly
 ./scripts/deploy_mainnet.sh
 ```
 
@@ -203,7 +247,7 @@ Comprehensive test suite covering:
 ✅ TTL expiry and automatic release  
 ✅ Passkey authentication validation  
 ✅ Beneficiary payout execution  
-✅ Error handling and edge cases  
+✅ Error handling and edge cases
 
 Run tests:
 
@@ -260,6 +304,3 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [Stellar Development Foundation](https://stellar.org) for Soroban
 - The WebAuthn/Passkey standards community
 - Everyone building toward self-sovereign financial tools
-
-
-
