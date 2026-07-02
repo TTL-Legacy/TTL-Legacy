@@ -325,6 +325,7 @@ pub const MAX_CUSTOM_METADATA_LEN: u32 = 2048;
 pub enum DataKey {
     Vault(u64),
     OwnerVaults(Address),
+    MaxVaultsPerOwner,
     BeneficiaryVaults(Address),
     VaultCount,
     TokenAddress,
@@ -1401,6 +1402,8 @@ pub struct ProtocolConfig {
     /// When true, `set_vault_metadata`, `update_metadata`, and `update_metadata_versioned`
     /// reject metadata bytes that are not valid UTF-8 — Issue #871.
     pub require_utf8_metadata: bool,
+    /// Maximum number of vaults a single owner may create — Issue #767.
+    pub max_vaults_per_owner: u32,
 }
 
 /// Vault state snapshot at a specific point in time.
