@@ -106,7 +106,7 @@ jobs:
           EOF
           cat smoke-results/contract.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: smoke-test-${{ github.run_id }}
           path: smoke-results/
