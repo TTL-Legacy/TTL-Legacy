@@ -11,6 +11,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 
 mod consensus;
+mod csrf;
 mod db;
 mod error;
 mod handlers;
@@ -178,6 +179,8 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/health/consensus", get(consensus_health_handler))
         .route("/ready", get(ready_handler))
+        // Issue #1287: CSRF token endpoint – exempt from CSRF validation by design
+        .route("/api/csrf-token", get(csrf::csrf_token_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
             post(routes::set_preferences).layer(middleware::from_fn_with_state(sensitive_limiter.clone(), rate_limit::rate_limit_middleware))
@@ -211,6 +214,9 @@ async fn main() {
             get(routes::get_vesting_bonus),
         )
         .layer(build_cors_layer())
+        // Issue #1287: CSRF protection – applied after CORS so preflight OPTIONS
+        // requests pass through before CSRF checks run.
+        .layer(middleware::from_fn(csrf::csrf_middleware))
         .layer(middleware::from_fn_with_state(global_limiter, rate_limit::rate_limit_middleware))
         .with_state(state);
 

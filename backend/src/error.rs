@@ -43,6 +43,9 @@ pub enum AppError {
     TwoFactorRequired,
     #[error("2FA not enabled")]
     TwoFactorNotEnabled,
+    /// Issue #1287: CSRF token missing or invalid.
+    #[error("CSRF token missing or invalid")]
+    CsrfInvalid,
 }
 
 impl IntoResponse for AppError {
@@ -53,6 +56,7 @@ impl IntoResponse for AppError {
             AppError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             AppError::TwoFactorRequired => (StatusCode::UNAUTHORIZED, "two_factor_required"),
             AppError::TwoFactorNotEnabled => (StatusCode::BAD_REQUEST, "two_factor_not_enabled"),
+            AppError::CsrfInvalid => (StatusCode::FORBIDDEN, "csrf_invalid"),
         };
         ApiError::new(status, code, self.to_string()).into_response()
     }

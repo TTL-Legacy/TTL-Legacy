@@ -1700,3 +1700,248 @@ async fn test_get_vesting_bonus_not_configured() {
     assert!(json["bonus_bps"].is_null());
     assert!(json["on_time_window_seconds"].is_null());
 }
+
+// ── Issue #1287: CSRF protection middleware tests ─────────────────────────────
+
+#[cfg(test)]
+mod csrf_tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::{get, post},
+        Json, Router,
+    };
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use crate::csrf;
+
+    /// Build a minimal test router that has the CSRF middleware applied and a
+    /// single mutable POST endpoint so we can probe the protection.
+    fn csrf_test_app() -> Router {
+        async fn echo_handler() -> Json<serde_json::Value> {
+            Json(json!({ "ok": true }))
+        }
+
+        Router::new()
+            .route("/api/csrf-token", get(csrf::csrf_token_handler))
+            .route("/api/test-post", post(echo_handler))
+            .layer(middleware::from_fn(csrf::csrf_middleware))
+    }
+
+    // ── Helper to extract Set-Cookie value from a response ────────────────────
+
+    fn extract_set_cookie(res: &axum::response::Response) -> Option<String> {
+        res.headers()
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    fn token_from_cookie_header(set_cookie: &str) -> &str {
+        // Format: "__Host-csrf=<token>; HttpOnly; ..."
+        let start = set_cookie.find('=').unwrap() + 1;
+        let end = set_cookie.find(';').unwrap_or(set_cookie.len());
+        &set_cookie[start..end]
+    }
+
+    // ── GET /api/csrf-token ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_csrf_token_endpoint_returns_200_with_cookie() {
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = extract_set_cookie(&res).expect("Set-Cookie header missing");
+        assert!(cookie.starts_with("__Host-csrf="), "cookie has wrong name: {cookie}");
+        assert!(cookie.contains("HttpOnly"), "missing HttpOnly");
+        assert!(cookie.contains("SameSite=Strict"), "missing SameSite");
+        assert!(cookie.contains("Secure"), "missing Secure");
+        assert!(cookie.contains("Path=/"), "missing Path=/");
+    }
+
+    #[tokio::test]
+    async fn test_csrf_token_endpoint_body_contains_token() {
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let token = json["csrf_token"].as_str().expect("csrf_token field missing");
+        assert!(!token.is_empty(), "token must not be empty");
+        assert_eq!(token.len(), 36, "expected UUID v4 length");
+    }
+
+    // ── POST without token must be rejected ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_post_without_csrf_token_returns_403() {
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/test-post")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["code"], "csrf_invalid");
+    }
+
+    #[tokio::test]
+    async fn test_post_with_header_but_no_cookie_returns_403() {
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/test-post")
+                    .header("content-type", "application/json")
+                    .header(csrf::CSRF_HEADER_NAME, "some-token-value")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_post_with_cookie_but_no_header_returns_403() {
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/test-post")
+                    .header("content-type", "application/json")
+                    .header("cookie", "__Host-csrf=some-token-value")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_post_with_mismatched_tokens_returns_403() {
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/test-post")
+                    .header("content-type", "application/json")
+                    .header("cookie", "__Host-csrf=token-a")
+                    .header(csrf::CSRF_HEADER_NAME, "token-b")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── POST with valid matching tokens must pass ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_post_with_valid_matching_tokens_returns_200() {
+        let token = csrf::generate_token();
+        let cookie_value = format!("__Host-csrf={token}");
+
+        let app = csrf_test_app();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/test-post")
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie_value)
+                    .header(csrf::CSRF_HEADER_NAME, &token)
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // ── GET is always exempt ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_request_is_exempt_from_csrf() {
+        let app = csrf_test_app();
+        // GET /api/csrf-token has no cookie or header – should return 200
+        let res = app
+            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // ── Two sequential requests: fetch token then use it ─────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_token_then_post_succeeds() {
+        // Step 1: get a token
+        let app = csrf_test_app();
+        let token_res = app
+            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(token_res.status(), StatusCode::OK);
+
+        let set_cookie = extract_set_cookie(&token_res).expect("Set-Cookie missing");
+        let token = token_from_cookie_header(&set_cookie).to_owned();
+        let cookie_header = format!("__Host-csrf={token}");
+
+        // Step 2: POST with the extracted token
+        let app2 = csrf_test_app();
+        let post_res = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/test-post")
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie_header)
+                    .header(csrf::CSRF_HEADER_NAME, &token)
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(post_res.status(), StatusCode::OK);
+    }
+
+    // ── Unit tests from csrf module re-validated at integration level ──────────
+
+    #[test]
+    fn test_generate_token_uniqueness() {
+        let tokens: std::collections::HashSet<String> =
+            (0..50).map(|_| csrf::generate_token()).collect();
+        assert_eq!(tokens.len(), 50, "all 50 tokens should be unique");
+    }
+}
