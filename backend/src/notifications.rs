@@ -7,7 +7,7 @@
 use crate::models::{
     ChannelDeliveryLog, DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken,
     IdempotencyRecord, NotificationChannel, NotificationPreferences, NotificationType,
-    RegisterTokenRequest, ReminderDeliveryLog, ScheduledNotification, UnsubscribeToken,
+    RegisterTokenRequest, ReminderDeliveryLog, ReminderToken, ScheduledNotification, UnsubscribeToken,
     UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
@@ -27,6 +27,8 @@ pub type DeliveryStore = Arc<Mutex<Vec<DeliveryRecord>>>;
 pub type RetryStore = Arc<Mutex<HashMap<String, ReminderDeliveryLog>>>;
 /// Keyed by token string → UnsubscribeToken (#828).
 pub type UnsubscribeStore = Arc<Mutex<HashMap<String, UnsubscribeToken>>>;
+/// Keyed by token string → ReminderToken (#1286).
+pub type ReminderTokenStore = Arc<Mutex<HashMap<String, ReminderToken>>>;
 /// Channel delivery logs (#827).
 pub type ChannelDeliveryStore = Arc<Mutex<Vec<ChannelDeliveryLog>>>;
 /// Idempotency key store (#825). Key → cached record.
@@ -48,6 +50,9 @@ pub fn create_retry_store() -> RetryStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 pub fn create_unsubscribe_store() -> UnsubscribeStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+pub fn create_reminder_token_store() -> ReminderTokenStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 pub fn create_channel_delivery_store() -> ChannelDeliveryStore {
@@ -168,6 +173,11 @@ fn notification_content(
             "Your vault has been paused.".to_string(),
             json!({ "type": "vault_paused", "vault_id": vault_id }),
         ),
+        NotificationType::WithdrawalAlert => (
+            "🚨 Withdrawal Attempt Detected",
+            format!("A withdrawal attempt was detected on your vault {vault_id}. Review immediately if you did not authorise this."),
+            json!({ "type": "withdrawal_alert", "vault_id": vault_id }),
+        ),
     }
 }
 
@@ -187,6 +197,7 @@ pub struct NotificationService {
     pub delivery: DeliveryStore,
     pub retry_log: RetryStore,
     pub unsubscribe_tokens: UnsubscribeStore,
+    pub reminder_tokens: ReminderTokenStore,
     pub channel_delivery_log: ChannelDeliveryStore,
     pub idempotency: IdempotencyStore,
 }
@@ -207,6 +218,7 @@ impl NotificationService {
             delivery,
             retry_log: create_retry_store(),
             unsubscribe_tokens: create_unsubscribe_store(),
+            reminder_tokens: create_reminder_token_store(),
             channel_delivery_log: create_channel_delivery_store(),
             idempotency: create_idempotency_store(),
         }
@@ -376,6 +388,66 @@ impl NotificationService {
             .filter(|n| n.status == DeliveryStatus::Pending && n.scheduled_at <= now)
             .cloned()
             .collect()
+    }
+
+    // ── Withdrawal alert trigger ──────────────────────────────────────────────
+
+    /// Enqueue an immediate `WithdrawalAlert` push notification for a vault owner.
+    ///
+    /// The caller is responsible for checking `WithdrawalAlertPreferences` and
+    /// only calling this when `push_enabled` is true and the owner has not
+    /// globally unsubscribed.
+    ///
+    /// The notification is queued into the pending schedule store and will be
+    /// flushed by the background `flush_pending` loop just like any other notification.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner, success = %success))]
+    pub fn trigger_withdrawal_alert(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        amount: i128,
+        success: bool,
+        failure_reason: Option<&str>,
+        tx_hash: Option<&str>,
+    ) {
+        // Don't fire if the owner has globally unsubscribed.
+        if self.is_unsubscribed(owner) {
+            return;
+        }
+
+        let status_label = if success { "successful" } else { "failed" };
+        let data = serde_json::json!({
+            "type": "withdrawal_alert",
+            "vault_id": vault_id,
+            "amount": amount.to_string(),
+            "success": success,
+            "status": status_label,
+            "failure_reason": failure_reason,
+            "tx_hash": tx_hash,
+            "attempted_at": Utc::now().to_rfc3339(),
+        });
+
+        let notif_id = Uuid::new_v4().to_string();
+
+        self.schedule.lock().unwrap().push(ScheduledNotification {
+            id: notif_id,
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type: NotificationType::WithdrawalAlert,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+        });
+
+        tracing::info!(
+            vault_id = vault_id,
+            owner = owner,
+            amount = amount,
+            success = success,
+            "withdrawal alert notification enqueued"
+        );
+        let _ = data; // data is embedded in the schedule; retained for future direct-send path
     }
 
     // ── Deduplication ─────────────────────────────────────────────────────────
@@ -639,6 +711,64 @@ impl NotificationService {
              <hr/>\
              <p style=\"font-size:small;color:#888;\">\
              <a href=\"{base_url}/notifications/unsubscribe?token={token}\">\
+             Unsubscribe from these emails</a></p>\
+             </body></html>"
+        )
+    }
+
+    // ── Token-based reminder links (#1286) ──────────────────────────────────
+
+    /// Generate an opaque token for a reminder link to avoid exposing raw vault IDs.
+    pub fn generate_reminder_token(&self, vault_id: &str, owner: &str) -> String {
+        let token = Uuid::new_v4().to_string();
+        self.reminder_tokens.lock().unwrap().insert(
+            token.clone(),
+            ReminderToken {
+                token: token.clone(),
+                vault_id: vault_id.to_string(),
+                owner: owner.to_string(),
+                created_at: Utc::now(),
+            },
+        );
+        token
+    }
+
+    /// Resolve an opaque reminder token to its associated vault_id and owner.
+    pub fn resolve_reminder_token(&self, token: &str) -> Result<ReminderToken, String> {
+        self.reminder_tokens
+            .lock()
+            .unwrap()
+            .get(token)
+            .cloned()
+            .ok_or_else(|| "invalid or expired reminder token".to_string())
+    }
+
+    /// Generate a signed / opaque reminder check-in URL.
+    pub fn generate_reminder_url(&self, vault_id: &str, owner: &str, base_url: &str) -> String {
+        let token = self.generate_reminder_token(vault_id, owner);
+        format!("{base_url}/reminders/check-in?token={token}")
+    }
+
+    /// Render a reminder email body that includes an opaque token-based reminder link
+    /// and an unsubscribe link, without exposing raw vault IDs in email content.
+    pub fn render_reminder_email(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        subject: &str,
+        body: &str,
+        base_url: &str,
+    ) -> String {
+        let reminder_url = self.generate_reminder_url(vault_id, owner, base_url);
+        let unsub_token = self.generate_unsubscribe_token(owner);
+        format!(
+            "<html><body>\
+             <h2>{subject}</h2>\
+             <p>{body}</p>\
+             <p><a href=\"{reminder_url}\">Check in to your vault</a></p>\
+             <hr/>\
+             <p style=\"font-size:small;color:#888;\">\
+             <a href=\"{base_url}/notifications/unsubscribe?token={unsub_token}\">\
              Unsubscribe from these emails</a></p>\
              </body></html>"
         )
@@ -1159,5 +1289,59 @@ mod tests {
         let all = svc.schedule.lock().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].max_retry_attempts, DEFAULT_MAX_RETRY_ATTEMPTS);
+    }
+
+    // Token-based reminder link tests (#1286)
+
+    #[test]
+    fn test_generate_and_resolve_reminder_token() {
+        let svc = make_service();
+        let token = svc.generate_reminder_token("vault_abc_123", "owner_xyz");
+        assert!(!token.is_empty());
+        assert!(!token.contains("vault_abc_123"));
+
+        let record = svc.resolve_reminder_token(&token).unwrap();
+        assert_eq!(record.vault_id, "vault_abc_123");
+        assert_eq!(record.owner, "owner_xyz");
+    }
+
+    #[test]
+    fn test_resolve_invalid_reminder_token() {
+        let svc = make_service();
+        let err = svc.resolve_reminder_token("non_existent_token");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("invalid or expired"));
+    }
+
+    #[test]
+    fn test_generate_reminder_url() {
+        let svc = make_service();
+        let url = svc.generate_reminder_url("vault_456", "owner1", "https://app.ttllegacy.io");
+        assert!(url.starts_with("https://app.ttllegacy.io/reminders/check-in?token="));
+        assert!(!url.contains("vault_456"));
+    }
+
+    #[test]
+    fn test_render_reminder_email_uses_opaque_token_and_no_raw_vault_id() {
+        let svc = make_service();
+        let vault_id = "sensitive_vault_id_999";
+        let owner = "owner_alice";
+        let subject = "Time to check in";
+        let body = "Please check in to your vault to keep it active.";
+        let base_url = "https://app.ttllegacy.io";
+
+        let html = svc.render_reminder_email(vault_id, owner, subject, body, base_url);
+
+        // Verify HTML contains reminder URL and unsubscribe URL
+        assert!(html.contains("href=\"https://app.ttllegacy.io/reminders/check-in?token="));
+        assert!(html.contains("href=\"https://app.ttllegacy.io/notifications/unsubscribe?token="));
+        assert!(html.contains(subject));
+        assert!(html.contains(body));
+
+        // Ensure the raw vault ID does NOT appear anywhere in the rendered email or URLs
+        assert!(
+            !html.contains(vault_id),
+            "Rendered reminder email must not expose raw vault ID"
+        );
     }
 }

@@ -240,3 +240,51 @@ For deployment issues:
 - [Stellar Documentation](https://developers.stellar.org)
 - [Soroban Smart Contracts](https://soroban.stellar.org)
 - [Security Policy](../SECURITY.md)
+
+## Automated Testnet Deployment (CI/CD)
+
+Every time a GitHub Release is published, the `.github/workflows/deploy-testnet.yml`
+workflow automatically:
+
+1. Builds the `ttl_vault` WASM artifact.
+2. Deploys the contract to Stellar Testnet using the `deployer-testnet` identity
+   (backed by the `STELLAR_TESTNET_ACCOUNT_SECRET` GitHub secret).
+3. Records the new contract ID as a workflow output and uploads a deployment artifact
+   (retained 90 days).
+4. Posts the contract ID as a comment on the GitHub Release page.
+
+### Required GitHub Secrets
+
+| Secret | Description |
+|---|---|
+| `STELLAR_TESTNET_ACCOUNT_SECRET` | Secret key of the testnet deployer account |
+| `TESTNET_ADMIN_SECRET` | Admin secret for smoke test initialization |
+| `TESTNET_OWNER_SECRET` | Owner secret for smoke test vault operations |
+
+### Creating a Release
+
+```bash
+# Tag a release (triggers the deployment workflow)
+git tag -a v1.2.0 -m "Release v1.2.0"
+git push origin v1.2.0
+
+# Then on GitHub: create a Release from this tag and publish it.
+# The deploy-testnet.yml workflow fires automatically on publish.
+```
+
+### Finding the Deployed Contract ID
+
+After the workflow completes:
+- Check the **Release page** — the workflow posts a comment with the contract ID.
+- Download the `testnet-deployment-<tag>` artifact from the workflow run.
+- Or read the `CONTRACT_ID` output from the `deploy-testnet` job in the Actions log.
+
+### Re-deploying Without a New Release
+
+```bash
+# Trigger manually via GitHub CLI
+gh workflow run deploy-testnet.yml
+```
+
+This requires the workflow to also have `workflow_dispatch` as a trigger, which can be
+added to the `on:` block when needed.

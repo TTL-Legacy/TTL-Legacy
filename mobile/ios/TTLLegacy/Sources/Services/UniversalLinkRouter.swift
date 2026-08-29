@@ -15,6 +15,7 @@ final class UniversalLinkRouter {
         case vaultInvitation(vaultID: String)
         case beneficiaryAcceptance(vaultID: String, token: String)
         case vaultAction(vaultID: String, action: VaultAction)
+        case vaultPreview(vaultID: String)
     }
 
     /// Parses a universal link or custom-scheme URL into a typed DeepLink, or returns nil if unrecognised.
@@ -39,6 +40,11 @@ final class UniversalLinkRouter {
         if parts.count == 3, parts[0] == "vaults", parts[2] == "accept" {
             let token = components?.queryItems?.first(where: { $0.name == "token" })?.value ?? ""
             return .beneficiaryAcceptance(vaultID: parts[1], token: token)
+        }
+
+        // /vaults/{vaultID}/preview
+        if parts.count == 3, parts[0] == "vaults", parts[2] == "preview" {
+            return .vaultPreview(vaultID: parts[1])
         }
 
         return nil

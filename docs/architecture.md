@@ -58,6 +58,27 @@ sequenceDiagram
     Contract->>Beneficiary: Assets Transferred
 ```
 
+## Beneficiary Privacy Model
+
+TTL-Legacy operates on a public blockchain, so all contract state is inherently readable by anyone with access to the network. The repository therefore documents the privacy model explicitly instead of pretending the beneficiary is private by default.
+
+### Default behavior
+
+- `Vault.beneficiary` remains stored as a plaintext `Address` for compatibility with existing querying, indexing, and legacy client code.
+- The beneficiary is discoverable from on-chain storage before release and can be used by attackers for social engineering.
+- This is an intentional tradeoff: it preserves interoperable access patterns and minimizes breaking changes, while acknowledging the transparency of Soroban state.
+
+### Optional privacy layer
+
+- For privacy-sensitive vaults, the owner may commit to the beneficiary using a hash commitment, e.g. `sha256(raw_beneficiary_address_bytes)`.
+- The commitment is stored as `BeneficiaryCommitment(u64)` and remains hidden until a later reveal event.
+- At release time, anyone can call `reveal_beneficiary` with the raw beneficiary bytes and a proof; the contract verifies the hash and then transfers funds to the revealed address.
+- This reduces pre-release targeting exposure, but it is not cryptographic anonymity: the beneficiary becomes public at release, and any public release event or transfer still exposes the final address.
+
+### Design decision
+
+This project treats privacy as a best-effort layer layered on top of public blockchain state, not as a guarantee that all beneficiary identities stay hidden forever. The commitment path is offered as an opt-in mechanism for users who value privacy more than maximum compatibility.
+
 ## Component Documentation
 
 For detailed information on specific components, please refer to the following:
