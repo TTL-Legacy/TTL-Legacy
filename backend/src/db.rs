@@ -3,6 +3,7 @@ use crate::models::{
     VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
     ReminderPreferences, Channel, Frequency,
     Subscription, SubscriptionChannel, SubscriptionFrequency,
+    Passkey, RecoveryCode, RecoveryCodeSet,
 };
 
 use chrono::Utc;
@@ -16,6 +17,9 @@ pub type BackupStore = Arc<Mutex<HashMap<String, VaultBackup>>>;
 pub type ShareStore = Arc<Mutex<Vec<VaultShare>>>;
 pub type ShareTokenStore = Arc<Mutex<HashMap<String, ShareToken>>>;
 pub type NotificationStore = Arc<Mutex<HashMap<String, VaultNotificationPreferences>>>;
+pub type PasskeyStore = Arc<Mutex<Vec<Passkey>>>;
+pub type RecoveryCodeStore = Arc<Mutex<Vec<RecoveryCode>>>;
+pub type RecoveryCodeSetStore = Arc<Mutex<Vec<RecoveryCodeSet>>>;
 
 
 pub fn create_vault_store() -> VaultStore {
@@ -76,6 +80,9 @@ pub struct AppState {
     pub audit_store: AuditStore,
     pub share_store: ShareStore,
     pub share_token_store: ShareTokenStore,
+    pub passkey_store: PasskeyStore,
+    pub recovery_code_store: RecoveryCodeStore,
+    pub recovery_code_set_store: RecoveryCodeSetStore,
 }
 
 pub fn search_vaults(

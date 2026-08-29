@@ -690,6 +690,110 @@ pub struct SimulateReleaseResponse {
     pub simulated_at: DateTime<Utc>,
 }
 
+// ── Passkey Recovery Flow (#1299) ──────────────────────────────────────────
+
+/// A registered passkey for a vault owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Passkey {
+    pub passkey_id: String,
+    pub owner: String,
+    pub vault_id: String,
+    pub credential_id: String,
+    /// Device name (e.g., "iPhone", "YubiKey 5", "Chrome")
+    pub device_name: String,
+    pub registered_at: DateTime<Utc>,
+    pub last_used: Option<DateTime<Utc>>,
+    pub is_backup: bool,
+}
+
+/// A single recovery code for account recovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryCode {
+    pub code_id: String,
+    pub owner: String,
+    pub vault_id: String,
+    /// The recovery code itself (hashed for storage)
+    pub code_hash: String,
+    pub generated_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+}
+
+/// Recovery codes bundle for a vault owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryCodeSet {
+    pub set_id: String,
+    pub owner: String,
+    pub vault_id: String,
+    /// Array of plaintext codes (only shown once at generation)
+    pub codes: Vec<String>,
+    pub generated_at: DateTime<Utc>,
+    pub codes_used: u32,
+    pub total_codes: u32,
+}
+
+/// Request to register an additional passkey.
+#[derive(Debug, Deserialize)]
+pub struct RegisterPasskeyRequest {
+    pub vault_id: String,
+    pub owner: String,
+    pub credential_id: String,
+    pub device_name: String,
+    pub is_backup: Option<bool>,
+}
+
+/// Response when registering a new passkey.
+#[derive(Debug, Serialize)]
+pub struct RegisterPasskeyResponse {
+    pub passkey_id: String,
+    pub vault_id: String,
+    pub device_name: String,
+    pub registered_at: DateTime<Utc>,
+}
+
+/// Request to initiate recovery using a backup passkey or recovery code.
+#[derive(Debug, Deserialize)]
+pub struct RecoveryRequest {
+    pub vault_id: String,
+    pub owner: String,
+    /// Either a backup passkey credential or a recovery code
+    pub recovery_credential: String,
+    pub recovery_method: RecoveryMethod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMethod {
+    BackupPasskey,
+    RecoveryCode,
+}
+
+/// Response when recovery is successful.
+#[derive(Debug, Serialize)]
+pub struct RecoveryResponse {
+    pub recovery_id: String,
+    pub vault_id: String,
+    pub owner: String,
+    pub recovery_method: RecoveryMethod,
+    pub authenticated_at: DateTime<Utc>,
+}
+
+/// Request to generate new recovery codes.
+#[derive(Debug, Deserialize)]
+pub struct GenerateRecoveryCodesRequest {
+    pub vault_id: String,
+    pub owner: String,
+}
+
+/// Response with newly generated recovery codes (shown only once).
+#[derive(Debug, Serialize)]
+pub struct GenerateRecoveryCodesResponse {
+    pub set_id: String,
+    pub vault_id: String,
+    pub recovery_codes: Vec<String>,
+    pub generated_at: DateTime<Utc>,
+    pub note: String,
+}
+
 // --- Issue #1143: Vesting Bonus Backend API ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
