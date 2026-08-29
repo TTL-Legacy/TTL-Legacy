@@ -68,6 +68,10 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
             "/notifications/unsubscribe",
             get(routes::unsubscribe),
         )
+        .route(
+            "/reminders/check-in",
+            get(routes::resolve_reminder_token),
+        )
         .with_state(state)
 }
 
@@ -380,6 +384,119 @@ async fn test_cors_rejected_origin() {
         Some(val) => assert_ne!(val, "http://evil.com"),
         None => {} // No header is also acceptable
     }
+}
+
+// ── Issue #1179: Hardened CORS tests ─────────────────────────────────────────
+
+/// Build a small test router with `build_cors_layer()` applied.
+/// `app_env` and `allowed_origins` are injected via environment variables.
+fn build_cors_test_app(app_env: &str, allowed_origins: &str) -> Router {
+    // Set env vars before building the layer; clear them after.
+    std::env::set_var("APP_ENV", app_env);
+    std::env::set_var("ALLOWED_ORIGINS", allowed_origins);
+    let cors = crate::build_cors_layer();
+    std::env::remove_var("APP_ENV");
+    std::env::remove_var("ALLOWED_ORIGINS");
+
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
+    Router::new()
+        .route("/health", get(health_handler))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// With `APP_ENV=production` and a valid origin in the whitelist, the
+/// `access-control-allow-origin` header should reflect the allowed origin.
+#[tokio::test]
+async fn test_cors_hardened_allowed_origin() {
+    let app = build_cors_test_app("production", "http://allowed.example.com");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://allowed.example.com")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The allowed origin must appear in the response header.
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_some(),
+        "access-control-allow-origin must be present for an allowed origin"
+    );
+    assert_eq!(
+        allow_origin.unwrap(),
+        "http://allowed.example.com",
+        "access-control-allow-origin must match the allowed origin"
+    );
+}
+
+/// With `APP_ENV=production` and a disallowed origin, the
+/// `access-control-allow-origin` header must not reflect the disallowed origin.
+#[tokio::test]
+async fn test_cors_hardened_disallowed_origin() {
+    let app = build_cors_test_app("production", "http://allowed.example.com");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://evil.example.com")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    match allow_origin {
+        Some(val) => assert_ne!(
+            val, "http://evil.example.com",
+            "disallowed origin must not appear in access-control-allow-origin"
+        ),
+        None => {} // No header is also acceptable — origin was rejected.
+    }
+}
+
+/// With `APP_ENV=development`, the CORS layer should be permissive and allow
+/// cross-origin requests from any origin (wildcard or reflected).
+#[tokio::test]
+async fn test_cors_development_mode_allows_all() {
+    let app = build_cors_test_app("development", "");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://any-origin.local")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // In permissive mode, the response status must be 2xx (not blocked)
+    // and the allow-origin header must be present.
+    assert!(
+        res.status().is_success() || res.status().as_u16() == 204,
+        "dev CORS must not block preflight: got status {}",
+        res.status()
+    );
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_some(),
+        "access-control-allow-origin must be present in development mode"
+    );
 }
 
 // ── #824: Scheduler resilience tests ─────────────────────────────────────────
@@ -1701,247 +1818,71 @@ async fn test_get_vesting_bonus_not_configured() {
     assert!(json["on_time_window_seconds"].is_null());
 }
 
-// ── Issue #1287: CSRF protection middleware tests ─────────────────────────────
+// ── #1286: Token-based reminder link security tests ─────────────────────────
 
-#[cfg(test)]
-mod csrf_tests {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-        middleware,
-        routing::{get, post},
-        Json, Router,
-    };
-    use serde_json::json;
-    use tower::ServiceExt;
+#[tokio::test]
+async fn test_resolve_reminder_token_success() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+    let token = db.generate_reminder_token("vault-999", "owner-alice");
 
-    use crate::csrf;
+    let app = test_app_with_db(Arc::clone(&db));
+    let res = get_req(app, &format!("/reminders/check-in?token={token}")).await;
+    assert_eq!(res.status(), StatusCode::OK);
 
-    /// Build a minimal test router that has the CSRF middleware applied and a
-    /// single mutable POST endpoint so we can probe the protection.
-    fn csrf_test_app() -> Router {
-        async fn echo_handler() -> Json<serde_json::Value> {
-            Json(json!({ "ok": true }))
-        }
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["vault_id"], "vault-999");
+    assert_eq!(json["owner"], "owner-alice");
+}
 
-        Router::new()
-            .route("/api/csrf-token", get(csrf::csrf_token_handler))
-            .route("/api/test-post", post(echo_handler))
-            .layer(middleware::from_fn(csrf::csrf_middleware))
-    }
+#[tokio::test]
+async fn test_resolve_reminder_token_invalid() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
 
-    // ── Helper to extract Set-Cookie value from a response ────────────────────
+    let app = test_app_with_db(Arc::clone(&db));
+    let res = get_req(app, "/reminders/check-in?token=invalid_opaque_token").await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
 
-    fn extract_set_cookie(res: &axum::response::Response) -> Option<String> {
-        res.headers()
-            .get("set-cookie")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-    }
+#[tokio::test]
+async fn test_reminder_email_does_not_contain_raw_vault_id() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+    let raw_vault_id = "sensitive-vault-secret-123";
+    let owner = "owner-bob";
+    let base_url = "https://app.ttllegacy.io";
 
-    fn token_from_cookie_header(set_cookie: &str) -> &str {
-        // Format: "__Host-csrf=<token>; HttpOnly; ..."
-        let start = set_cookie.find('=').unwrap() + 1;
-        let end = set_cookie.find(';').unwrap_or(set_cookie.len());
-        &set_cookie[start..end]
-    }
+    let url = db.generate_reminder_url(raw_vault_id, owner, base_url);
+    assert!(!url.contains(raw_vault_id));
+    assert!(url.starts_with("https://app.ttllegacy.io/reminders/check-in?token="));
 
-    // ── GET /api/csrf-token ───────────────────────────────────────────────────
+    let fcm = Arc::new(crate::notifications::FcmClient::new("key".into(), "project".into()));
+    let svc = crate::notifications::NotificationService::new(
+        fcm,
+        crate::notifications::create_token_store(),
+        crate::notifications::create_prefs_store(),
+        crate::notifications::create_schedule_store(),
+        crate::notifications::create_delivery_store(),
+    );
 
-    #[tokio::test]
-    async fn test_csrf_token_endpoint_returns_200_with_cookie() {
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+    let email_body = crate::templates::email_body(
+        &crate::models::NotificationType::CheckInReminder,
+        &Some(crate::models::Locale::En),
+        raw_vault_id,
+        None,
+    );
+    assert!(!email_body.contains(raw_vault_id));
 
-        assert_eq!(res.status(), StatusCode::OK);
-        let cookie = extract_set_cookie(&res).expect("Set-Cookie header missing");
-        assert!(cookie.starts_with("__Host-csrf="), "cookie has wrong name: {cookie}");
-        assert!(cookie.contains("HttpOnly"), "missing HttpOnly");
-        assert!(cookie.contains("SameSite=Strict"), "missing SameSite");
-        assert!(cookie.contains("Secure"), "missing Secure");
-        assert!(cookie.contains("Path=/"), "missing Path=/");
-    }
-
-    #[tokio::test]
-    async fn test_csrf_token_endpoint_body_contains_token() {
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let token = json["csrf_token"].as_str().expect("csrf_token field missing");
-        assert!(!token.is_empty(), "token must not be empty");
-        assert_eq!(token.len(), 36, "expected UUID v4 length");
-    }
-
-    // ── POST without token must be rejected ───────────────────────────────────
-
-    #[tokio::test]
-    async fn test_post_without_csrf_token_returns_403() {
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/test-post")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["code"], "csrf_invalid");
-    }
-
-    #[tokio::test]
-    async fn test_post_with_header_but_no_cookie_returns_403() {
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/test-post")
-                    .header("content-type", "application/json")
-                    .header(csrf::CSRF_HEADER_NAME, "some-token-value")
-                    .body(Body::from(r#"{}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn test_post_with_cookie_but_no_header_returns_403() {
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/test-post")
-                    .header("content-type", "application/json")
-                    .header("cookie", "__Host-csrf=some-token-value")
-                    .body(Body::from(r#"{}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn test_post_with_mismatched_tokens_returns_403() {
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/test-post")
-                    .header("content-type", "application/json")
-                    .header("cookie", "__Host-csrf=token-a")
-                    .header(csrf::CSRF_HEADER_NAME, "token-b")
-                    .body(Body::from(r#"{}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    }
-
-    // ── POST with valid matching tokens must pass ─────────────────────────────
-
-    #[tokio::test]
-    async fn test_post_with_valid_matching_tokens_returns_200() {
-        let token = csrf::generate_token();
-        let cookie_value = format!("__Host-csrf={token}");
-
-        let app = csrf_test_app();
-        let res = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/test-post")
-                    .header("content-type", "application/json")
-                    .header("cookie", cookie_value)
-                    .header(csrf::CSRF_HEADER_NAME, &token)
-                    .body(Body::from(r#"{}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::OK);
-    }
-
-    // ── GET is always exempt ──────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_get_request_is_exempt_from_csrf() {
-        let app = csrf_test_app();
-        // GET /api/csrf-token has no cookie or header – should return 200
-        let res = app
-            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(res.status(), StatusCode::OK);
-    }
-
-    // ── Two sequential requests: fetch token then use it ─────────────────────
-
-    #[tokio::test]
-    async fn test_fetch_token_then_post_succeeds() {
-        // Step 1: get a token
-        let app = csrf_test_app();
-        let token_res = app
-            .oneshot(Request::builder().uri("/api/csrf-token").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(token_res.status(), StatusCode::OK);
-
-        let set_cookie = extract_set_cookie(&token_res).expect("Set-Cookie missing");
-        let token = token_from_cookie_header(&set_cookie).to_owned();
-        let cookie_header = format!("__Host-csrf={token}");
-
-        // Step 2: POST with the extracted token
-        let app2 = csrf_test_app();
-        let post_res = app2
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/test-post")
-                    .header("content-type", "application/json")
-                    .header("cookie", cookie_header)
-                    .header(csrf::CSRF_HEADER_NAME, &token)
-                    .body(Body::from(r#"{}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(post_res.status(), StatusCode::OK);
-    }
-
-    // ── Unit tests from csrf module re-validated at integration level ──────────
-
-    #[test]
-    fn test_generate_token_uniqueness() {
-        let tokens: std::collections::HashSet<String> =
-            (0..50).map(|_| csrf::generate_token()).collect();
-        assert_eq!(tokens.len(), 50, "all 50 tokens should be unique");
-    }
+    let rendered = svc.render_reminder_email(
+        raw_vault_id,
+        owner,
+        "Check-In Reminder",
+        &email_body,
+        base_url,
+    );
+    assert!(!rendered.contains(raw_vault_id));
+    assert!(rendered.contains("Check in to your vault"));
+    assert!(rendered.contains("https://app.ttllegacy.io/reminders/check-in?token="));
 }

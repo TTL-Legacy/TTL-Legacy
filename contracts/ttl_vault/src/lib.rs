@@ -11,15 +11,15 @@ mod types;
 // client crates (integration tests, fuzz targets) can reference them.
 pub use types::{
     ArchivedVaultInfo, AuditEntry, BackupCode, BeneficiaryClaimDelegation, BeneficiaryCommitment,
-    BeneficiaryEntry, BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
+    BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
     CheckInHistoryEntry, CheckInStreak, ConditionalAcceptanceEntry, StorageKey, DisputeStatus,
     EncryptedBackupCodes, GeoCheckInEntry, HibernationEntry, IntegrityReport, MetadataVersionEntry,
     MilestoneEntry, MilestoneVestingSchedule, MultiSigConfig, MultiSigOperation, MultiSigProposal,
     OwnershipProof, OwnershipTransferRequest, PasskeyAnalytics, PasskeyHash, PasskeyUsageEntry,
     PasskeyUsageStat, PauseRecord, PendingBeneficiaryUpdate, PendingMultiSigOp, ProofOfLifeEntry, ProposalStatus,
-    ReleaseCondition, ReleaseEvent, ReleaseStatus, ReleaseVoteEntry, StateTransitionEntry,
+    ReleaseCondition, ReleaseEvent, ReleaseVoteEntry, StateTransitionEntry,
     TokenCollateral, TokenConversion, TokenHedge, TokenLending, TokenRebalanceConfig, TokenStaking,
-    TokenWeight, TtlBorrowRecord, UpgradeProposal, Vault, VaultStatusSummary, VestingBonusConfig,
+    TokenWeight, TtlBorrowRecord, UpgradeProposal, VaultStatusSummary, VestingBonusConfig,
     VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
     WhitelistEntry, WithdrawalLimit, WithdrawalReversal, WithdrawalScheduleEntry,
     WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
@@ -120,6 +120,10 @@ mod beneficiary_confirmation_tests;
 #[cfg(test)]
 mod min_checkin_interval_tests;
 
+// Issue #1264 #1265 #1266 #1267: dedicated guard tests
+#[cfg(test)]
+mod bug_fix_tests_1264_1265_1266_1267;
+
 #[cfg(test)]
 mod vault_archiving_tests;
 
@@ -127,6 +131,9 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
+// Issue #1263: structured VaultNotFound error on check-in for non-existent vault
+#[cfg(test)]
+mod checkin_nonexistent_vault_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -195,6 +202,13 @@ fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
 /// Minimum check-in interval: 1 hour (3600 seconds)
 /// Prevents abuse of TTL extension mechanisms with unreasonably short intervals
 pub const MIN_CHECK_IN_INTERVAL: u64 = 3600;
+
+/// Maximum check-in interval: 10 years (315_360_000 seconds)
+/// Issue #1165: an unconditional ceiling — independent of the optional
+/// admin-configured MaxCheckInInterval — prevents an astronomically large
+/// interval (e.g. near u64::MAX) from overflowing TTL arithmetic or making
+/// automatic release practically unreachable.
+pub const MAX_CHECK_IN_INTERVAL: u64 = 315_360_000;
 
 /// Maximum number of beneficiaries allowed per vault.
 pub const MAX_BENEFICIARIES: u32 = 20;
@@ -1357,6 +1371,11 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::CheckInIntervalTooShort);
         }
 
+        // Issue #1165: Enforce maximum check-in interval (10 years)
+        if check_in_interval > MAX_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::IntervalTooHigh);
+        }
+
         Self::assert_interval_in_bounds(&env, check_in_interval);
 
         if owner == beneficiary {
@@ -1417,6 +1436,7 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata,
@@ -3115,6 +3135,15 @@ impl TtlVaultContract {
             } else {
                 total
             };
+
+            // Issue #1167: guard directly against a zero-amount transfer at the
+            // actual release site, independent of the earlier `total == 0` checks,
+            // so no future change upstream can silently let a no-op release
+            // through and emit a misleading release event.
+            if release_amount == 0 {
+                panic_with_error!(&env, ContractError::EmptyVault);
+            }
+
             let token_client = token::Client::new(&env, &vault.token_address);
 
             // Calculate burn amount based on vault's burn_percentage (basis points)
@@ -5916,6 +5945,23 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id).last_check_in
     }
 
+    /// Lightweight query for a vault's last check-in timestamp — Issue #1166.
+    ///
+    /// Alias of `get_vault_last_check_in` under the shorter name the backend
+    /// reminder service and frontend dashboard expect, so owner-activity
+    /// monitoring doesn't need to fetch (or know the shape of) the full
+    /// vault record just to read this one field.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The Unix timestamp of the last check-in
+    pub fn get_last_check_in(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).last_check_in
+    }
+
     /// Returns the balance of a vault.
     ///
     /// # Arguments
@@ -5966,6 +6012,20 @@ impl TtlVaultContract {
     /// The Unix timestamp when the vault was created
     pub fn get_vault_created_at(env: Env, vault_id: u64) -> u64 {
         Self::load_vault(&env, vault_id).created_at
+    }
+
+    /// Returns the ledger sequence number at which the vault was created.
+    /// Dashboards and analytics tools can use this to determine how long
+    /// a vault has been active without relying on external event history.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The ledger sequence number when the vault was created
+    pub fn get_vault_age(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).creation_ledger
     }
 
     /// Returns the check-in interval for a vault.
@@ -6153,6 +6213,16 @@ impl TtlVaultContract {
     /// The TTL is calculated as the time remaining until the vault expires
     /// based on the last check-in time and the check-in interval.
     ///
+    /// # Expected behavior
+    /// * The value is recalculated on every call from the current ledger timestamp.
+    ///   Nothing is cached, so the result strictly decreases as ledgers advance and
+    ///   never returns a value from an earlier ledger.
+    /// * It decreases by exactly the elapsed time between two calls while no
+    ///   check-in happens.
+    /// * A successful `check_in` moves `last_check_in` to the current timestamp, so
+    ///   the next call reports the full `check_in_interval` again.
+    /// * Once the deadline is reached the result is `None`, not `Some(0)`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
@@ -6162,7 +6232,9 @@ impl TtlVaultContract {
     /// `None` if the vault does not exist or the TTL has already lapsed.
     pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
         let vault = Self::try_load_vault(&env, vault_id)?;
-        let deadline = vault.last_check_in + vault.check_in_interval;
+        let deadline = vault.last_check_in.saturating_add(vault.check_in_interval);
+        // Read the live ledger timestamp on every call so the result reflects the
+        // current ledger rather than the state at the last check-in.
         let now = env.ledger().timestamp();
         if now >= deadline {
             None
@@ -6995,7 +7067,12 @@ impl TtlVaultContract {
 
         env.events().publish(
             (symbol_short!("ben_init"), vault_id),
-            (new_beneficiary, now + timelock),
+            (new_beneficiary.clone(), now + timelock),
+        );
+
+        env.events().publish(
+            (BENEFICIARY_UPDATED_TOPIC, vault_id),
+            (vault.beneficiary.clone(), new_beneficiary.clone()),
         );
 
         Ok(())
@@ -7027,6 +7104,13 @@ impl TtlVaultContract {
 
         let old_beneficiary = vault.beneficiary.clone();
         let new_beneficiary = pending.new_beneficiary.clone();
+
+        // Re-validate at apply time: ownership may have changed during the timelock.
+        if vault.owner == new_beneficiary {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        Self::assert_not_zero_address(&env, &new_beneficiary);
+        Self::assert_beneficiary_is_account(&env, &new_beneficiary)?;
 
         // Enforce beneficiary capacity only when the beneficiary actually changes
         if old_beneficiary != new_beneficiary {
@@ -7095,6 +7179,9 @@ impl TtlVaultContract {
         }
         if new_interval < MIN_CHECK_IN_INTERVAL {
             return Err(ContractError::CheckInIntervalTooShort);
+        }
+        if new_interval > MAX_CHECK_IN_INTERVAL {
+            return Err(ContractError::IntervalTooHigh);
         }
         Self::assert_interval_in_bounds(&env, new_interval);
         let mut vault = Self::load_vault(&env, vault_id);
@@ -7914,6 +8001,7 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata,
@@ -9138,9 +9226,17 @@ impl TtlVaultContract {
     }
 
     fn assert_not_zero_address(env: &Env, address: &Address) {
-        let zero = Address::from_contract_id(&env, &BytesN::zero(&env));
-        if address == &zero {
+        let zero_bytes = BytesN::<32>::zero(&env);
+        if address == &Address::from_contract_id(&env, &zero_bytes) {
             panic_with_error!(env, ContractError::InvalidBeneficiary);
+        }
+        // An account whose ed25519 key is all zeroes is unspendable, so funds sent
+        // there would be permanently locked.
+        if let Ok(soroban_sdk::AddressPayload::AccountIdPublicKeyEd25519(key)) = address.to_payload()
+        {
+            if key == zero_bytes {
+                panic_with_error!(env, ContractError::InvalidBeneficiary);
+            }
         }
     }
 
@@ -9567,6 +9663,7 @@ impl TtlVaultContract {
             check_in_interval: original.check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: original.beneficiaries.clone(),
             metadata: original.metadata.clone(),
@@ -9711,6 +9808,7 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries,
             metadata,

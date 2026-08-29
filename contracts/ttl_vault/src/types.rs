@@ -858,6 +858,7 @@ pub struct Vault {
     pub check_in_interval: u64, // seconds
     pub last_check_in: u64,     // ledger timestamp
     pub created_at: u64,        // vault creation timestamp
+    pub creation_ledger: u64,   // ledger sequence number at vault creation
     pub status: ReleaseStatus,
     /// Multi-beneficiary split. Empty means use `beneficiary` (100%).
     pub beneficiaries: Vec<BeneficiaryEntry>,
