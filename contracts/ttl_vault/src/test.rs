@@ -139,6 +139,46 @@ fn test_vault_exists_for_existing_and_missing_ids() {
 }
 
 #[test]
+fn test_beneficiary_commitment_keeps_identity_private_until_reveal() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
+
+    let proof = beneficiary.to_xdr(&env);
+    let commitment: BytesN<32> = env.crypto().sha256(&proof).into();
+
+    client.commit_beneficiary(&vault_id, &owner, &commitment);
+    assert_eq!(client.get_beneficiary_commitment(&vault_id).unwrap().commitment, commitment);
+
+    let claimed = beneficiary.clone();
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+    client.reveal_beneficiary(&vault_id, &proof, &claimed);
+
+    assert_eq!(client.get_revealed_beneficiary(&vault_id).unwrap(), claimed);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, ReleaseStatus::Released);
+    assert_eq!(vault.balance, 0);
+    assert_eq!(client.get_contract_token(), token_address);
+}
+
+#[test]
+fn test_beneficiary_commitment_rejects_invalid_reveal_proof() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
+
+    let valid_proof = beneficiary.to_xdr(&env);
+    let valid_hash: BytesN<32> = env.crypto().sha256(&valid_proof).into();
+    client.commit_beneficiary(&vault_id, &owner, &valid_hash);
+
+    let wrong_proof = Bytes::from_array(&env, &[9u8; 32]);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+
+    assert!(client
+        .try_reveal_beneficiary(&vault_id, &wrong_proof, &beneficiary)
+        .is_err());
+}
+
+#[test]
 fn test_get_owner_returns_correct_owner() {
     let (_, owner, beneficiary, _, _, client) = setup();
 
