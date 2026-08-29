@@ -6,7 +6,9 @@ use soroban_sdk::{
 };
 
 pub mod ranking;
+pub mod oracle;
 mod types;
+pub use oracle::{OracleClient, OracleInterface};
 // The contract's `#[contracttype]` types are re-exported publicly so that
 // client crates (integration tests, fuzz targets) can reference them.
 pub use types::{
@@ -1443,7 +1445,7 @@ impl TtlVaultContract {
             token_address: vault_token,
             custom_metadata: Bytes::new(&env),
             is_paused: false,
-            release_condition: ReleaseCondition::OnExpiry,
+            release_condition: ReleaseCondition::TTLExpiry,
             parent_vault_id: None,
             passkey_hash: None,
             max_deposit_amount: None,
@@ -2836,11 +2838,14 @@ impl TtlVaultContract {
         // Load release conditions
         let conditions = Self::get_release_conditions(env.clone(), vault_id);
         let mut condition_met = false;
-        for cond in conditions.iter() {
-            match cond {
+        let mut ttl_expiry_met = false;
+
+        if conditions.is_empty() {
+            match vault.release_condition {
                 ReleaseCondition::TTLExpiry => {
                     if Self::is_expired(env.clone(), vault_id) {
                         condition_met = true;
+                        ttl_expiry_met = true;
                     }
                 }
                 ReleaseCondition::OwnerInitiated => {
@@ -2848,55 +2853,58 @@ impl TtlVaultContract {
                         condition_met = true;
                     }
                 }
-                ReleaseCondition::Oracle(addr) => {
+                ReleaseCondition::Oracle(ref addr) => {
                     if oracle::query(&env, addr).unwrap_or(false) {
                         condition_met = true;
                     }
                 }
             }
+        } else {
+            for cond in conditions.iter() {
+                match cond {
+                    ReleaseCondition::TTLExpiry => {
+                        if Self::is_expired(env.clone(), vault_id) {
+                            condition_met = true;
+                            ttl_expiry_met = true;
+                        }
+                    }
+                    ReleaseCondition::OwnerInitiated => {
+                        if mode == ReleaseTrigger::Manual {
+                            condition_met = true;
+                        }
+                    }
+                    ReleaseCondition::Oracle(addr) => {
+                        if oracle::query(&env, &addr).unwrap_or(false) {
+                            condition_met = true;
+                        }
+                    }
+                }
+            }
         }
+
         if !condition_met {
-            panic_with_error!(&env, ContractError::ConditionsNotApproved);
+            if conditions.is_empty() && vault.release_condition == ReleaseCondition::TTLExpiry {
+                panic_with_error!(&env, ContractError::NotExpired);
+            } else {
+                panic_with_error!(&env, ContractError::ConditionsNotApproved);
+            }
         }
 
-        Self::assert_not_paused(&env);
-        // Attempt to restore archived vault state before proceeding - Issue #443
-        Self::try_restore_archived_vault(&env, vault_id);
-        let mut vault = Self::load_vault(&env, vault_id);
-        if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
-        }
-        // We only block vetoes on trigger before the vault has expired.
-        // Note: release entrypoint is for the Expiry trigger and thus requires expiry,
-        // but manual release can occur at arbitrary times.
-        // Here we keep the existing expiry gate.
-        if !Self::is_expired(env.clone(), vault_id) {
-            panic_with_error!(&env, ContractError::NotExpired);
-        }
-
-        let now = env.ledger().timestamp();
-        let mut hibernated = 0u64;
-        if let Some(h) = env.storage().persistent().get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id)) {
-            hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
-        }
-        let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
-        let grace_period = env.storage().instance().get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds).unwrap_or(0);
-        if now < expiry_time + grace_period {
-            panic_with_error!(&env, ContractError::GracePeriodActive);
+        // When release is based on TTL expiry, enforce the grace period before allowing release.
+        if ttl_expiry_met {
+            let now = env.ledger().timestamp();
+            let mut hibernated = 0u64;
+            if let Some(h) = env.storage().persistent().get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id)) {
+                hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
+            }
+            let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
+            let grace_period = env.storage().instance().get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds).unwrap_or(0);
+            if now < expiry_time + grace_period {
+                panic_with_error!(&env, ContractError::GracePeriodActive);
+            }
         }
 
-        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
-        // The veto is only meaningful before expiry; since `trigger_release*` requires expiry,
-        // veto has already expired in practice. However, for completeness (and for manual release),
-        // we gate on expiry-less times above in the public veto method.
-        let total = vault.balance;
-        if total == 0 {
-            panic_with_error!(&env, ContractError::EmptyVault);
-        }
-
-        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
-        // Block `trigger_release*` only if veto was set and vault has not yet expired.
-        // (This is also harmless for expiry-triggered releases, since those require expiry.)
+        // Beneficiary veto of owner-defined release conditions before expiry.
         if !Self::is_expired(env.clone(), vault_id) {
             let vetoed: bool = env
                 .storage()
@@ -7910,6 +7918,11 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .set(&StorageKey::ReleaseConditions(vault_id), &conditions);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ReleaseConditions(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
@@ -7920,7 +7933,7 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get(&StorageKey::ReleaseConditions(vault_id))
-            .unwrap_or_else(|| Vec::new(env))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Owner‑initiated panic release.
@@ -8008,7 +8021,7 @@ impl TtlVaultContract {
             token_address: vault_token,
             custom_metadata: Bytes::new(&env),
             is_paused: false,
-            release_condition: ReleaseCondition::OnExpiry,
+            release_condition: ReleaseCondition::TTLExpiry,
             parent_vault_id: Some(parent_vault_id),
             passkey_hash: None,
             max_deposit_amount: None,

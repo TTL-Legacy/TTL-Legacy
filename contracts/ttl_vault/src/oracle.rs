@@ -1,20 +1,20 @@
-// Minimal oracle module for external release condition queries
-use soroban_sdk::{Env, Address, Symbol, symbol_short, contracterror, panic_with_error, Val};
+use soroban_sdk::{contractclient, Address, Env};
 use crate::types::ContractError;
 
+/// Minimal oracle interface for conditional release queries.
+/// External oracle contracts must expose a `query_release` function returning a boolean
+/// indicating whether the release condition is met.
+#[contractclient(name = "OracleClient")]
+pub trait OracleInterface {
+    fn query_release(env: Env) -> bool;
+}
+
+/// Queries an external oracle contract at `address` to determine if release conditions are satisfied.
+/// Returns `Ok(true)` if the oracle confirms the condition is met, and `Ok(false)` if not met or on call failure.
 pub fn query(env: &Env, address: &Address) -> Result<bool, ContractError> {
-    // Expect the external oracle contract to expose a `query_release` function returning a boolean
-    // indicating whether the release condition is met.
-    // This call may fail; propagate as a generic error.
-    let result = env.invoke_contract(address, &symbol!("query_release"), &[]);
-    match result {
-        Ok(val) => {
-            // Attempt to convert the returned value into a bool. If conversion fails, treat as false.
-            match bool::try_from(val) {
-                Ok(b) => Ok(b),
-                Err(_) => Ok(false),
-            }
-        }
-        Err(_) => Ok(false), // On failure, treat as condition not met to avoid unintended releases.
+    let client = OracleClient::new(env, address);
+    match client.try_query_release() {
+        Ok(Ok(val)) => Ok(val),
+        _ => Ok(false),
     }
 }
