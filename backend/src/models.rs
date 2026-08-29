@@ -76,6 +76,8 @@ pub enum NotificationType {
     CheckInReminder,
     VaultReleased,
     VaultPaused,
+    /// Fired whenever a withdrawal attempt is made (successful or failed).
+    WithdrawalAlert,
 }
 
 /// Delivery status of a single notification attempt.
@@ -147,6 +149,57 @@ impl Default for NotificationPreferences {
             unsubscribed: false,
         }
     }
+}
+
+// ── Withdrawal alert notification preferences ───────────────────────────────
+
+/// Per-vault opt-in preferences for withdrawal alert notifications.
+///
+/// Each vault owner can independently enable email and/or push alerts for
+/// every withdrawal attempt (successful or failed) against their vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalAlertPreferences {
+    pub vault_id: u64,
+    pub owner: String,
+    /// Send an email notification on every withdrawal attempt.
+    pub email_enabled: bool,
+    /// Send a push notification on every withdrawal attempt.
+    pub push_enabled: bool,
+}
+
+impl Default for WithdrawalAlertPreferences {
+    fn default() -> Self {
+        Self {
+            vault_id: 0,
+            owner: String::new(),
+            email_enabled: false,
+            push_enabled: false,
+        }
+    }
+}
+
+/// Request body for `PUT /api/vaults/{vault_id}/withdrawal-alert-preferences`.
+#[derive(Debug, Deserialize)]
+pub struct SetWithdrawalAlertPrefsRequest {
+    pub owner: String,
+    pub email_enabled: bool,
+    pub push_enabled: bool,
+}
+
+/// Describes a single withdrawal attempt that should trigger notifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalEvent {
+    pub vault_id: u64,
+    pub owner: String,
+    /// Amount attempted (in stroops / base units).
+    pub amount: i128,
+    /// Whether the withdrawal completed successfully.
+    pub success: bool,
+    /// Optional human-readable reason for failure.
+    pub failure_reason: Option<String>,
+    pub attempted_at: chrono::DateTime<chrono::Utc>,
+    /// Stellar transaction hash, if available.
+    pub tx_hash: Option<String>,
 }
 
 // ── Unsubscribe support (#828) ──────────────────────────────────────────────

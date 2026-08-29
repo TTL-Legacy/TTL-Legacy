@@ -174,6 +174,43 @@ pub async fn resolve_reminder_token(
 }
 
 
+// ── Vault subscription endpoints ─────────────────────────────────────────────
+
+/// POST /api/vaults/:vault_id/subscriptions
+///
+/// Create or update vault-level notification subscription settings.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn set_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+    Json(body): Json<SetSubscriptionRequest>,
+) -> Result<(StatusCode, Json<Subscription>), AppError> {
+    if body.channels.is_empty() {
+        return Err(AppError::InvalidInput("channels must not be empty".into()));
+    }
+
+    let sub = Subscription {
+        vault_id,
+        owner: body.owner,
+        channels: body.channels,
+        frequency: body.frequency,
+    };
+    state.db.upsert_subscription(&sub)?;
+    Ok((StatusCode::OK, Json(sub)))
+}
+
+/// DELETE /api/vaults/:vault_id/subscriptions
+///
+/// Remove vault-level notification subscription settings.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn delete_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+) -> Result<StatusCode, AppError> {
+    state.db.delete_subscription(vault_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Release Simulator endpoint ────────────────────────────────────────────────
 
 /// GET /api/vaults/:vault_id/simulate-release?scenarios=no_check_ins,consistent_check_ins,missed_check_in_dates&missed_count=2

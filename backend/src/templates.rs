@@ -74,21 +74,25 @@ pub fn email_subject(notification_type: &NotificationType, locale: &Option<Local
         (Locale::En, NotificationType::CheckInReminder) => "Time to check in to your vault",
         (Locale::En, NotificationType::VaultReleased) => "Your vault has been released",
         (Locale::En, NotificationType::VaultPaused) => "Your vault has been paused",
+        (Locale::En, NotificationType::WithdrawalAlert) => "Withdrawal attempt detected on your vault",
         // Spanish
         (Locale::Es, NotificationType::ExpiryWarning) => "Tu bóveda está por vencer",
         (Locale::Es, NotificationType::CheckInReminder) => "Es hora de registrarte en tu bóveda",
         (Locale::Es, NotificationType::VaultReleased) => "Tu bóveda ha sido liberada",
         (Locale::Es, NotificationType::VaultPaused) => "Tu bóveda ha sido pausada",
+        (Locale::Es, NotificationType::WithdrawalAlert) => "Intento de retiro detectado en tu bóveda",
         // French
         (Locale::Fr, NotificationType::ExpiryWarning) => "Votre coffre expire bientôt",
         (Locale::Fr, NotificationType::CheckInReminder) => "Il est temps de vous enregistrer",
         (Locale::Fr, NotificationType::VaultReleased) => "Votre coffre a été libéré",
         (Locale::Fr, NotificationType::VaultPaused) => "Votre coffre a été mis en pause",
+        (Locale::Fr, NotificationType::WithdrawalAlert) => "Tentative de retrait détectée sur votre coffre",
         // German
         (Locale::De, NotificationType::ExpiryWarning) => "Ihr Tresor läuft bald ab",
         (Locale::De, NotificationType::CheckInReminder) => "Zeit für Ihren Check-in",
         (Locale::De, NotificationType::VaultReleased) => "Ihr Tresor wurde freigegeben",
         (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert",
+        (Locale::De, NotificationType::WithdrawalAlert) => "Abhebungsversuch auf Ihrem Tresor erkannt",
     }
 }
 
