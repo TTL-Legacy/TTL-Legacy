@@ -127,6 +127,8 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
+#[cfg(test)]
+mod deposit_released_vault_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -308,6 +310,7 @@ pub enum ContractError {
     UpgradeInvalidWasm = 94,       // Issue #1120: Invalid WASM hash
     TokenNotAllowed = 95,          // Issue #1118: Token not in allowlist
     VaultPaused = 96,              // Issue #790: vault-level pause blocks trigger_release
+    VaultReleased = 97,            // Issue #1282: deposit into an already-released vault
 }
 
 #[contract]
@@ -1713,7 +1716,9 @@ impl TtlVaultContract {
     /// # Panics
     /// * Panics if the contract is paused
     /// * Panics if `amount` is not positive
-    /// * Panics if the vault is not in Locked status
+    /// * Panics if the vault is in `Released` or `Cancelled` status (`ContractError::VaultReleased`)
+    /// * Panics if the vault is in `EmergencyFrozen` status (`ContractError::VaultFrozen`)
+    /// * Panics if the vault is not in `Locked` status
     pub fn deposit(env: Env, vault_id: u64, from: Address, amount: i128) {
         Self::assert_not_paused(&env);
         Self::require_initialized(&env);
@@ -1728,6 +1733,12 @@ impl TtlVaultContract {
         if vault.is_paused {
             panic_with_error!(&env, ContractError::Paused);
         }
+        // Issue #1282: explicitly reject deposits when the vault is emergency-frozen.
+        // Without this check, EmergencyFrozen falls through to the generic
+        // `!= Locked` guard and returns the misleading VaultReleased error.
+        if vault.status == ReleaseStatus::EmergencyFrozen {
+            panic_with_error!(&env, ContractError::VaultFrozen);
+        }
         if Self::check_vault_frozen(&env, vault_id) {
             panic_with_error!(&env, ContractError::VaultFrozen);
         }
@@ -1740,8 +1751,12 @@ impl TtlVaultContract {
         {
             panic_with_error!(&env, ContractError::VaultOwnerLocked);
         }
+        // Issue #1282: reject deposits into vaults that are no longer active.
+        // A Released vault has already distributed funds to beneficiaries; a
+        // Cancelled vault was explicitly terminated. Accepting deposits into
+        // either state would lock funds permanently with no recovery path.
         if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
+            panic_with_error!(&env, ContractError::VaultReleased);
         }
 
         let now = env.ledger().timestamp();
