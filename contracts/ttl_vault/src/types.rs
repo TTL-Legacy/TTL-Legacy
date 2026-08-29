@@ -289,6 +289,31 @@ pub const ARBITRATION_RULED_TOPIC: Symbol = symbol_short!("arb_rul");
 // Issue #497: Beneficiary Notification
 pub const VAULT_NOTIFY_TOPIC: Symbol = symbol_short!("v_notif");
 
+// Issue #1337: beneficiary archival notification opt-in/out
+pub const BENEFICIARY_ARCHIVAL_OPTIN_TOPIC: Symbol = symbol_short!("ben_ao");
+pub const BENEFICIARY_CONTACT_SET_TOPIC: Symbol = symbol_short!("ben_cs");
+
+/// On-chain beneficiary contact record for archival notifications (Issue #1337).
+///
+/// Stores only an opaque, owner-encrypted contact blob — the plaintext is never
+/// readable on-chain.  The vault owner or beneficiary stores a base64-encoded,
+/// symmetrically-encrypted payload (e.g., AES-256-GCM) so that only the
+/// designated off-chain notification service (which holds the decryption key)
+/// can read the contact details.  The `opted_in` flag is stored in cleartext
+/// so the scheduler can honour opt-out requests without decrypting.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryContactInfo {
+    /// Opaque encrypted contact blob (max 512 bytes).
+    /// Plaintext (before encryption) format: `email:<addr>|sms:<phone>`
+    pub encrypted_contact: Bytes,
+    /// Whether this beneficiary has opted in to archival notifications.
+    /// Defaults to `true` on first set.
+    pub opted_in: bool,
+    /// Ledger timestamp when this entry was last updated.
+    pub updated_at: u64,
+}
+
 // Issue #569: Withdrawal Audit Trail
 pub const WITHDRAWAL_AUDIT_TOPIC: Symbol = symbol_short!("wd_audit");
 pub const WITHDRAWAL_FAILED_TOPIC: Symbol = symbol_short!("wd_fail");
@@ -531,6 +556,8 @@ pub enum StorageKey {
     VaultLocked(u64),
     // Issue 3: per-vault configurable low-TTL warning threshold (seconds)
     VaultLowTtlThreshold(u64),
+    // Issue #1337: beneficiary archival notification contact info
+    BeneficiaryContactInfo(u64, Address),
 }
 
 

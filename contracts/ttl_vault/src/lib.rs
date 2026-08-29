@@ -80,6 +80,8 @@ pub use types::{
     TOKEN_ALLOWLIST_ADDED_TOPIC, TOKEN_ALLOWLIST_REMOVED_TOPIC,
     VAULT_LOCK_TOPIC, VAULT_UNLOCK_TOPIC, LOW_TTL_WARNING_TOPIC,
     VESTING_SCHEDULE_ADDED_TOPIC,
+    // Issue #1337: beneficiary archival notification
+    BeneficiaryContactInfo, BENEFICIARY_ARCHIVAL_OPTIN_TOPIC, BENEFICIARY_CONTACT_SET_TOPIC,
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
@@ -100,6 +102,8 @@ mod passkey_last_used_tests;
 mod beneficiary_waitlist_tests;
 #[cfg(test)]
 mod beneficiary_notification_tests;
+#[cfg(test)]
+mod beneficiary_archival_notification_tests;
 #[cfg(test)]
 mod beneficiary_identity_verification_tests;
 #[cfg(test)]
@@ -17482,5 +17486,161 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
         Ok(new_ttls)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1337: Beneficiary archival notification contact & opt-in management
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register or update the beneficiary's encrypted contact information for
+    /// archival (TTL-expiry) notifications.
+    ///
+    /// The beneficiary provides an opaque, encrypted contact blob.  The
+    /// plaintext MUST be encrypted client-side before calling this function so
+    /// that contact details are never exposed on-chain.  The notification
+    /// backend (which holds the corresponding decryption key) can decrypt and
+    /// dispatch email/SMS alerts when the vault expires.
+    ///
+    /// Calling this function implicitly opts the beneficiary **in** to
+    /// notifications.  Use `set_beneficiary_notification_opt_in` to opt out.
+    ///
+    /// # Arguments
+    /// * `env`                  – The Soroban environment
+    /// * `vault_id`             – The vault this contact entry belongs to
+    /// * `caller`               – Must be the vault's beneficiary
+    /// * `encrypted_contact`    – AES-256-GCM (or equivalent) encrypted blob
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound`   – Vault does not exist
+    /// * `ContractError::NotBeneficiary`  – Caller is not the vault beneficiary
+    pub fn set_beneficiary_contact(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        encrypted_contact: Bytes,
+    ) {
+        caller.require_auth();
+        Self::require_initialized(&env);
+
+        let vault = Self::load_vault(&env, vault_id);
+
+        // Only the designated beneficiary may set their own contact info.
+        // For multi-beneficiary vaults, any of the listed beneficiaries may call.
+        let is_beneficiary = if vault.beneficiaries.is_empty() {
+            caller == vault.beneficiary
+        } else {
+            vault.beneficiaries.iter().any(|e| e.address == caller)
+        };
+
+        if !is_beneficiary {
+            panic_with_error!(&env, ContractError::NotBeneficiary);
+        }
+
+        let key = StorageKey::BeneficiaryContactInfo(vault_id, caller.clone());
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+
+        let contact_info = BeneficiaryContactInfo {
+            encrypted_contact: encrypted_contact.clone(),
+            opted_in: true,
+            updated_at: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&key, &contact_info);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.events().publish(
+            (BENEFICIARY_CONTACT_SET_TOPIC,),
+            (vault_id, caller, env.ledger().timestamp()),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Retrieve the encrypted contact info for a vault beneficiary.
+    ///
+    /// Returns `None` if the beneficiary has not registered contact information.
+    ///
+    /// # Arguments
+    /// * `env`                  – The Soroban environment
+    /// * `vault_id`             – The vault ID
+    /// * `beneficiary`          – The beneficiary address to look up
+    pub fn get_beneficiary_contact(
+        env: Env,
+        vault_id: u64,
+        beneficiary: Address,
+    ) -> Option<BeneficiaryContactInfo> {
+        let key = StorageKey::BeneficiaryContactInfo(vault_id, beneficiary);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Set the notification opt-in flag for a vault beneficiary.
+    ///
+    /// Pass `opted_in = false` to stop receiving archival notifications.
+    /// The beneficiary can re-enable notifications at any time by passing
+    /// `opted_in = true` or by calling `set_beneficiary_contact` again.
+    ///
+    /// # Arguments
+    /// * `env`                 – The Soroban environment
+    /// * `vault_id`            – The vault ID
+    /// * `caller`              – Must be the vault's beneficiary
+    /// * `opted_in`            – `true` = opt in, `false` = opt out
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound`  – Vault does not exist
+    /// * `ContractError::NotBeneficiary` – Caller is not a vault beneficiary
+    pub fn set_beneficiary_notification_opt_in(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        opted_in: bool,
+    ) {
+        caller.require_auth();
+        Self::require_initialized(&env);
+
+        let vault = Self::load_vault(&env, vault_id);
+
+        let is_beneficiary = if vault.beneficiaries.is_empty() {
+            caller == vault.beneficiary
+        } else {
+            vault.beneficiaries.iter().any(|e| e.address == caller)
+        };
+
+        if !is_beneficiary {
+            panic_with_error!(&env, ContractError::NotBeneficiary);
+        }
+
+        let key = StorageKey::BeneficiaryContactInfo(vault_id, caller.clone());
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+
+        // Update the opted_in flag in the existing record, or create a
+        // minimal record if none exists yet.
+        let mut contact_info: BeneficiaryContactInfo = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| BeneficiaryContactInfo {
+                encrypted_contact: Bytes::new(&env),
+                opted_in: true,
+                updated_at: env.ledger().timestamp(),
+            });
+
+        contact_info.opted_in = opted_in;
+        contact_info.updated_at = env.ledger().timestamp();
+
+        env.storage().persistent().set(&key, &contact_info);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.events().publish(
+            (BENEFICIARY_ARCHIVAL_OPTIN_TOPIC,),
+            (vault_id, caller, opted_in, env.ledger().timestamp()),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 }

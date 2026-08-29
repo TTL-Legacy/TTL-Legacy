@@ -1594,6 +1594,163 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // ── Issue #1337: Beneficiary archival notification ─────────────────────
+
+    /// Persist (create or update) a beneficiary's contact information.
+    /// The `vault_id` + `beneficiary_address` pair is the primary key.
+    pub fn upsert_beneficiary_contact(
+        &self,
+        contact: &crate::models::BeneficiaryContact,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO beneficiary_contacts
+                (vault_id, beneficiary_address, email, phone, opted_in, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(vault_id, beneficiary_address) DO UPDATE SET
+                email      = excluded.email,
+                phone      = excluded.phone,
+                opted_in   = excluded.opted_in,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                contact.vault_id,
+                contact.beneficiary_address,
+                contact.email,
+                contact.phone,
+                contact.opted_in as i64,
+                contact.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve the contact entry for a specific vault + beneficiary pair.
+    pub fn get_beneficiary_contact(
+        &self,
+        vault_id: &str,
+        beneficiary_address: &str,
+    ) -> Result<Option<crate::models::BeneficiaryContact>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT vault_id, beneficiary_address, email, phone, opted_in, updated_at
+            FROM beneficiary_contacts
+            WHERE vault_id = ?1 AND beneficiary_address = ?2
+            "#,
+        )?;
+
+        let row_res = stmt.query_row(
+            params![vault_id, beneficiary_address],
+            |r| {
+                let updated_at_str: String = r.get(5)?;
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                        5, rusqlite::types::Type::Text, Box::new(e),
+                    ))?;
+                let opted_in_i: i64 = r.get(4)?;
+                Ok(crate::models::BeneficiaryContact {
+                    vault_id: r.get(0)?,
+                    beneficiary_address: r.get(1)?,
+                    email: r.get(2)?,
+                    phone: r.get(3)?,
+                    opted_in: opted_in_i != 0,
+                    updated_at,
+                })
+            },
+        );
+
+        match row_res {
+            Ok(c) => Ok(Some(c)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Retrieve all opted-in beneficiary contacts for a given vault.
+    pub fn get_opted_in_contacts_for_vault(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<crate::models::BeneficiaryContact>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT vault_id, beneficiary_address, email, phone, opted_in, updated_at
+            FROM beneficiary_contacts
+            WHERE vault_id = ?1 AND opted_in = 1
+            "#,
+        )?;
+
+        let iter = stmt.query_map(params![vault_id], |r| {
+            let updated_at_str: String = r.get(5)?;
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                    5, rusqlite::types::Type::Text, Box::new(e),
+                ))?;
+            let opted_in_i: i64 = r.get(4)?;
+            Ok(crate::models::BeneficiaryContact {
+                vault_id: r.get(0)?,
+                beneficiary_address: r.get(1)?,
+                email: r.get(2)?,
+                phone: r.get(3)?,
+                opted_in: opted_in_i != 0,
+                updated_at,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    /// Update only the `opted_in` flag for a beneficiary contact.
+    pub fn set_beneficiary_notification_opt_in(
+        &self,
+        vault_id: &str,
+        beneficiary_address: &str,
+        opted_in: bool,
+    ) -> Result<(), rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.lock().unwrap().execute(
+            r#"
+            UPDATE beneficiary_contacts
+            SET opted_in = ?1, updated_at = ?2
+            WHERE vault_id = ?3 AND beneficiary_address = ?4
+            "#,
+            params![opted_in as i64, now, vault_id, beneficiary_address],
+        )?;
+        Ok(())
+    }
+
+    /// Record a dispatched archival notification for audit purposes.
+    pub fn record_beneficiary_archival_notification(
+        &self,
+        notif: &crate::models::BeneficiaryArchivalNotification,
+    ) -> Result<(), rusqlite::Error> {
+        let status = format!("{:?}", notif.status).to_lowercase();
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT OR REPLACE INTO beneficiary_archival_notifications
+                (id, vault_id, beneficiary_address, channel, dispatched_at, status, error)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                notif.id,
+                notif.vault_id,
+                notif.beneficiary_address,
+                notif.channel,
+                notif.dispatched_at.to_rfc3339(),
+                status,
+                notif.error,
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
