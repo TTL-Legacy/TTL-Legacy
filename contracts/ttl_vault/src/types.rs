@@ -389,6 +389,7 @@ pub enum StorageKey {
     WithdrawalSchedule(u64),
     DisputeStatus(u64),
     ConditionalAcceptance(u64),
+    ConditionalDecline(u64),
     ArchivedVault(u64),
     MaxTtlSeconds,
     TtlDecayRate,
@@ -1005,6 +1006,16 @@ pub struct ConditionalAcceptanceEntry {
 pub struct BeneficiaryConditionalAcceptance {
     pub min_balance_threshold: i128,
     pub accepted_at: u64,
+}
+
+/// Beneficiary conditional decline with threshold - Issue #503
+/// Allows beneficiary to decline vault assignment if balance is below a configurable minimum threshold
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryConditionalDecline {
+    pub max_balance_threshold: i128,
+    pub declined_at: u64,
+    pub reason: String,
 }
 
 /// Beneficiary delegation of claim rights to a trusted proxy address - Issue #944
