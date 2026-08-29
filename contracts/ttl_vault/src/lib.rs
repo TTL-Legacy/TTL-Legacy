@@ -127,6 +127,8 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
+#[cfg(test)]
+mod sep41_token_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -571,10 +573,24 @@ impl TtlVaultContract {
             .unwrap_or(0)
     }
 
-    /// Adds a token to the whitelist, allowing it to be used in vaults.
+    /// Whitelists a SEP-41 compatible token for use in vaults (admin-only).
+    ///
+    /// Once whitelisted, the token can be specified when creating vaults.
+    /// Only admin can modify the whitelist to prevent unauthorized token types.
+    ///
+    /// # SEP-41 Token Support
+    /// This contract supports any SEP-41 token (Stellar asset standard):
+    /// - USDC (circle.com issued on Stellar)
+    /// - EURC (circle.com issued on Stellar)
+    /// - Custom issued tokens on Stellar
+    /// - Wrapped tokens via `register_wrapped_token` for cross-chain compatibility
+    ///
+    /// All tokens must be whitelisted here before use, and must implement
+    /// Soroban's standard token interface for compatibility.
     ///
     /// # Arguments
-    /// * `token_address` - The token contract address to whitelist
+    /// * `env` - The Soroban environment
+    /// * `token_address` - The SEP-41 token contract address to whitelist
     ///
     /// # Panics
     /// * Panics if the caller is not the admin
@@ -590,10 +606,14 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Removes a token from the whitelist.
+    /// Removes a token from the whitelist, preventing new vaults from using it (admin-only).
+    ///
+    /// Existing vaults using this token can continue operating; only new vault creation
+    /// with this token is prevented.
     ///
     /// # Arguments
-    /// * `token_address` - The token contract address to remove
+    /// * `env` - The Soroban environment
+    /// * `token_address` - The token contract address to remove from whitelist
     ///
     /// # Panics
     /// * Panics if the caller is not the admin
@@ -1318,23 +1338,42 @@ impl TtlVaultContract {
 
     // --- vault lifecycle ---
 
-    /// Creates a new time-locked vault.
+    /// Creates a new time-locked vault with support for SEP-41 compatible tokens.
     ///
     /// The vault starts with a zero balance and must be funded via `deposit`
-    /// or `batch_deposit` before it can hold assets.
+    /// or `batch_deposit` before it can hold assets. Supports any whitelisted
+    /// SEP-41 token (e.g., native XLM, USDC, EURC, or other Stellar assets).
+    ///
+    /// # Token Support (SEP-41)
+    /// - If `token_address` is `None`, vault defaults to contract's XLM token
+    /// - If `token_address` is `Some(addr)`, vault uses the specified SEP-41 token
+    /// - All token transfers use Soroban's standard `token::Client` interface
+    /// - Non-whitelisted tokens are rejected at vault creation
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `owner` - The address of the vault owner (must authorize)
     /// * `beneficiary` - The address that will receive funds when the vault expires
     /// * `check_in_interval` - Time interval in seconds between required check-ins
+    /// * `token_address` - Optional SEP-41 token contract address; uses XLM if None
     ///
     /// # Returns
     /// The unique vault ID
     ///
     /// # Panics
     /// * Panics if `check_in_interval` is 0
+    /// * Panics if `check_in_interval` is below minimum (1 hour)
     /// * Panics if `check_in_interval` is outside the configured min/max bounds
+    /// * Panics if `token_address` is provided but not whitelisted
+    /// * Panics if `owner` is the contract admin (prevented for security)
+    /// * Panics if `owner` and `beneficiary` are the same address
+    ///
+    /// # Example (USDC Vault)
+    /// ```ignore
+    /// let usdc_token = Address::from_contract_id(&env, &usdc_contract_id);
+    /// client.whitelist_token(&usdc_token);
+    /// let vault_id = client.create_vault(&owner, &beneficiary, &interval, &Some(usdc_token));
+    /// ```
     pub fn create_vault(
         env: Env,
         owner: Address,
@@ -1695,9 +1734,21 @@ impl TtlVaultContract {
         );
         Ok(())
     }
+    /// Deposits SEP-41 compatible tokens into a vault (owner-only).
     ///
     /// Transfers tokens from the caller to the contract and increases the vault's balance.
-    /// The vault must be in Locked status.
+    /// The vault must be in Locked status and not expired.
+    ///
+    /// # SEP-41 Token Support
+    /// This function accepts any SEP-41 token type configured for the vault:
+    /// - Native XLM (default)
+    /// - USDC (6 decimals on Stellar)
+    /// - EURC (6 decimals on Stellar)
+    /// - Any whitelisted custom token implementing the Soroban token interface
+    ///
+    /// Token type is determined by vault.token_address, set at vault creation time.
+    /// The function uses Soroban's standard `token::Client` interface for all transfers,
+    /// ensuring compatibility with any SEP-41 compliant contract.
     ///
     /// Deposits remain available while a vault is hibernating (see `enter_hibernation`):
     /// hibernation only pauses the check-in TTL countdown, it does not freeze the vault's
@@ -1708,12 +1759,16 @@ impl TtlVaultContract {
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
     /// * `from` - The address depositing funds (must authorize)
-    /// * `amount` - Amount to deposit in stroops (1 XLM = 10,000,000 stroops)
+    /// * `amount` - Amount to deposit (uses token's native decimals)
+    ///   - For XLM: in stroops (1 XLM = 10,000,000 stroops)
+    ///   - For USDC: in microUSDC (1 USDC = 1,000,000 microUSDC)
     ///
     /// # Panics
     /// * Panics if the contract is paused
     /// * Panics if `amount` is not positive
     /// * Panics if the vault is not in Locked status
+    /// * Panics if the vault has expired
+    /// * Panics if the token transfer fails (e.g., insufficient balance)
     pub fn deposit(env: Env, vault_id: u64, from: Address, amount: i128) {
         Self::assert_not_paused(&env);
         Self::require_initialized(&env);
@@ -1872,17 +1927,25 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Owner withdraws from the vault.
+    /// Owner withdraws SEP-41 compatible tokens from the vault (owner-only).
     ///
     /// This function is owner-only and is unaffected by any multi-beneficiary
     /// split configured via `set_beneficiaries`. Beneficiary splits only apply
     /// during `trigger_release` and `partial_release`; `withdraw` always sends
     /// funds directly back to the vault owner regardless of the beneficiaries list.
     ///
+    /// # SEP-41 Token Support
+    /// Withdrawals support all SEP-41 token types that the vault was created with.
+    /// The returned token type matches the vault's token_address, ensuring seamless
+    /// handling of USDC, EURC, or any other whitelisted Stellar asset.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
-    /// * `amount` - Amount to withdraw in stroops (1 XLM = 10,000,000 stroops)
+    /// * `caller` - The owner address (must authorize)
+    /// * `amount` - Amount to withdraw (uses token's native decimals)
+    ///   - For XLM: in stroops (1 XLM = 10,000,000 stroops)
+    ///   - For USDC: in microUSDC (1 USDC = 1,000,000 microUSDC)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
@@ -1893,6 +1956,7 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::InsufficientBalance` - If vault balance is less than amount
+    /// * `ContractError::VaultExpired` - If vault has expired (check-in missed)
     pub fn withdraw(
         env: Env,
         vault_id: u64,
@@ -2602,13 +2666,20 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Triggers the release of funds to beneficiaries after the vault expires.
+    /// Triggers the release of SEP-41 compatible tokens to beneficiaries after vault expiry.
     ///
     /// Anyone can call this function once the vault's TTL has lapsed. If a vesting
     /// schedule is attached, the vault is marked as Released but funds remain locked
     /// until claimed via `claim_vested_installment`. Otherwise, funds are distributed
     /// immediately to the primary beneficiary or split among multiple beneficiaries
     /// based on their BPS allocations.
+    ///
+    /// # SEP-41 Token Support
+    /// Releases support all SEP-41 token types configured for the vault. Token transfers
+    /// use the vault's token_address, ensuring:
+    /// - XLM transfers to beneficiary (default)
+    /// - USDC transfers to beneficiary
+    /// - EURC or any whitelisted token transfers correctly
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -2619,6 +2690,7 @@ impl TtlVaultContract {
     /// * Panics if the vault is not in Locked status
     /// * Panics if the vault has not expired yet
     /// * Panics if the vault balance is zero
+    /// * Panics if the token transfer fails
     pub fn trigger_release(env: Env, vault_id: u64) {
         Self::trigger_release_internal(env, vault_id, ReleaseTrigger::Expiry);
     }
