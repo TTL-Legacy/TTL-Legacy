@@ -4,6 +4,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use soroban_sdk::testutils::Address as _;
 
     fn setup() -> (Env, Address, Address, TtlVaultContractClient<'static>) {
         let env = Env::default();
@@ -14,11 +15,12 @@ mod tests {
         let beneficiary = Address::generate(&env);
 
         let contract_id = env.register_contract(None, TtlVaultContract);
+        let client = TtlVaultContractClient::new(&env, &contract_id);
         let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
 
         // Setup: initialize contract
         let xlm_token = Address::generate(&env);
-        client.initialize(&admin, &xlm_token);
+        client.initialize(&xlm_token, &admin);
 
         (env, owner, beneficiary, client)
     }
@@ -31,10 +33,13 @@ mod tests {
 
         let result = client.try_create_vault(&owner, &owner, &86400, &None);
         assert!(result.is_err(), "create_vault should reject owner as beneficiary");
-        match result.unwrap_err().unwrap() {
-            ContractError::InvalidBeneficiary => {},
-            e => panic!("Expected InvalidBeneficiary, got {:?}", e),
-        }
+        // create_vault panics (via panic_with_error!) rather than returning a
+        // Result, so the client surfaces the raw host error code here instead
+        // of a typed ContractError.
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            soroban_sdk::Error::from_contract_error(ContractError::InvalidBeneficiary as u32)
+        );
     }
 
     /// Test that update_beneficiary rejects owner self-assignment
@@ -113,11 +118,10 @@ mod tests {
 
         let result = client.try_create_vault(&owner, &owner, &86400, &None);
         assert!(result.is_err());
-        match result.unwrap_err().unwrap() {
-            ContractError::InvalidBeneficiary => {
-                // Correct error type used
-            },
-            e => panic!("Unexpected error: {:?}", e),
-        }
+        // Correct error code used (17 = InvalidBeneficiary).
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            soroban_sdk::Error::from_contract_error(ContractError::InvalidBeneficiary as u32)
+        );
     }
 }

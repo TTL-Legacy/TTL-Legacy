@@ -1579,6 +1579,7 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::VaultExpired` - If the vault's TTL has already elapsed
     pub fn check_in(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>, nonce: u64) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
@@ -1617,6 +1618,14 @@ impl TtlVaultContract {
         }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
+        }
+
+        // Issue #1274: reject check-in once the vault has already expired.
+        // Without this, an owner could check in after the TTL has passed to
+        // silently re-arm a vault that should have released to the
+        // beneficiary, defeating the purpose of the expiry.
+        if Self::is_expired(env.clone(), vault_id) {
+            return Err(ContractError::VaultExpired);
         }
 
         // Save original state for rollback on failure - Issue #391
@@ -6016,12 +6025,16 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// The `Vault` struct containing all vault data
+    /// `Ok(Vault)` containing all vault data, or `Err(ContractError::VaultNotFound)`
+    /// if `vault_id` does not correspond to an existing vault.
     ///
-    /// # Panics
-    /// Panics if the vault does not exist (use `vault_exists` to check first)
-    pub fn get_vault(env: Env, vault_id: u64) -> Vault {
-        let vault = Self::load_vault(&env, vault_id);
+    /// # Errors
+    /// * `ContractError::VaultNotFound` - If the vault does not exist
+    pub fn get_vault(env: Env, vault_id: u64) -> Result<Vault, ContractError> {
+        // Issue #1277: return a structured error instead of panicking when the
+        // vault does not exist, so callers can handle a missing vault ID
+        // without crashing the invocation.
+        let vault = Self::try_load_vault(&env, vault_id).ok_or(ContractError::VaultNotFound)?;
         // Extend the vault's persistent TTL only when it has dropped below
         // VAULT_TTL_THRESHOLD ledgers. This avoids a write (and the associated
         // fee) on every read when the TTL is already healthy.
@@ -6029,7 +6042,7 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        vault
+        Ok(vault)
     }
 
     /// Archive a vault that has reached a terminal state (Released or Cancelled).
