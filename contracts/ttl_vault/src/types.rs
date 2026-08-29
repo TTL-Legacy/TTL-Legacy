@@ -447,6 +447,8 @@ pub enum StorageKey {
     BeneficiaryStatusEntry(u64, Address),
     // Issue: beneficiary veto of owner-defined release conditions before expiry
     BeneficiaryReleaseConditionVeto(u64),
+    // Issue #1291: multi-condition release triggers
+    ReleaseConditions(u64),
     // Track whether a vault has already been released once to prevent replayed releases
     ReleaseAttempted(u64),
     // Hibernation: temporary suspension of check-in requirement
