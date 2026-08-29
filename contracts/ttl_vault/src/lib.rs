@@ -1818,6 +1818,12 @@ impl TtlVaultContract {
         if vault.is_paused {
             panic_with_error!(&env, ContractError::Paused);
         }
+        // Issue #1282: explicitly reject deposits when the vault is emergency-frozen.
+        // Without this check, EmergencyFrozen falls through to the generic
+        // `!= Locked` guard and returns the misleading VaultReleased error.
+        if vault.status == ReleaseStatus::EmergencyFrozen {
+            panic_with_error!(&env, ContractError::VaultFrozen);
+        }
         if Self::check_vault_frozen(&env, vault_id) {
             panic_with_error!(&env, ContractError::VaultFrozen);
         }
@@ -1830,8 +1836,12 @@ impl TtlVaultContract {
         {
             panic_with_error!(&env, ContractError::VaultOwnerLocked);
         }
+        // Issue #1282: reject deposits into vaults that are no longer active.
+        // A Released vault has already distributed funds to beneficiaries; a
+        // Cancelled vault was explicitly terminated. Accepting deposits into
+        // either state would lock funds permanently with no recovery path.
         if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
+            panic_with_error!(&env, ContractError::VaultReleased);
         }
 
         let now = env.ledger().timestamp();
