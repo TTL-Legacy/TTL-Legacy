@@ -43,6 +43,8 @@ pub enum AppError {
     TwoFactorRequired,
     #[error("2FA not enabled")]
     TwoFactorNotEnabled,
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
 }
 
 impl IntoResponse for AppError {
@@ -53,6 +55,7 @@ impl IntoResponse for AppError {
             AppError::Db(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             AppError::TwoFactorRequired => (StatusCode::UNAUTHORIZED, "two_factor_required"),
             AppError::TwoFactorNotEnabled => (StatusCode::BAD_REQUEST, "two_factor_not_enabled"),
+            AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
         };
         ApiError::new(status, code, self.to_string()).into_response()
     }

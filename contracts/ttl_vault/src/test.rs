@@ -139,6 +139,46 @@ fn test_vault_exists_for_existing_and_missing_ids() {
 }
 
 #[test]
+fn test_beneficiary_commitment_keeps_identity_private_until_reveal() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
+
+    let proof = beneficiary.to_xdr(&env);
+    let commitment: BytesN<32> = env.crypto().sha256(&proof).into();
+
+    client.commit_beneficiary(&vault_id, &owner, &commitment);
+    assert_eq!(client.get_beneficiary_commitment(&vault_id).unwrap().commitment, commitment);
+
+    let claimed = beneficiary.clone();
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+    client.reveal_beneficiary(&vault_id, &proof, &claimed);
+
+    assert_eq!(client.get_revealed_beneficiary(&vault_id).unwrap(), claimed);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, ReleaseStatus::Released);
+    assert_eq!(vault.balance, 0);
+    assert_eq!(client.get_contract_token(), token_address);
+}
+
+#[test]
+fn test_beneficiary_commitment_rejects_invalid_reveal_proof() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
+
+    let valid_proof = beneficiary.to_xdr(&env);
+    let valid_hash: BytesN<32> = env.crypto().sha256(&valid_proof).into();
+    client.commit_beneficiary(&vault_id, &owner, &valid_hash);
+
+    let wrong_proof = Bytes::from_array(&env, &[9u8; 32]);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+
+    assert!(client
+        .try_reveal_beneficiary(&vault_id, &wrong_proof, &beneficiary)
+        .is_err());
+}
+
+#[test]
 fn test_get_owner_returns_correct_owner() {
     let (_, owner, beneficiary, _, _, client) = setup();
 
@@ -4646,6 +4686,150 @@ fn test_trigger_release_with_threshold_exact_match() {
 
     let token_client = StellarAssetClient::new(&env, &token_address);
     assert_eq!(token_client.balance(&beneficiary), 100_000i128);
+}
+
+// ---- Tests for decline_with_threshold ----
+
+#[test]
+fn test_decline_with_threshold_beneficiary_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Only beneficiary can decline with threshold
+    let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_ok());
+
+    let decline = client.get_beneficiary_conditional_decline(&vault_id);
+    assert!(decline.is_some());
+    assert_eq!(decline.unwrap().max_balance_threshold, 50_000i128);
+}
+
+#[test]
+fn test_decline_with_threshold_owner_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    // Owner should not be able to decline
+    let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decline_with_threshold_invalid_amount() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Zero threshold should fail
+    let result = client.try_decline_with_threshold(&vault_id, &0i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_err());
+
+    // Negative threshold should fail
+    let result = client.try_decline_with_threshold(&vault_id, &-100i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decline_with_threshold_reason_too_long() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Create a reason string that exceeds 256 characters
+    let mut long_reason = String::new(&env);
+    for _ in 0..300 {
+        long_reason.append(&String::from_str(&env, "a"));
+    }
+
+    // Should fail because reason is too long
+    let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &long_reason);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decline_with_threshold_stores_timestamp() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let before = env.ledger().timestamp();
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    let after = env.ledger().timestamp();
+
+    let decline = client.get_beneficiary_conditional_decline(&vault_id);
+    assert!(decline.is_some());
+    let dec = decline.unwrap();
+    assert!(dec.declined_at >= before && dec.declined_at <= after);
+}
+
+#[test]
+fn test_decline_with_threshold_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+
+    let events = env.events().all();
+    let event_found = events.iter().any(|e| {
+        e.topics.get(0).map_or(false, |t| {
+            t.to_val(&env).to_string().contains("ben_dec")
+        })
+    });
+    assert!(event_found, "BENEFICIARY_DECLINED_TOPIC event not found");
+}
+
+#[test]
+fn test_decline_with_threshold_multiple_declines() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // First decline
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    let decline1 = client.get_beneficiary_conditional_decline(&vault_id);
+    assert_eq!(decline1.unwrap().max_balance_threshold, 50_000i128);
+
+    // Second decline should overwrite the first
+    client.decline_with_threshold(&vault_id, &100_000i128, &String::from_str(&env, "Still too low"));
+    let decline2 = client.get_beneficiary_conditional_decline(&vault_id);
+    assert_eq!(decline2.unwrap().max_balance_threshold, 100_000i128);
+}
+
+#[test]
+fn test_trigger_release_with_decline_threshold_below_max() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit 30_000
+    client.deposit(&vault_id, &owner, &30_000i128);
+
+    // Beneficiary declines if balance < 50_000
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+
+    // Advance time to expire vault
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Release should succeed - decline is just a signal, doesn't prevent release
+    // (The release logic respects the owner's wishes, not beneficiary's rejection)
+    client.trigger_release(&vault_id);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, ReleaseStatus::Released);
+
+    let token_client = StellarAssetClient::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 30_000i128);
+}
+
+#[test]
+fn test_decline_with_threshold_with_reason_stored() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let reason = String::from_str(&env, "Vault balance too low for obligations");
+    client.decline_with_threshold(&vault_id, &100_000i128, &reason);
+
+    let decline = client.get_beneficiary_conditional_decline(&vault_id);
+    assert!(decline.is_some());
+    let dec = decline.unwrap();
+    assert_eq!(dec.reason, reason);
+    assert_eq!(dec.max_balance_threshold, 100_000i128);
 }
 
 // ---- Task 4: vault activity logging tests ----

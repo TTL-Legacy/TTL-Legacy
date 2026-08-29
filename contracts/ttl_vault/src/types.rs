@@ -33,6 +33,8 @@ pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
 pub const VESTING_CANCELLED_TOPIC: Symbol = symbol_short!("vest_can");
+pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_ana");
+pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bkp_enc");
 // Issue #534: vesting cliff period reached
 pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("clif_rch");
 pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
@@ -302,6 +304,8 @@ pub const BENEFICIARY_TRIGGER_SET_TOPIC: Symbol = symbol_short!("ben_trg");
 pub const BENEFICIARY_TIER_SET_TOPIC: Symbol = symbol_short!("ben_tier");
 pub const BENEFICIARY_WATERFALL_TOPIC: Symbol = symbol_short!("ben_wfl");
 pub const BENEFICIARY_REBALANCED_TOPIC: Symbol = symbol_short!("ben_reb");
+pub const BEN_COMMITTED_TOPIC: Symbol = symbol_short!("ben_cmt");
+pub const BEN_REVEALED_TOPIC: Symbol = symbol_short!("ben_rev");
 
 // Issue #573: Withdrawal Proof
 pub const WITHDRAWAL_PROOF_TOPIC: Symbol = symbol_short!("wd_prf");
@@ -389,6 +393,7 @@ pub enum StorageKey {
     WithdrawalSchedule(u64),
     DisputeStatus(u64),
     ConditionalAcceptance(u64),
+    ConditionalDecline(u64),
     ArchivedVault(u64),
     MaxTtlSeconds,
     TtlDecayRate,
@@ -447,6 +452,8 @@ pub enum StorageKey {
     BeneficiaryStatusEntry(u64, Address),
     // Issue: beneficiary veto of owner-defined release conditions before expiry
     BeneficiaryReleaseConditionVeto(u64),
+    // Issue #1291: multi-condition release triggers
+    ReleaseConditions(u64),
     // Track whether a vault has already been released once to prevent replayed releases
     ReleaseAttempted(u64),
     // Hibernation: temporary suspension of check-in requirement
@@ -490,6 +497,9 @@ pub enum StorageKey {
     // Issue #529: beneficiary pooling
     BeneficiaryPool(u64),
     BeneficiaryPoolAlloc(u64),
+    // Optional privacy layer: hash commitment to beneficiary identity before release.
+    BeneficiaryCommitment(u64),
+    RevealedBeneficiary(u64),
     // Issue #525: beneficiary vesting schedules
     BeneficiaryVestingSchedule(u64, Address),
     BeneficiaryVestingCount(u64),
@@ -668,6 +678,18 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
     /// Minimum amount in stroops. If calculated share < minimum_threshold, beneficiary gets 0.
     pub minimum_threshold: i128,
+}
+
+/// Privacy-preserving commitment for a vault beneficiary.
+/// The plain beneficiary address remains available in `Vault.beneficiary` for
+/// compatibility and public indexing, while the commitment stores a hash that
+/// keeps the identity hidden until release time. The hash is computed as
+/// `sha256(raw_beneficiary_address_bytes)` and revealed with `reveal_beneficiary`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeneficiaryCommitment {
+    pub commitment: BytesN<32>,
+    pub committed_at: u64,
 }
 
 /// Bridge configuration for cross-chain support.
@@ -858,6 +880,7 @@ pub struct Vault {
     pub check_in_interval: u64, // seconds
     pub last_check_in: u64,     // ledger timestamp
     pub created_at: u64,        // vault creation timestamp
+    pub creation_ledger: u64,   // ledger sequence number at vault creation
     pub status: ReleaseStatus,
     /// Multi-beneficiary split. Empty means use `beneficiary` (100%).
     pub beneficiaries: Vec<BeneficiaryEntry>,
@@ -1005,6 +1028,16 @@ pub struct ConditionalAcceptanceEntry {
 pub struct BeneficiaryConditionalAcceptance {
     pub min_balance_threshold: i128,
     pub accepted_at: u64,
+}
+
+/// Beneficiary conditional decline with threshold - Issue #503
+/// Allows beneficiary to decline vault assignment if balance is below a configurable minimum threshold
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryConditionalDecline {
+    pub max_balance_threshold: i128,
+    pub declined_at: u64,
+    pub reason: String,
 }
 
 /// Beneficiary delegation of claim rights to a trusted proxy address - Issue #944
@@ -1604,142 +1637,6 @@ pub struct VaultSnapshot {
 }
 
 
-// All remaining event topic constants
-pub const BENEFICIARY_CAP_TOPIC: Symbol = symbol_short!("ben_cap");
-pub const BENEFICIARY_CONDITION_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_cond_acc");
-pub const BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC: Symbol = symbol_short!("ben_id_ora");
-pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vrf");
-pub const BENEFICIARY_REBALANCED_TOPIC: Symbol = symbol_short!("ben_reb");
-pub const BENEFICIARY_TIER_SET_TOPIC: Symbol = symbol_short!("ben_tier");
-pub const BENEFICIARY_TRIGGER_SET_TOPIC: Symbol = symbol_short!("ben_trig");
-pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acc");
-pub const BENEFICIARY_DECLINED_TOPIC: Symbol = symbol_short!("ben_dec");
-pub const BENEFICIARY_UPDATED_TOPIC: Symbol = symbol_short!("ben_upd");
-pub const BENEFICIARY_WATERFALL_TOPIC: Symbol = symbol_short!("ben_wtr");
-pub const BEN_ROTATION_TOPIC: Symbol = symbol_short!("ben_rot");
-pub const CHECKIN_GEO_TOPIC: Symbol = symbol_short!("chk_geo");
-pub const CHECKIN_POW_TOPIC: Symbol = symbol_short!("chk_pow");
-pub const CHECKIN_RATE_LIMITED_TOPIC: Symbol = symbol_short!("chk_ratelim");
-pub const BATCH_CHECKIN_TOPIC: Symbol = symbol_short!("batch_chk");
-pub const BATCH_STATUS_TOPIC: Symbol = symbol_short!("batch_st");
-pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vst");
-pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("cliff_rch");
-pub const CONDITIONS_ACCEPTED_TOPIC: Symbol = symbol_short!("cond_acc");
-pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
-pub const DELEGATE_BENEFICIARY_TOPIC: Symbol = symbol_short!("del_ben");
-pub const DELEGATE_CHECKIN_TOPIC: Symbol = symbol_short!("del_chk");
-pub const DISPUTE_FILED_TOPIC: Symbol = symbol_short!("disp_fil");
-pub const DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("disp_res");
-pub const DUPLICATE_VAULT_TOPIC: Symbol = symbol_short!("dup_vlt");
-pub const HIBERNATION_ENTERED_TOPIC: Symbol = symbol_short!("hiber_ent");
-pub const HIBERNATION_EXITED_TOPIC: Symbol = symbol_short!("hiber_exit");
-pub const INACTIVITY_PENALTY_TOPIC: Symbol = symbol_short!("inact_pen");
-pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inhert");
-pub const INTEGRITY_TOPIC: Symbol = symbol_short!("intgr");
-pub const META_REVERT_TOPIC: Symbol = symbol_short!("meta_rev");
-pub const META_VERSION_TOPIC: Symbol = symbol_short!("meta_ver");
-pub const MIN_THRESHOLD_REDISTRIBUTE_TOPIC: Symbol = symbol_short!("min_thres_red");
-pub const MIN_THRESHOLD_SET_TOPIC: Symbol = symbol_short!("min_thres_set");
-pub const MIN_THRESHOLD_SKIP_TOPIC: Symbol = symbol_short!("min_thres_skip");
-pub const OWNERSHIP_ACCEPTED_TOPIC: Symbol = symbol_short!("own_acc");
-pub const OWNERSHIP_CANCELLED_TOPIC: Symbol = symbol_short!("own_canc");
-pub const OWNERSHIP_INITIATED_TOPIC: Symbol = symbol_short!("own_init");
-pub const OWNERSHIP_PROOF_TOPIC: Symbol = symbol_short!("own_proof");
-pub const OWNERSHIP_TRANSFER_EXPIRED_TOPIC: Symbol = symbol_short!("own_exp");
-pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_ana");
-pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_ext");
-pub const PASSKEY_LOCKOUT_TOPIC: Symbol = symbol_short!("pk_lock");
-pub const PASSKEY_RECOVERED_TOPIC: Symbol = symbol_short!("pk_rec");
-pub const PASSKEY_RECOVERY_INITIATED_TOPIC: Symbol = symbol_short!("pk_rec_init");
-pub const PASSKEY_ROTATION_ENFORCED_TOPIC: Symbol = symbol_short!("pk_rot_enf");
-pub const PASSKEY_ROTATION_REQUIRED_TOPIC: Symbol = symbol_short!("pk_rot_req");
-pub const PASSKEY_UNLOCKED_TOPIC: Symbol = symbol_short!("pk_unlock");
-pub const PASSKEY_USAGE_TOPIC: Symbol = symbol_short!("pk_usage");
-pub const PASSKEY_EXPIRED_TOPIC: Symbol = symbol_short!("pk_exp");
-pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
-pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("pause_vlt");
-pub const POOL_CREATED_TOPIC: Symbol = symbol_short!("pool_crt");
-pub const PROOF_OF_LIFE_TOPIC: Symbol = symbol_short!("pol");
-pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
-pub const RELEASE_VOTE_PASSED_TOPIC: Symbol = symbol_short!("rel_vote_pass");
-pub const RELEASE_VOTE_TOPIC: Symbol = symbol_short!("rel_vote");
-pub const REMOVE_PASSKEY_TOPIC: Symbol = symbol_short!("rm_pk");
-pub const RESTORE_VAULT_TOPIC: Symbol = symbol_short!("rest_vlt");
-pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("res_vlt");
-pub const REVERSAL_GRACE_EXPIRED_TOPIC: Symbol = symbol_short!("rev_grace_exp");
-pub const REVOKE_DELEGATE_TOPIC: Symbol = symbol_short!("rev_del");
-pub const ROTATE_PASSKEY_TOPIC: Symbol = symbol_short!("rot_pk");
-pub const SET_BENEFICIARIES_TOPIC: Symbol = symbol_short!("set_ben");
-pub const SET_DECAY_RATE_TOPIC: Symbol = symbol_short!("set_decay");
-pub const SET_MAX_INTERVAL_TOPIC: Symbol = symbol_short!("set_max_int");
-pub const SET_MAX_TTL_TOPIC: Symbol = symbol_short!("set_max_ttl");
-pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
-pub const SET_MIN_INTERVAL_TOPIC: Symbol = symbol_short!("set_min_int");
-pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
-pub const SET_SPENDING_LIMIT_TOPIC: Symbol = symbol_short!("set_spend");
-pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
-pub const STATE_TRANSITION_TOPIC: Symbol = symbol_short!("state_trans");
-pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
-pub const TOKEN_COLLATERAL_TOPIC: Symbol = symbol_short!("tok_col");
-pub const TOKEN_COLLAT_RLSD_TOPIC: Symbol = symbol_short!("tok_col_rls");
-pub const TOKEN_CONVERSION_TOPIC: Symbol = symbol_short!("tok_conv");
-pub const TOKEN_HEDGE_CLOSE_TOPIC: Symbol = symbol_short!("tok_hedge_close");
-pub const TOKEN_HEDGE_TOPIC: Symbol = symbol_short!("tok_hedge");
-pub const TOKEN_LENDING_TOPIC: Symbol = symbol_short!("tok_lend");
-pub const TOKEN_LEND_REPAY_TOPIC: Symbol = symbol_short!("tok_lend_rep");
-pub const TOKEN_REBALANCED_TOPIC: Symbol = symbol_short!("tok_rebal");
-pub const TOKEN_REBALANCE_TOPIC: Symbol = symbol_short!("tok_rebal_cfg");
-pub const TOKEN_STAKING_TOPIC: Symbol = symbol_short!("tok_stake");
-pub const TOKEN_UNSTAKING_TOPIC: Symbol = symbol_short!("tok_unstake");
-pub const TOKEN_WHITELIST_VALIDATED_TOPIC: Symbol = symbol_short!("tok_wl_val");
-pub const TTL_ACCELERATE_TOPIC: Symbol = symbol_short!("ttl_accel");
-pub const TTL_BORROW_TOPIC: Symbol = symbol_short!("ttl_borrow");
-pub const TTL_DECAY_TOPIC: Symbol = symbol_short!("ttl_decay");
-pub const TTL_PREDICTED_TOPIC: Symbol = symbol_short!("ttl_pred");
-pub const TTL_REPAY_TOPIC: Symbol = symbol_short!("ttl_repay");
-pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
-pub const UPDATE_INTERVAL_TOPIC: Symbol = symbol_short!("upd_int");
-pub const UPDATE_METADATA_TOPIC: Symbol = symbol_short!("upd_meta");
-pub const VAULT_ARCHIVED_TOPIC: Symbol = symbol_short!("vlt_arch");
-pub const VAULT_CAP_TOPIC: Symbol = symbol_short!("vlt_cap");
-pub const VAULT_CLONED_OVERRIDE_TOPIC: Symbol = symbol_short!("vlt_clone_ovr");
-pub const VAULT_CLONED_TOPIC: Symbol = symbol_short!("vlt_clone");
-pub const VAULT_MERGED_TOPIC: Symbol = symbol_short!("vlt_mrg");
-pub const VESTING_BONUS_CLAIMED_TOPIC: Symbol = symbol_short!("vest_bon_clm");
-pub const VESTING_BONUS_SET_TOPIC: Symbol = symbol_short!("vest_bon_set");
-pub const VESTING_CANCELLED_TOPIC: Symbol = symbol_short!("vest_canc");
-pub const VESTING_CATCHUP_CLAIMED_TOPIC: Symbol = symbol_short!("vest_catch_clm");
-pub const VESTING_CATCHUP_SET_TOPIC: Symbol = symbol_short!("vest_catch_set");
-pub const WHITELIST_ADDED_TOPIC: Symbol = symbol_short!("wl_add");
-pub const WHITELIST_REMOVED_TOPIC: Symbol = symbol_short!("wl_rem");
-pub const WHITELIST_VIOLATION_TOPIC: Symbol = symbol_short!("wl_vio");
-pub const WITHDRAWAL_APPROVAL_DENIED_TOPIC: Symbol = symbol_short!("wd_app_den");
-pub const WITHDRAWAL_APPROVAL_GRANTED_TOPIC: Symbol = symbol_short!("wd_app_grn");
-pub const WITHDRAWAL_APPROVAL_REQUESTED_TOPIC: Symbol = symbol_short!("wd_app_req");
-pub const WITHDRAWAL_AUDIT_TOPIC: Symbol = symbol_short!("wd_audit");
-pub const WITHDRAWAL_DISPUTE_FILED_TOPIC: Symbol = symbol_short!("wd_disp_fil");
-pub const WITHDRAWAL_DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("wd_disp_res");
-pub const WITHDRAWAL_EXECUTED_TOPIC: Symbol = symbol_short!("wd_exec");
-pub const WITHDRAWAL_FAILED_TOPIC: Symbol = symbol_short!("wd_fail");
-pub const WITHDRAWAL_LIMIT_EXCEEDED_TOPIC: Symbol = symbol_short!("wd_lim_exc");
-pub const WITHDRAWAL_LIMIT_SET_TOPIC: Symbol = symbol_short!("wd_lim_set");
-pub const WITHDRAWAL_NOTIF_TOPIC: Symbol = symbol_short!("wd_notif");
-pub const WITHDRAWAL_REVERSED_TOPIC: Symbol = symbol_short!("wd_rev");
-pub const WITHDRAWAL_SCHEDULED_TOPIC: Symbol = symbol_short!("wd_sched");
-pub const WITHDRAWAL_VALIDATION_TOPIC: Symbol = symbol_short!("wd_valid");
-pub const WRAPPED_TOKEN_REGISTERED_TOPIC: Symbol = symbol_short!("wrap_reg");
-pub const WRAPPED_TOKEN_UNREGISTERED_TOPIC: Symbol = symbol_short!("wrap_unreg");
-pub const YIELD_DISTRIBUTED_TOPIC: Symbol = symbol_short!("yield_dist");
-pub const YIELD_REINVESTED_TOPIC: Symbol = symbol_short!("yield_rein");
-pub const FREEZE_VAULT_TOPIC: Symbol = symbol_short!("freeze_vlt");
-pub const UNFREEZE_VAULT_TOPIC: Symbol = symbol_short!("unfreeze_vlt");
-pub const ADMIN_TRANSFER_PROPOSED_TOPIC: Symbol = symbol_short!("admin_prop");
-pub const ADMIN_TRANSFER_COMPLETED_TOPIC: Symbol = symbol_short!("admin_comp");
-pub const BACKUP_CODES_GENERATED_TOPIC: Symbol = symbol_short!("bkp_gen");
-pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bkp_enc");
-pub const BACKUP_CODE_USED_TOPIC: Symbol = symbol_short!("bkp_used");
-pub const ACCEPTANCE_DEADLINE_EXPIRED_TOPIC: Symbol = symbol_short!("acc_exp");
-pub const ADD_PASSKEY_TOPIC: Symbol = symbol_short!("add_pk");
 
 // ============================================================
 // Issue #951: Graduated Release Schedule
