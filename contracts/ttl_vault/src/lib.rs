@@ -23,8 +23,8 @@ pub use types::{
     TokenCollateral, TokenConversion, TokenHedge, TokenLending, TokenRebalanceConfig, TokenStaking,
     TokenWeight, TtlBorrowRecord, UpgradeProposal, VaultStatusSummary, VestingBonusConfig,
     VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
-    WhitelistEntry, WithdrawalLimit, WithdrawalReversal, WithdrawalScheduleEntry,
-    WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
+    WhitelistEntry, WithdrawalAuditEntry, WithdrawalDispute, WithdrawalLimit, WithdrawalReversal,
+    WithdrawalScheduleEntry, WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
     BeneficiaryConditionalAcceptance, BeneficiaryConditionalDecline,
     ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
     ADMIN_TRANSFER_COMPLETED_TOPIC,
@@ -138,6 +138,10 @@ mod storage_key_collision_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
 mod checkin_nonexistent_vault_tests;
+
+// Issue #1294: withdrawal dispute window
+#[cfg(test)]
+mod withdrawal_dispute_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -330,6 +334,9 @@ pub enum ContractError {
     CommitmentNotFound = 98,
     BeneficiaryAlreadyRevealed = 99,
     InvalidZkProof = 100,
+    // Issue #1294: withdrawal dispute window
+    WithdrawalDisputeWindowExpired = 101,
+    WithdrawalDisputeNotFound = 102,
 }
 
 #[contract]
@@ -16744,13 +16751,36 @@ impl TtlVaultContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    // --- Issue #572: Withdrawal Dispute ---
+    // --- Issue #572 / #1294: Withdrawal Dispute ---
 
-    /// Files a dispute for a withdrawal within the grace period (24 hours).
-    pub fn file_withdrawal_dispute(
+    /// Disputes an unauthorized withdrawal identified by its index in the
+    /// vault's audit log. The dispute must be filed within 24 hours of the
+    /// withdrawal timestamp recorded in the audit entry.
+    ///
+    /// Only the vault owner may file a dispute. If the 24-hour window has
+    /// elapsed the call returns `WithdrawalDisputeWindowExpired`.
+    ///
+    /// # Arguments
+    /// * `env` - Soroban environment
+    /// * `vault_id` - Target vault
+    /// * `caller` - Must be the vault owner (requires auth)
+    /// * `audit_log_index` - Index into `get_withdrawal_audit_log` for the
+    ///   withdrawal being disputed
+    /// * `reason` - Human-readable reason for the dispute
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - Caller is not the vault owner
+    /// * `ContractError::WithdrawalDisputeNotFound` - No audit entry at
+    ///   `audit_log_index`, or the entry is not a successful withdrawal
+    /// * `ContractError::WithdrawalDisputeWindowExpired` - More than 24 hours
+    ///   have elapsed since the withdrawal
+    /// * `ContractError::DisputeFiled` - A dispute for this audit entry is
+    ///   already open
+    pub fn dispute_withdrawal(
         env: Env,
         vault_id: u64,
         caller: Address,
+        audit_log_index: u32,
         reason: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
@@ -16760,32 +16790,70 @@ impl TtlVaultContract {
             return Err(ContractError::NotOwner);
         }
 
-        let timestamp = env.ledger().timestamp();
-        let grace_period = SECONDS_PER_DAY; // 24 hours
-        let dispute_expires_at = timestamp + grace_period;
+        // Fetch the audit log and look up the referenced entry.
+        let audit_key = StorageKey::WithdrawalAuditLog(vault_id);
+        let audit_log: Vec<WithdrawalAuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&audit_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if audit_log_index >= audit_log.len() {
+            return Err(ContractError::WithdrawalDisputeNotFound);
+        }
+
+        let entry = audit_log.get(audit_log_index).unwrap();
+
+        // Only successful withdrawals can be disputed (failed ones never
+        // moved funds out of the vault, so there is nothing to contest).
+        if !entry.success {
+            return Err(ContractError::WithdrawalDisputeNotFound);
+        }
+
+        // Enforce the 24-hour dispute window relative to the withdrawal.
+        let now = env.ledger().timestamp();
+        if now > entry.timestamp + SECONDS_PER_DAY {
+            return Err(ContractError::WithdrawalDisputeWindowExpired);
+        }
+
+        // Prevent duplicate open disputes for the same audit entry.
+        let dispute_key = StorageKey::WithdrawalDisputes(vault_id);
+        let mut disputes: Vec<WithdrawalDispute> = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for i in 0..disputes.len() {
+            let d = disputes.get(i).unwrap();
+            if d.withdrawal_timestamp == entry.timestamp
+                && d.status == DisputeStatus::Filed
+            {
+                return Err(ContractError::DisputeFiled);
+            }
+        }
+
+        // The dispute window itself matches the withdrawal window: filing
+        // happens now, expires 24 h after the *withdrawal* (not the filing).
+        let dispute_expires_at = entry.timestamp + SECONDS_PER_DAY;
 
         let dispute = WithdrawalDispute {
             vault_id,
-            withdrawal_timestamp: timestamp,
-            dispute_filed_at: timestamp,
+            withdrawal_timestamp: entry.timestamp,
+            dispute_filed_at: now,
             dispute_expires_at,
             status: DisputeStatus::Filed,
             reason: reason.clone(),
             resolved_at: None,
         };
 
-        let key = StorageKey::WithdrawalDisputes(vault_id);
-        let mut disputes: Vec<WithdrawalDispute> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&env));
-
         disputes.push_back(dispute);
 
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().set(&key, &disputes);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().persistent().set(&dispute_key, &disputes);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, VAULT_TTL_THRESHOLD, ttl);
 
         env.storage()
             .instance()
@@ -16793,62 +16861,105 @@ impl TtlVaultContract {
 
         env.events().publish(
             (WITHDRAWAL_DISPUTE_FILED_TOPIC, vault_id),
-            (&caller, timestamp, reason),
+            (&caller, entry.timestamp, reason),
         );
 
         Ok(())
     }
 
-    /// Resolves a withdrawal dispute.
+    /// Resolves a withdrawal dispute. Admin-only.
+    ///
+    /// Marks the dispute at `dispute_index` in the vault's dispute list as
+    /// resolved. When `approved` is `true` the dispute is upheld
+    /// (`DisputeStatus::Resolved`); when `false` it is dismissed
+    /// (`DisputeStatus::None`).
+    ///
+    /// # Arguments
+    /// * `env` - Soroban environment
+    /// * `vault_id` - Target vault
+    /// * `dispute_index` - Index into `get_withdrawal_disputes`
+    /// * `approved` - `true` = dispute upheld, `false` = dispute dismissed
+    ///
+    /// # Errors
+    /// * `ContractError::NotAdmin` - Caller is not the contract admin
+    /// * `ContractError::WithdrawalDisputeNotFound` - `dispute_index` is
+    ///   out of range
+    /// * `ContractError::DisputeFiled` - Dispute is not in `Filed` state
     pub fn resolve_withdrawal_dispute(
         env: Env,
         vault_id: u64,
-        caller: Address,
         dispute_index: u32,
         approved: bool,
     ) -> Result<(), ContractError> {
-        caller.require_auth();
-        let vault = Self::load_vault(&env, vault_id);
+        // Resolution is an admin-only action: owners must not be able to
+        // resolve their own disputes.
+        Self::require_admin(&env);
 
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
+        let vault = Self::load_vault(&env, vault_id);
 
         let key = StorageKey::WithdrawalDisputes(vault_id);
         let mut disputes: Vec<WithdrawalDispute> = env
             .storage()
             .persistent()
             .get(&key)
-            .ok_or(ContractError::DisputeFiled)?;
+            .ok_or(ContractError::WithdrawalDisputeNotFound)?;
 
         if dispute_index >= disputes.len() {
-            return Err(ContractError::DisputeFiled);
+            return Err(ContractError::WithdrawalDisputeNotFound);
         }
 
         let mut dispute = disputes.get(dispute_index).unwrap();
+
+        if dispute.status != DisputeStatus::Filed {
+            return Err(ContractError::DisputeFiled);
+        }
+
+        let now = env.ledger().timestamp();
         dispute.status = if approved {
             DisputeStatus::Resolved
         } else {
+            // Dismissed disputes revert to None so they no longer block
+            // duplicate-check logic in dispute_withdrawal.
             DisputeStatus::None
         };
-        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_at = Some(now);
 
         disputes.set(dispute_index, dispute.clone());
 
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, &disputes);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
 
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
+        let admin = Self::load_admin(&env);
         env.events().publish(
             (WITHDRAWAL_DISPUTE_RESOLVED_TOPIC, vault_id),
-            (&caller, dispute_index, approved),
+            (&admin, dispute_index, approved),
         );
 
         Ok(())
+    }
+
+    /// Legacy helper retained for backwards compatibility. New callers should
+    /// use `dispute_withdrawal` which links the dispute to a specific audit
+    /// log entry and enforces the 24-hour window automatically.
+    ///
+    /// Files a dispute against the most-recent successful withdrawal for the
+    /// vault, identified by `audit_log_index`. Delegates to
+    /// `dispute_withdrawal`.
+    pub fn file_withdrawal_dispute(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        audit_log_index: u32,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::dispute_withdrawal(env, vault_id, caller, audit_log_index, reason)
     }
 
     /// Retrieves all withdrawal disputes for a vault.
