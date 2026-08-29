@@ -13,6 +13,7 @@ use tower_http::cors::CorsLayer;
 
 mod auth;
 mod consensus;
+mod csrf;
 mod db;
 mod error;
 mod security_headers;
