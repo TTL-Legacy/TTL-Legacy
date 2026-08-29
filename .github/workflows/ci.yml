@@ -91,13 +91,9 @@ jobs:
 
       - name: Validate OpenAPI specification
         run: |
-          if command -v spectacle &> /dev/null; then
-            spectacle docs/openapi.yaml
-          fi
-          python3 -m pip install openapi-spec-validator 2>/dev/null || true
-          if command -v openapi-spec-validator &> /dev/null; then
-            openapi-spec-validator docs/openapi.yaml
-          fi
+          python3 -m pip install openapi-spec-validator --quiet
+          python3 -m openapi_spec_validator docs/openapi.yaml
+          echo "✅ OpenAPI spec validation passed"
 
       - name: Check version consistency
         run: |

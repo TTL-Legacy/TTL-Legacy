@@ -2,6 +2,67 @@
 
 We welcome contributions! Please follow these guidelines to help us maintain project quality.
 
+## Getting Started
+
+### Prerequisites
+
+| Tool | Version | Notes |
+|---|---|---|
+| Rust | 1.70+ | Install via [rustup](https://rustup.rs) |
+| Node.js | 18+ | Required for frontend dev tooling |
+| Docker | 24+ | Required for local dev stack |
+| Stellar CLI | latest | `cargo install stellar-cli --locked` |
+| Soroban CLI | latest | Bundled with Stellar CLI |
+| `just` | any | Optional but recommended — `cargo install just` |
+
+### Local Dev Setup (Step by Step)
+
+1. **Copy the environment file:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Start the local dev stack:**
+   ```bash
+   docker-compose up -d
+   ```
+   This starts PostgreSQL (port 5432), the backend (port 3000), and Stellar Quickstart (port 8000).
+   Wait for health checks to pass before proceeding.
+
+3. **Verify the backend is healthy:**
+   ```bash
+   curl http://localhost:3000/health
+   ```
+   You should receive a `200 OK` response.
+
+4. **Build the Soroban contracts:**
+   ```bash
+   just build
+   # or without just:
+   ./scripts/build.sh
+   ```
+
+5. **Deploy to the local Stellar Quickstart node:**
+   ```bash
+   just deploy-testnet
+   ```
+   This deploys to the local node at `localhost:8000` as configured in `docker-compose.override.yml`.
+
+6. **Start the frontend dev server:**
+   ```bash
+   cd frontend && npm run dev
+   ```
+   The frontend dev server runs at `http://localhost:5173`.
+
+### Running the Backend Against the Local Node
+
+In your `.env`, set:
+```env
+STELLAR_RPC_URL=http://localhost:8000
+```
+
+This points the backend at your local Stellar Quickstart instance instead of testnet.
+
 ## Development Workflow
 1. **Fork the repo** and create your branch: git checkout -b feature/your-feature-name.
 2. **Formatting:** We use rustfmt. Please run the following command before committing:
@@ -205,6 +266,52 @@ git commit -m "Update fuzz corpus after extended fuzzing run"
 4. **Maintain corpus** - Keep seed inputs diverse and minimal
 
 For more details, see [contracts/ttl_vault/fuzz/README.md](contracts/ttl_vault/fuzz/README.md).
+
+## Conventional Commits
+
+TTL-Legacy enforces the [Conventional Commits](https://www.conventionalcommits.org/) specification.
+All **PR titles** and **squash-merge commit messages** must follow this format:
+
+```
+<type>(<optional scope>): <short description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Allowed Types
+
+| Type       | When to use                                          |
+|------------|------------------------------------------------------|
+| `feat`     | A new feature                                        |
+| `fix`      | A bug fix                                            |
+| `docs`     | Documentation-only changes                           |
+| `refactor` | Code change that is neither a fix nor a feature      |
+| `perf`     | Performance improvement                              |
+| `test`     | Adding or updating tests                             |
+| `build`    | Changes to the build system or external dependencies |
+| `ci`       | CI/CD configuration changes                          |
+| `chore`    | Other changes that do not modify src or test files   |
+| `revert`   | Reverts a previous commit                            |
+| `security` | Security fix or hardening                            |
+
+### Examples
+
+```
+feat(vault): add batch check-in endpoint
+fix(check-in): return VaultNotFound instead of raw panic string
+docs(contributing): add conventional commit guide
+security(auth): enforce passkey nonce replay protection
+ci(release): add git-cliff changelog automation
+refactor(backend): extract sanitization middleware
+```
+
+### Why?
+
+Commit messages are parsed by [git-cliff](https://git-cliff.org/) to auto-generate
+`CHANGELOG.md` on every release.  A CI job (`commitlint.yml`) validates PR titles
+against these rules on every pull request.
 
 ## Style Guide
 - Follow standard Rust idiomatic practices.

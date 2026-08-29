@@ -447,6 +447,8 @@ pub enum StorageKey {
     BeneficiaryStatusEntry(u64, Address),
     // Issue: beneficiary veto of owner-defined release conditions before expiry
     BeneficiaryReleaseConditionVeto(u64),
+    // Issue #1291: multi-condition release triggers
+    ReleaseConditions(u64),
     // Track whether a vault has already been released once to prevent replayed releases
     ReleaseAttempted(u64),
     // Hibernation: temporary suspension of check-in requirement
@@ -858,6 +860,7 @@ pub struct Vault {
     pub check_in_interval: u64, // seconds
     pub last_check_in: u64,     // ledger timestamp
     pub created_at: u64,        // vault creation timestamp
+    pub creation_ledger: u64,   // ledger sequence number at vault creation
     pub status: ReleaseStatus,
     /// Multi-beneficiary split. Empty means use `beneficiary` (100%).
     pub beneficiaries: Vec<BeneficiaryEntry>,

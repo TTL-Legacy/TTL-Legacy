@@ -1,0 +1,33 @@
+name: Lint PR Title (Conventional Commits)
+
+# Runs on every pull request targeting main to enforce conventional commit
+# format on the PR title.  PR titles become the squash-merge commit message,
+# so they must follow the conventional commit spec that git-cliff reads.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  commitlint:
+    name: Check PR Title
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install commitlint CLI and conventional-commits config
+        run: |
+          npm install --save-dev \
+            @commitlint/cli@19 \
+            @commitlint/config-conventional@19
+
+      - name: Lint PR title
+        run: |
+          echo "${{ github.event.pull_request.title }}" | npx commitlint

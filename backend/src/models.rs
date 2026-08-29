@@ -158,6 +158,16 @@ pub struct UnsubscribeToken {
     pub created_at: DateTime<Utc>,
 }
 
+// ── Token-based reminder links (#1286) ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderToken {
+    pub token: String,
+    pub vault_id: String,
+    pub owner: String,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Channel fallback delivery log (#827) ────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -819,6 +829,78 @@ pub struct VestingBonusResponse {
     pub configured: bool,
     pub bonus_bps: Option<u32>,
     pub on_time_window_seconds: Option<u64>,
+}
+
+// ── Persistent audit log (SQLite-backed, written by audit::audit_middleware) ─
+// Issue #1173: these types are referenced throughout db.rs/audit.rs but were
+// never actually defined anywhere in the crate.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub timestamp: DateTime<Utc>,
+    pub user_id: String,
+    pub action: String,
+    pub resource: String,
+    pub result: String,
+    pub ip_address: String,
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AuditLogQuery {
+    pub user_id: Option<String>,
+    pub action: Option<String>,
+    pub resource: Option<String>,
+    pub result: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response body for GET /api/vaults/{id}/release-history — Issue #1173.
+#[derive(Debug, Serialize)]
+pub struct VaultReleaseHistory {
+    pub vault_id: String,
+    /// Every audit-logged API request against this vault's release-related
+    /// endpoints (e.g. /simulate-release, /sponsored-release), oldest last.
+    pub audit_entries: Vec<AuditLogEntry>,
+    /// Sponsored-release attempts/completions recorded for this vault.
+    pub sponsored_releases: Vec<crate::fee_sponsorship::SponsoredRelease>,
+}
+
+// ── Auth: refresh token rotation (Issue #1177) ───────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshClaims {
+    pub sub: String,
+    /// Unique ID for this refresh token — the primary key in `refresh_tokens`.
+    pub jti: String,
+    /// Shared by every token descended from the same original login; used to
+    /// revoke an entire family if a rotated-out token is presented again.
+    pub family_id: String,
+    pub exp: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub sub: String,
+    #[serde(default)]
+    pub vault_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenPairResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    /// Access token lifetime in seconds, for client-side proactive refresh.
+    pub expires_in: i64,
 }
 
 

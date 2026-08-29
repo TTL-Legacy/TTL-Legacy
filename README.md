@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg)](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/OxDev-max/TTL-Legacy/branch/main/graph/badge.svg)](https://codecov.io/gh/OxDev-max/TTL-Legacy)
+[![OpenAPI Valid](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg?label=OpenAPI)](docs/openapi.yaml)
 
 A decentralized "Dead Man's Switch" built on Stellar/Soroban smart contracts.
 
@@ -277,6 +278,8 @@ We welcome contributions! Please:
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+For a full local dev setup walkthrough and troubleshooting FAQ, see the [Contributing Guide](CONTRIBUTING.md).
 
 See our [Code of Conduct](CODE_OF_CONDUCT.md) and [Contributing Guidelines](CONTRIBUTING.md).
 

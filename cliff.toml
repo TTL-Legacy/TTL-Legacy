@@ -1,0 +1,64 @@
+# git-cliff configuration for TTL-Legacy
+# https://git-cliff.org/docs/configuration
+#
+# Used by the release CI workflow to auto-generate CHANGELOG.md from
+# conventional commits.  Run locally with:
+#   git-cliff --latest -o CHANGELOG.md
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}\
+  {{ commit.message | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/OxDev-max/TTL-Legacy/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+# Parse conventional commits (https://www.conventionalcommits.org/)
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+
+# Only include commits that match these types in the changelog
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Features" },
+  { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+  { message = "^refactor", group = "<!-- 2 -->Refactor" },
+  { message = "^security|^sec", group = "<!-- 3 -->Security" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^perf", group = "<!-- 5 -->Performance" },
+  { message = "^test", group = "<!-- 6 -->Testing" },
+  { message = "^ci", group = "<!-- 7 -->CI/CD" },
+  { message = "^chore\\(release\\):", skip = true },
+  { message = "^chore|^build", skip = true },
+  { message = "^style", skip = true },
+  { body = ".*security", group = "<!-- 3 -->Security" },
+]
+
+# Protect breaking changes
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "v[0-9].*"
+skip_tags = "v0\\.1\\..*"
+ignore_tags = ""
+topo_order = false
+sort_commits = "oldest"
