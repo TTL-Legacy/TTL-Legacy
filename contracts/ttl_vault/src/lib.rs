@@ -14391,7 +14391,9 @@ impl TtlVaultContract {
     /// # Errors
     /// * `ContractError::NotOwner`          - Caller is not the vault owner
     /// * `ContractError::AlreadyReleased`   - Vault is not Locked
-    /// * `ContractError::AlreadyHibernating`- Vault is already hibernating
+    /// * `ContractError::AlreadyHibernating`- Vault has an *active* hibernation
+    ///   window (a stale entry left over from a hibernation period that has
+    ///   already elapsed does not block re-entry)
     /// * `ContractError::InvalidInterval`   - `duration_seconds` is zero
     pub fn enter_hibernation(
         env: Env,
@@ -14410,11 +14412,22 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
-        let hib_key = StorageKey::Hibernation(vault_id);
-        if env.storage().persistent().has(&hib_key) {
-            return Err(ContractError::AlreadyHibernating);
-        }
         let now = env.ledger().timestamp();
+        let hib_key = StorageKey::Hibernation(vault_id);
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&hib_key)
+        {
+            // Only block re-entry while the existing hibernation window is
+            // still active. A stale entry (the owner let it run out without
+            // calling `exit_hibernation`) must not permanently lock the
+            // vault out of hibernating again.
+            let elapsed = now.saturating_sub(existing.started_at);
+            if elapsed < existing.duration_seconds {
+                return Err(ContractError::AlreadyHibernating);
+            }
+        }
         let entry = HibernationEntry {
             started_at: now,
             duration_seconds,
