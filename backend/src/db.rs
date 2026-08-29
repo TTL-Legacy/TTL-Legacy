@@ -711,6 +711,19 @@ impl Db {
                 );
                 "#,
             ),
+            (
+                "6",
+                r#"
+                CREATE TABLE IF NOT EXISTS withdrawal_alert_preferences (
+                    vault_id      INTEGER PRIMARY KEY,
+                    owner         TEXT    NOT NULL,
+                    email_enabled INTEGER NOT NULL DEFAULT 0,
+                    push_enabled  INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_withdrawal_alert_prefs_owner
+                    ON withdrawal_alert_preferences(owner);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -884,6 +897,68 @@ impl Db {
     pub fn delete_subscription(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
         self.conn.lock().unwrap().execute(
             "DELETE FROM vault_subscriptions WHERE vault_id = ?1",
+            params![vault_id as i64],
+        )?;
+        Ok(())
+    }
+
+    // ── Withdrawal alert preferences ─────────────────────────────────────────
+
+    /// Upsert per-vault withdrawal alert notification preferences.
+    pub fn upsert_withdrawal_alert_prefs(
+        &self,
+        prefs: &crate::models::WithdrawalAlertPreferences,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO withdrawal_alert_preferences (vault_id, owner, email_enabled, push_enabled)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(vault_id) DO UPDATE SET
+                owner         = excluded.owner,
+                email_enabled = excluded.email_enabled,
+                push_enabled  = excluded.push_enabled
+            "#,
+            params![
+                prefs.vault_id as i64,
+                prefs.owner,
+                prefs.email_enabled as i64,
+                prefs.push_enabled as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve withdrawal alert preferences for a vault.
+    /// Returns `None` if no record exists (owner has never configured prefs).
+    pub fn get_withdrawal_alert_prefs(
+        &self,
+        vault_id: u64,
+    ) -> Result<Option<crate::models::WithdrawalAlertPreferences>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT vault_id, owner, email_enabled, push_enabled
+               FROM withdrawal_alert_preferences
+               WHERE vault_id = ?1"#,
+        )?;
+        let row = stmt.query_row(params![vault_id as i64], |r| {
+            Ok(crate::models::WithdrawalAlertPreferences {
+                vault_id: r.get::<_, i64>(0)? as u64,
+                owner: r.get(1)?,
+                email_enabled: r.get::<_, i64>(2)? != 0,
+                push_enabled: r.get::<_, i64>(3)? != 0,
+            })
+        });
+        match row {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete withdrawal alert preferences for a vault.
+    pub fn delete_withdrawal_alert_prefs(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM withdrawal_alert_preferences WHERE vault_id = ?1",
             params![vault_id as i64],
         )?;
         Ok(())

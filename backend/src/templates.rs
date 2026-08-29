@@ -74,21 +74,25 @@ pub fn email_subject(notification_type: &NotificationType, locale: &Option<Local
         (Locale::En, NotificationType::CheckInReminder) => "Time to check in to your vault",
         (Locale::En, NotificationType::VaultReleased) => "Your vault has been released",
         (Locale::En, NotificationType::VaultPaused) => "Your vault has been paused",
+        (Locale::En, NotificationType::WithdrawalAlert) => "Withdrawal attempt detected on your vault",
         // Spanish
         (Locale::Es, NotificationType::ExpiryWarning) => "Tu bóveda está por vencer",
         (Locale::Es, NotificationType::CheckInReminder) => "Es hora de registrarte en tu bóveda",
         (Locale::Es, NotificationType::VaultReleased) => "Tu bóveda ha sido liberada",
         (Locale::Es, NotificationType::VaultPaused) => "Tu bóveda ha sido pausada",
+        (Locale::Es, NotificationType::WithdrawalAlert) => "Intento de retiro detectado en tu bóveda",
         // French
         (Locale::Fr, NotificationType::ExpiryWarning) => "Votre coffre expire bientôt",
         (Locale::Fr, NotificationType::CheckInReminder) => "Il est temps de vous enregistrer",
         (Locale::Fr, NotificationType::VaultReleased) => "Votre coffre a été libéré",
         (Locale::Fr, NotificationType::VaultPaused) => "Votre coffre a été mis en pause",
+        (Locale::Fr, NotificationType::WithdrawalAlert) => "Tentative de retrait détectée sur votre coffre",
         // German
         (Locale::De, NotificationType::ExpiryWarning) => "Ihr Tresor läuft bald ab",
         (Locale::De, NotificationType::CheckInReminder) => "Zeit für Ihren Check-in",
         (Locale::De, NotificationType::VaultReleased) => "Ihr Tresor wurde freigegeben",
         (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert",
+        (Locale::De, NotificationType::WithdrawalAlert) => "Abhebungsversuch auf Ihrem Tresor erkannt",
     }
 }
 
@@ -110,6 +114,11 @@ pub fn email_body(
             format!("Vault {vault_id} has been released to the designated beneficiary."),
         (Locale::En, NotificationType::VaultPaused) =>
             format!("Vault {vault_id} has been paused."),
+        (Locale::En, NotificationType::WithdrawalAlert) =>
+            format!(
+                "A withdrawal attempt was detected on your vault {vault_id}. \
+                If you did not authorise this, please review your vault immediately."
+            ),
         // Spanish
         (Locale::Es, NotificationType::ExpiryWarning) => {
             let h = hours_remaining.unwrap_or(24);
@@ -121,6 +130,11 @@ pub fn email_body(
             format!("La bóveda {vault_id} ha sido liberada al beneficiario designado."),
         (Locale::Es, NotificationType::VaultPaused) =>
             format!("La bóveda {vault_id} ha sido pausada."),
+        (Locale::Es, NotificationType::WithdrawalAlert) =>
+            format!(
+                "Se detectó un intento de retiro en tu bóveda {vault_id}. \
+                Si no autorizaste esta acción, revisa tu bóveda de inmediato."
+            ),
         // French
         (Locale::Fr, NotificationType::ExpiryWarning) => {
             let h = hours_remaining.unwrap_or(24);
@@ -132,6 +146,11 @@ pub fn email_body(
             format!("Le coffre {vault_id} a été libéré au bénéficiaire désigné."),
         (Locale::Fr, NotificationType::VaultPaused) =>
             format!("Le coffre {vault_id} a été mis en pause."),
+        (Locale::Fr, NotificationType::WithdrawalAlert) =>
+            format!(
+                "Une tentative de retrait a été détectée sur votre coffre {vault_id}. \
+                Si vous n'avez pas autorisé cela, veuillez vérifier votre coffre immédiatement."
+            ),
         // German
         (Locale::De, NotificationType::ExpiryWarning) => {
             let h = hours_remaining.unwrap_or(24);
@@ -143,6 +162,67 @@ pub fn email_body(
             format!("Tresor {vault_id} wurde an den designierten Begünstigten freigegeben."),
         (Locale::De, NotificationType::VaultPaused) =>
             format!("Tresor {vault_id} wurde pausiert."),
+        (Locale::De, NotificationType::WithdrawalAlert) =>
+            format!(
+                "Ein Abhebungsversuch wurde auf Ihrem Tresor {vault_id} erkannt. \
+                Falls Sie dies nicht autorisiert haben, überprüfen Sie Ihren Tresor sofort."
+            ),
+    }
+}
+
+/// Render a rich withdrawal-alert email body with full event details.
+///
+/// This is the preferred function when the full `WithdrawalEvent` is available,
+/// as it includes the amount, outcome, and optional transaction hash.
+pub fn withdrawal_alert_email_body(
+    locale: &Option<Locale>,
+    vault_id: &str,
+    amount: i128,
+    success: bool,
+    failure_reason: Option<&str>,
+    attempted_at: &str,
+    tx_hash: Option<&str>,
+) -> String {
+    let status_label = if success { "successful" } else { "FAILED" };
+    let outcome = match (success, failure_reason) {
+        (true, _) => "The withdrawal completed successfully.".to_string(),
+        (false, Some(reason)) => format!("The withdrawal failed: {reason}."),
+        (false, None) => "The withdrawal attempt was unsuccessful.".to_string(),
+    };
+    let tx_line = match tx_hash {
+        Some(h) => format!("\nTransaction hash: {h}"),
+        None => String::new(),
+    };
+
+    match resolve_locale(locale) {
+        Locale::En => format!(
+            "A {status_label} withdrawal attempt was detected on your vault {vault_id}.\n\
+            Amount: {amount} stroops\n\
+            Time:   {attempted_at}{tx_line}\n\n\
+            {outcome}\n\n\
+            If you did not authorise this action, please review your vault and contact support immediately."
+        ),
+        Locale::Es => format!(
+            "Se detectó un intento de retiro {status_label} en tu bóveda {vault_id}.\n\
+            Monto: {amount} stroops\n\
+            Hora:  {attempted_at}{tx_line}\n\n\
+            {outcome}\n\n\
+            Si no autorizaste esta acción, revisa tu bóveda y contacta al soporte de inmediato."
+        ),
+        Locale::Fr => format!(
+            "Une tentative de retrait {status_label} a été détectée sur votre coffre {vault_id}.\n\
+            Montant : {amount} stroops\n\
+            Heure :   {attempted_at}{tx_line}\n\n\
+            {outcome}\n\n\
+            Si vous n'avez pas autorisé cette action, vérifiez votre coffre et contactez le support immédiatement."
+        ),
+        Locale::De => format!(
+            "Ein {status_label} Abhebungsversuch wurde auf Ihrem Tresor {vault_id} erkannt.\n\
+            Betrag: {amount} Stroops\n\
+            Zeit:   {attempted_at}{tx_line}\n\n\
+            {outcome}\n\n\
+            Falls Sie dies nicht autorisiert haben, überprüfen Sie Ihren Tresor und kontaktieren Sie sofort den Support."
+        ),
     }
 }
 

@@ -210,6 +210,12 @@ async fn main() {
             "/api/vaults/:vault_id/vesting/bonus",
             get(routes::get_vesting_bonus),
         )
+        .route(
+            "/api/vaults/:vault_id/withdrawal-alert-preferences",
+            get(routes::get_withdrawal_alert_prefs)
+                .put(routes::set_withdrawal_alert_prefs)
+                .delete(routes::delete_withdrawal_alert_prefs),
+        )
         .layer(build_cors_layer())
         .layer(middleware::from_fn_with_state(global_limiter, rate_limit::rate_limit_middleware))
         .with_state(state);

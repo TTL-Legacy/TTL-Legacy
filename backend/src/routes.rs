@@ -25,8 +25,12 @@ use crate::{
         ClaimBonusRequest,
         ReminderPreferences,
         SetPreferencesRequest,
+        SetSubscriptionRequest,
+        SetWithdrawalAlertPrefsRequest,
         SimulateReleaseQuery,
         SimulateReleaseResponse,
+        Subscription,
+        WithdrawalAlertPreferences,
     },
 };
 
@@ -143,6 +147,43 @@ pub async fn unsubscribe(
 }
 
 
+// ── Vault subscription endpoints ─────────────────────────────────────────────
+
+/// POST /api/vaults/:vault_id/subscriptions
+///
+/// Create or update vault-level notification subscription settings.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn set_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+    Json(body): Json<SetSubscriptionRequest>,
+) -> Result<(StatusCode, Json<Subscription>), AppError> {
+    if body.channels.is_empty() {
+        return Err(AppError::InvalidInput("channels must not be empty".into()));
+    }
+
+    let sub = Subscription {
+        vault_id,
+        owner: body.owner,
+        channels: body.channels,
+        frequency: body.frequency,
+    };
+    state.db.upsert_subscription(&sub)?;
+    Ok((StatusCode::OK, Json(sub)))
+}
+
+/// DELETE /api/vaults/:vault_id/subscriptions
+///
+/// Remove vault-level notification subscription settings.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn delete_subscription(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+) -> Result<StatusCode, AppError> {
+    state.db.delete_subscription(vault_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Release Simulator endpoint ────────────────────────────────────────────────
 
 /// GET /api/vaults/:vault_id/simulate-release?scenarios=no_check_ins,consistent_check_ins,missed_check_in_dates&missed_count=2
@@ -232,4 +273,64 @@ pub async fn get_vesting_bonus(
     let result = get_vesting_bonus_handler(Arc::clone(&db), &vault_id)
         .map_err(|e| AppError::InvalidInput(e))?;
     Ok(Json(result))
+}
+
+// ── Withdrawal Alert Preferences endpoints ────────────────────────────────────
+
+/// GET /api/vaults/:vault_id/withdrawal-alert-preferences
+///
+/// Returns the current withdrawal alert notification preferences for a vault.
+/// Defaults to both email and push disabled when no record exists.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_withdrawal_alert_prefs(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+) -> Result<Json<WithdrawalAlertPreferences>, AppError> {
+    let prefs = state
+        .db
+        .get_withdrawal_alert_prefs(vault_id)?
+        .unwrap_or_else(|| WithdrawalAlertPreferences {
+            vault_id,
+            owner: String::new(),
+            email_enabled: false,
+            push_enabled: false,
+        });
+    Ok(Json(prefs))
+}
+
+/// PUT /api/vaults/:vault_id/withdrawal-alert-preferences
+///
+/// Create or replace withdrawal alert notification preferences for a vault.
+/// Owners can independently opt in to email alerts, push alerts, or both.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn set_withdrawal_alert_prefs(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+    Json(body): Json<SetWithdrawalAlertPrefsRequest>,
+) -> Result<(StatusCode, Json<WithdrawalAlertPreferences>), AppError> {
+    if body.owner.is_empty() {
+        return Err(AppError::InvalidInput("owner must not be empty".into()));
+    }
+
+    let prefs = WithdrawalAlertPreferences {
+        vault_id,
+        owner: body.owner,
+        email_enabled: body.email_enabled,
+        push_enabled: body.push_enabled,
+    };
+
+    state.db.upsert_withdrawal_alert_prefs(&prefs)?;
+    Ok((StatusCode::OK, Json(prefs)))
+}
+
+/// DELETE /api/vaults/:vault_id/withdrawal-alert-preferences
+///
+/// Remove withdrawal alert preferences for a vault (opt-out of all alerts).
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn delete_withdrawal_alert_prefs(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<u64>,
+) -> Result<StatusCode, AppError> {
+    state.db.delete_withdrawal_alert_prefs(vault_id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
