@@ -302,6 +302,8 @@ pub const BENEFICIARY_TRIGGER_SET_TOPIC: Symbol = symbol_short!("ben_trg");
 pub const BENEFICIARY_TIER_SET_TOPIC: Symbol = symbol_short!("ben_tier");
 pub const BENEFICIARY_WATERFALL_TOPIC: Symbol = symbol_short!("ben_wfl");
 pub const BENEFICIARY_REBALANCED_TOPIC: Symbol = symbol_short!("ben_reb");
+pub const BEN_COMMITTED_TOPIC: Symbol = symbol_short!("ben_cmt");
+pub const BEN_REVEALED_TOPIC: Symbol = symbol_short!("ben_rev");
 
 // Issue #573: Withdrawal Proof
 pub const WITHDRAWAL_PROOF_TOPIC: Symbol = symbol_short!("wd_prf");
@@ -493,6 +495,9 @@ pub enum StorageKey {
     // Issue #529: beneficiary pooling
     BeneficiaryPool(u64),
     BeneficiaryPoolAlloc(u64),
+    // Optional privacy layer: hash commitment to beneficiary identity before release.
+    BeneficiaryCommitment(u64),
+    RevealedBeneficiary(u64),
     // Issue #525: beneficiary vesting schedules
     BeneficiaryVestingSchedule(u64, Address),
     BeneficiaryVestingCount(u64),
@@ -671,6 +676,18 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
     /// Minimum amount in stroops. If calculated share < minimum_threshold, beneficiary gets 0.
     pub minimum_threshold: i128,
+}
+
+/// Privacy-preserving commitment for a vault beneficiary.
+/// The plain beneficiary address remains available in `Vault.beneficiary` for
+/// compatibility and public indexing, while the commitment stores a hash that
+/// keeps the identity hidden until release time. The hash is computed as
+/// `sha256(raw_beneficiary_address_bytes)` and revealed with `reveal_beneficiary`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeneficiaryCommitment {
+    pub commitment: BytesN<32>,
+    pub committed_at: u64,
 }
 
 /// Bridge configuration for cross-chain support.

@@ -15,6 +15,7 @@ TTL-Legacy turns Stellar's native state archival mechanics into a programmable i
 - Deposit funds into a personal vault contract
 - Periodically "check in" to extend the contract's TTL and prove liveness
 - Designate a beneficiary address for automatic release
+- Optionally use a hashed beneficiary commitment with reveal-on-release to reduce pre-release targeting exposure
 - Authenticate exclusively via Passkeys (WebAuthn) — no seed phrases
 
 If the owner stops checking in, the contract's TTL expires and the vault automatically releases funds to the beneficiary.
@@ -29,6 +30,7 @@ This Soroban implementation makes TTL-Legacy:
 ## 🚀 Features
 
 - **Create a Vault**: Set a beneficiary address and check-in interval
+- **Privacy Layer**: Optional beneficiary hash commitment with reveal-on-release for privacy-sensitive vaults
 - **Check-In**: Extend the contract TTL to reset the countdown
 - **Automatic Release**: Funds transfer to beneficiary when TTL lapses
 - **Beneficiary Conditional Acceptance**: Beneficiary can accept role only if funds exceed threshold
