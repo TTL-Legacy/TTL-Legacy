@@ -25,6 +25,7 @@ pub use types::{
     VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
     WhitelistEntry, WithdrawalLimit, WithdrawalReversal, WithdrawalScheduleEntry,
     WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
+    BeneficiaryConditionalAcceptance, BeneficiaryConditionalDecline,
     ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
     ADMIN_TRANSFER_COMPLETED_TOPIC,
     ADMIN_TRANSFER_PROPOSED_TOPIC, BACKUP_CODES_ENCRYPTED_TOPIC, BACKUP_CODES_GENERATED_TOPIC,
@@ -11306,6 +11307,78 @@ impl TtlVaultContract {
             .persistent()
             .get::<StorageKey, BeneficiaryConditionalAcceptance>(
                 &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            )
+    }
+
+    /// Beneficiary declines vault assignment if balance is below a maximum threshold.
+    /// This allows beneficiaries to avoid accepting low-value inheritance obligations.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `max_balance_threshold` - Maximum balance (in stroops) the vault can have for the decline to trigger.
+    ///                             If vault balance exceeds this, the decline is recorded but may not apply during release.
+    /// * `reason` - Optional reason for the decline (max 256 characters)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// - `InvalidAmount`: If `max_balance_threshold <= 0`
+    /// - `NotBeneficiary`: If caller is not the beneficiary
+    /// - `VaultNotFound`: If vault does not exist
+    pub fn decline_with_threshold(
+        env: Env,
+        vault_id: u64,
+        max_balance_threshold: i128,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.beneficiary.require_auth();
+
+        if max_balance_threshold <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        if reason.len() > 256 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let decline = BeneficiaryConditionalDecline {
+            max_balance_threshold,
+            declined_at: env.ledger().timestamp(),
+            reason,
+        };
+
+        env.storage().persistent().set(
+            &StorageKey::ConditionalDecline(vault_id),
+            &decline,
+        );
+
+        env.events().publish(
+            (BENEFICIARY_DECLINED_TOPIC,),
+            (vault_id, vault.beneficiary.clone(), max_balance_threshold),
+        );
+
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ConditionalDecline(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+
+        Ok(())
+    }
+
+    /// Gets beneficiary conditional decline if it exists.
+    pub fn get_beneficiary_conditional_decline(
+        env: Env,
+        vault_id: u64,
+    ) -> Option<BeneficiaryConditionalDecline> {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConditionalDecline>(
+                &StorageKey::ConditionalDecline(vault_id),
             )
     }
 
