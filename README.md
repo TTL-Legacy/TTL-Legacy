@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg)](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/OxDev-max/TTL-Legacy/branch/main/graph/badge.svg)](https://codecov.io/gh/OxDev-max/TTL-Legacy)
+[![OpenAPI Valid](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg?label=OpenAPI)](docs/openapi.yaml)
 
 A decentralized "Dead Man's Switch" built on Stellar/Soroban smart contracts.
 
@@ -14,6 +15,7 @@ TTL-Legacy turns Stellar's native state archival mechanics into a programmable i
 - Deposit funds into a personal vault contract
 - Periodically "check in" to extend the contract's TTL and prove liveness
 - Designate a beneficiary address for automatic release
+- Optionally use a hashed beneficiary commitment with reveal-on-release to reduce pre-release targeting exposure
 - Authenticate exclusively via Passkeys (WebAuthn) — no seed phrases
 
 If the owner stops checking in, the contract's TTL expires and the vault automatically releases funds to the beneficiary.
@@ -28,6 +30,7 @@ This Soroban implementation makes TTL-Legacy:
 ## 🚀 Features
 
 - **Create a Vault**: Set a beneficiary address and check-in interval
+- **Privacy Layer**: Optional beneficiary hash commitment with reveal-on-release for privacy-sensitive vaults
 - **Check-In**: Extend the contract TTL to reset the countdown
 - **Automatic Release**: Funds transfer to beneficiary when TTL lapses
 - **Beneficiary Conditional Acceptance**: Beneficiary can accept role only if funds exceed threshold
@@ -277,6 +280,8 @@ We welcome contributions! Please:
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+For a full local dev setup walkthrough and troubleshooting FAQ, see the [Contributing Guide](CONTRIBUTING.md).
 
 See our [Code of Conduct](CODE_OF_CONDUCT.md) and [Contributing Guidelines](CONTRIBUTING.md).
 
