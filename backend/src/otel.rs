@@ -121,12 +121,21 @@ pub fn try_init_tracer(service_name: &'static str) -> Result<OtelGuard, Box<dyn 
 
     let otel_layer = OpenTelemetryLayer::new(tracer);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let use_json = std::env::var("LOG_FORMAT").map(|v| v.to_lowercase() == "json").unwrap_or(false);
 
-    Registry::default()
-        .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(otel_layer)
-        .try_init()?;
+    if use_json {
+        Registry::default()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .with(otel_layer)
+            .try_init()?;
+    } else {
+        Registry::default()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(otel_layer)
+            .try_init()?;
+    }
 
     tracing::info!(
         service = service_name,
@@ -139,9 +148,17 @@ pub fn try_init_tracer(service_name: &'static str) -> Result<OtelGuard, Box<dyn 
 
 /// Initialise plain stdout tracing without OTLP export (fallback path).
 fn init_stdout_tracer() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    let use_json = std::env::var("LOG_FORMAT").map(|v| v.to_lowercase() == "json").unwrap_or(false);
+    if use_json {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init();
+    }
 }
 
 // ---------------------------------------------------------------------------

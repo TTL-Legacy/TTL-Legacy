@@ -1,0 +1,53 @@
+# Mutation testing CI workflow — Issue #1180
+#
+# Runs cargo-mutants against the ttl-vault contract on every pull request and
+# uploads a plain-text survival report as a GitHub Actions artifact.
+#
+# IMPORTANT: Results are *informational only*.  This job is intentionally set
+# to continue-on-error: true so that surviving mutants do not block PR merges.
+# The goal is to surface coverage gaps over time, not gate every PR.
+
+name: Mutation Testing
+
+on:
+  pull_request:
+
+jobs:
+  mutation-testing:
+    name: Mutation Testing (informational)
+    runs-on: ubuntu-latest
+    # Results are informational — do not block PR merges.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mutants-
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants
+
+      - name: Run mutation tests
+        # Pipe stdout + stderr to a report file so it survives as an artifact.
+        # The exit code is ignored because the job is non-blocking.
+        run: cargo mutants --package ttl-vault 2>&1 | tee mutants-report.txt
+
+      - name: Upload mutant survival report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutant-survival-report
+          path: mutants-report.txt
+          retention-days: 14

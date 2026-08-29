@@ -20,6 +20,8 @@ class NotificationHelper @Inject constructor(@ApplicationContext private val con
         const val QUEUED_CHANNEL_ID = "ttl_queued"
         const val QUEUED_CHANNEL_NAME = "Queued Check-ins"
         const val QUEUED_NOTIFICATION_ID = 9_001
+        private const val EXPIRED_QUEUE_NOTIFICATION_ID = 1003
+        private const val SYNC_SUCCESS_NOTIFICATION_ID = 1004
     }
 
     init {
@@ -79,5 +81,37 @@ class NotificationHelper @Inject constructor(@ApplicationContext private val con
     private fun createChannel(id: String, name: String, importance: Int) {
         val channel = NotificationChannel(id, name, importance)
         context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    /**
+     * Shows a warning notification that one or more queued check-ins may have arrived
+     * after TTL expiry. Submission will still be attempted; the user should check vault status.
+     */
+    fun notifyExpiredCheckInsInQueue(vaultIds: List<String>) {
+        val ids = vaultIds.joinToString(", ")
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("⚠️ Check-in may be too late")
+            .setContentText("Vault(s) $ids: queued check-in arrived after TTL expiry. Attempting submission anyway.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        context.getSystemService(NotificationManager::class.java)
+            .notify(EXPIRED_QUEUE_NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * Shows a confirmation notification that a queued check-in was successfully broadcast.
+     */
+    fun notifyCheckInSyncSuccess(vaultId: String) {
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("✅ Check-in synced")
+            .setContentText("Queued check-in for vault $vaultId was successfully submitted.")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+        context.getSystemService(NotificationManager::class.java)
+            .notify(SYNC_SUCCESS_NOTIFICATION_ID, notification)
     }
 }
