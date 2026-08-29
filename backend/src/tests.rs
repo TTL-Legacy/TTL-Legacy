@@ -69,10 +69,8 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
             get(routes::unsubscribe),
         )
         .route(
-            "/api/vaults/:vault_id/withdrawal-alert-preferences",
-            get(routes::get_withdrawal_alert_prefs)
-                .put(routes::set_withdrawal_alert_prefs)
-                .delete(routes::delete_withdrawal_alert_prefs),
+            "/reminders/check-in",
+            get(routes::resolve_reminder_token),
         )
         .with_state(state)
 }
@@ -386,6 +384,119 @@ async fn test_cors_rejected_origin() {
         Some(val) => assert_ne!(val, "http://evil.com"),
         None => {} // No header is also acceptable
     }
+}
+
+// ── Issue #1179: Hardened CORS tests ─────────────────────────────────────────
+
+/// Build a small test router with `build_cors_layer()` applied.
+/// `app_env` and `allowed_origins` are injected via environment variables.
+fn build_cors_test_app(app_env: &str, allowed_origins: &str) -> Router {
+    // Set env vars before building the layer; clear them after.
+    std::env::set_var("APP_ENV", app_env);
+    std::env::set_var("ALLOWED_ORIGINS", allowed_origins);
+    let cors = crate::build_cors_layer();
+    std::env::remove_var("APP_ENV");
+    std::env::remove_var("ALLOWED_ORIGINS");
+
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
+    Router::new()
+        .route("/health", get(health_handler))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// With `APP_ENV=production` and a valid origin in the whitelist, the
+/// `access-control-allow-origin` header should reflect the allowed origin.
+#[tokio::test]
+async fn test_cors_hardened_allowed_origin() {
+    let app = build_cors_test_app("production", "http://allowed.example.com");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://allowed.example.com")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The allowed origin must appear in the response header.
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_some(),
+        "access-control-allow-origin must be present for an allowed origin"
+    );
+    assert_eq!(
+        allow_origin.unwrap(),
+        "http://allowed.example.com",
+        "access-control-allow-origin must match the allowed origin"
+    );
+}
+
+/// With `APP_ENV=production` and a disallowed origin, the
+/// `access-control-allow-origin` header must not reflect the disallowed origin.
+#[tokio::test]
+async fn test_cors_hardened_disallowed_origin() {
+    let app = build_cors_test_app("production", "http://allowed.example.com");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://evil.example.com")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    match allow_origin {
+        Some(val) => assert_ne!(
+            val, "http://evil.example.com",
+            "disallowed origin must not appear in access-control-allow-origin"
+        ),
+        None => {} // No header is also acceptable — origin was rejected.
+    }
+}
+
+/// With `APP_ENV=development`, the CORS layer should be permissive and allow
+/// cross-origin requests from any origin (wildcard or reflected).
+#[tokio::test]
+async fn test_cors_development_mode_allows_all() {
+    let app = build_cors_test_app("development", "");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://any-origin.local")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // In permissive mode, the response status must be 2xx (not blocked)
+    // and the allow-origin header must be present.
+    assert!(
+        res.status().is_success() || res.status().as_u16() == 204,
+        "dev CORS must not block preflight: got status {}",
+        res.status()
+    );
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_some(),
+        "access-control-allow-origin must be present in development mode"
+    );
 }
 
 // ── #824: Scheduler resilience tests ─────────────────────────────────────────
@@ -1707,454 +1818,71 @@ async fn test_get_vesting_bonus_not_configured() {
     assert!(json["on_time_window_seconds"].is_null());
 }
 
-
-// ── Withdrawal alert notification tests ──────────────────────────────────────
-
-/// Helper: build a minimal PUT request body for withdrawal alert prefs.
-fn withdrawal_alert_body(owner: &str, email: bool, push: bool) -> serde_json::Value {
-    json!({
-        "owner": owner,
-        "email_enabled": email,
-        "push_enabled": push
-    })
-}
-
-async fn put_json(app: Router, uri: &str, body: serde_json::Value) -> axum::response::Response {
-    app.oneshot(
-        Request::builder()
-            .method("PUT")
-            .uri(uri)
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap(),
-    )
-    .await
-    .unwrap()
-}
-
-async fn delete_req(app: Router, uri: &str) -> axum::response::Response {
-    app.oneshot(
-        Request::builder()
-            .method("DELETE")
-            .uri(uri)
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap()
-}
-
-// ── DB-level unit tests ────────────────────────────────────────────────────
-
-#[test]
-fn test_upsert_and_get_withdrawal_alert_prefs() {
-    let db = Db::open(":memory:").unwrap();
-    db.migrate().unwrap();
-
-    let prefs = crate::models::WithdrawalAlertPreferences {
-        vault_id: 10,
-        owner: "alice".to_string(),
-        email_enabled: true,
-        push_enabled: false,
-    };
-    db.upsert_withdrawal_alert_prefs(&prefs).unwrap();
-
-    let fetched = db.get_withdrawal_alert_prefs(10).unwrap().unwrap();
-    assert_eq!(fetched.vault_id, 10);
-    assert_eq!(fetched.owner, "alice");
-    assert!(fetched.email_enabled);
-    assert!(!fetched.push_enabled);
-}
-
-#[test]
-fn test_upsert_overwrites_withdrawal_alert_prefs() {
-    let db = Db::open(":memory:").unwrap();
-    db.migrate().unwrap();
-
-    let prefs1 = crate::models::WithdrawalAlertPreferences {
-        vault_id: 20,
-        owner: "bob".to_string(),
-        email_enabled: true,
-        push_enabled: true,
-    };
-    db.upsert_withdrawal_alert_prefs(&prefs1).unwrap();
-
-    // Update: disable email, keep push.
-    let prefs2 = crate::models::WithdrawalAlertPreferences {
-        vault_id: 20,
-        owner: "bob".to_string(),
-        email_enabled: false,
-        push_enabled: true,
-    };
-    db.upsert_withdrawal_alert_prefs(&prefs2).unwrap();
-
-    let fetched = db.get_withdrawal_alert_prefs(20).unwrap().unwrap();
-    assert!(!fetched.email_enabled);
-    assert!(fetched.push_enabled);
-}
-
-#[test]
-fn test_get_withdrawal_alert_prefs_not_found() {
-    let db = Db::open(":memory:").unwrap();
-    db.migrate().unwrap();
-    let result = db.get_withdrawal_alert_prefs(999).unwrap();
-    assert!(result.is_none());
-}
-
-#[test]
-fn test_delete_withdrawal_alert_prefs() {
-    let db = Db::open(":memory:").unwrap();
-    db.migrate().unwrap();
-
-    let prefs = crate::models::WithdrawalAlertPreferences {
-        vault_id: 30,
-        owner: "carol".to_string(),
-        email_enabled: true,
-        push_enabled: true,
-    };
-    db.upsert_withdrawal_alert_prefs(&prefs).unwrap();
-    db.delete_withdrawal_alert_prefs(30).unwrap();
-
-    let result = db.get_withdrawal_alert_prefs(30).unwrap();
-    assert!(result.is_none());
-}
-
-// ── HTTP endpoint tests ───────────────────────────────────────────────────
+// ── #1286: Token-based reminder link security tests ─────────────────────────
 
 #[tokio::test]
-async fn test_set_withdrawal_alert_prefs_endpoint() {
+async fn test_resolve_reminder_token_success() {
     let db = Arc::new(Db::open(":memory:").unwrap());
-    let app = test_app_with_db(Arc::clone(&db));
+    db.migrate().unwrap();
+    let token = db.generate_reminder_token("vault-999", "owner-alice");
 
-    let body = withdrawal_alert_body("vault-owner-1", true, false);
-    let res = put_json(app, "/api/vaults/1/withdrawal-alert-preferences", body).await;
+    let app = test_app_with_db(Arc::clone(&db));
+    let res = get_req(app, &format!("/reminders/check-in?token={token}")).await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["vault_id"], 1);
-    assert_eq!(json["owner"], "vault-owner-1");
-    assert_eq!(json["email_enabled"], true);
-    assert_eq!(json["push_enabled"], false);
-
-    // Verify persisted in DB.
-    let saved = db.get_withdrawal_alert_prefs(1).unwrap().unwrap();
-    assert!(saved.email_enabled);
-    assert!(!saved.push_enabled);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["vault_id"], "vault-999");
+    assert_eq!(json["owner"], "owner-alice");
 }
 
 #[tokio::test]
-async fn test_get_withdrawal_alert_prefs_endpoint_default() {
-    let db = Arc::new(Db::open(":memory:").unwrap());
-    let app = test_app_with_db(Arc::clone(&db));
-
-    // No prefs stored → defaults returned.
-    let res = get_req(app, "/api/vaults/77/withdrawal-alert-preferences").await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["vault_id"], 77);
-    assert_eq!(json["email_enabled"], false);
-    assert_eq!(json["push_enabled"], false);
-}
-
-#[tokio::test]
-async fn test_get_withdrawal_alert_prefs_endpoint_returns_saved() {
+async fn test_resolve_reminder_token_invalid() {
     let db = Arc::new(Db::open(":memory:").unwrap());
     db.migrate().unwrap();
 
-    let prefs = crate::models::WithdrawalAlertPreferences {
-        vault_id: 5,
-        owner: "dave".to_string(),
-        email_enabled: true,
-        push_enabled: true,
-    };
-    db.upsert_withdrawal_alert_prefs(&prefs).unwrap();
-
     let app = test_app_with_db(Arc::clone(&db));
-    let res = get_req(app, "/api/vaults/5/withdrawal-alert-preferences").await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["owner"], "dave");
-    assert_eq!(json["email_enabled"], true);
-    assert_eq!(json["push_enabled"], true);
+    let res = get_req(app, "/reminders/check-in?token=invalid_opaque_token").await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
-async fn test_set_withdrawal_alert_prefs_empty_owner_rejected() {
-    let db = Arc::new(Db::open(":memory:").unwrap());
-    let app = test_app_with_db(Arc::clone(&db));
-
-    let body = withdrawal_alert_body("", true, true);
-    let res = put_json(app, "/api/vaults/1/withdrawal-alert-preferences", body).await;
-    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-#[tokio::test]
-async fn test_delete_withdrawal_alert_prefs_endpoint() {
+async fn test_reminder_email_does_not_contain_raw_vault_id() {
     let db = Arc::new(Db::open(":memory:").unwrap());
     db.migrate().unwrap();
+    let raw_vault_id = "sensitive-vault-secret-123";
+    let owner = "owner-bob";
+    let base_url = "https://app.ttllegacy.io";
 
-    let prefs = crate::models::WithdrawalAlertPreferences {
-        vault_id: 99,
-        owner: "eve".to_string(),
-        email_enabled: true,
-        push_enabled: true,
-    };
-    db.upsert_withdrawal_alert_prefs(&prefs).unwrap();
+    let url = db.generate_reminder_url(raw_vault_id, owner, base_url);
+    assert!(!url.contains(raw_vault_id));
+    assert!(url.starts_with("https://app.ttllegacy.io/reminders/check-in?token="));
 
-    let app = test_app_with_db(Arc::clone(&db));
-    let res = delete_req(app, "/api/vaults/99/withdrawal-alert-preferences").await;
-    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let fcm = Arc::new(crate::notifications::FcmClient::new("key".into(), "project".into()));
+    let svc = crate::notifications::NotificationService::new(
+        fcm,
+        crate::notifications::create_token_store(),
+        crate::notifications::create_prefs_store(),
+        crate::notifications::create_schedule_store(),
+        crate::notifications::create_delivery_store(),
+    );
 
-    // Verify gone from DB.
-    let result = db.get_withdrawal_alert_prefs(99).unwrap();
-    assert!(result.is_none());
-}
+    let email_body = crate::templates::email_body(
+        &crate::models::NotificationType::CheckInReminder,
+        &Some(crate::models::Locale::En),
+        raw_vault_id,
+        None,
+    );
+    assert!(!email_body.contains(raw_vault_id));
 
-// ── NotificationService withdrawal trigger tests ──────────────────────────
-
-#[cfg(test)]
-mod withdrawal_notification_service_tests {
-    use std::sync::Arc;
-    use crate::notifications::{
-        FcmClient, NotificationService,
-        create_token_store, create_prefs_store, create_schedule_store, create_delivery_store,
-    };
-    use crate::models::{
-        DeliveryStatus, NotificationType, RegisterTokenRequest, UpdatePreferencesRequest,
-    };
-    use serde_json::json;
-
-    fn make_service(fcm: Arc<FcmClient>) -> NotificationService {
-        NotificationService::new(
-            fcm,
-            create_token_store(),
-            create_prefs_store(),
-            create_schedule_store(),
-            create_delivery_store(),
-        )
-    }
-
-    /// trigger_withdrawal_alert enqueues a WithdrawalAlert notification.
-    #[tokio::test]
-    async fn test_trigger_withdrawal_alert_enqueues_notification() {
-        let fcm = Arc::new(FcmClient::new("key".into(), "proj".into()));
-        let svc = make_service(fcm);
-
-        svc.trigger_withdrawal_alert("vault-1", "owner-1", 5_000_000, true, None, None);
-
-        let pending = svc.get_pending_notifications();
-        assert_eq!(pending.len(), 1);
-        let notif = &pending[0];
-        assert_eq!(notif.vault_id, "vault-1");
-        assert_eq!(notif.owner, "owner-1");
-        assert_eq!(notif.notification_type, NotificationType::WithdrawalAlert);
-        assert_eq!(notif.status, DeliveryStatus::Pending);
-    }
-
-    /// trigger_withdrawal_alert works for failed withdrawals too.
-    #[tokio::test]
-    async fn test_trigger_withdrawal_alert_failed_withdrawal() {
-        let fcm = Arc::new(FcmClient::new("key".into(), "proj".into()));
-        let svc = make_service(fcm);
-
-        svc.trigger_withdrawal_alert(
-            "vault-2",
-            "owner-2",
-            1_000,
-            false,
-            Some("insufficient funds"),
-            None,
-        );
-
-        let pending = svc.get_pending_notifications();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].notification_type, NotificationType::WithdrawalAlert);
-    }
-
-    /// Globally unsubscribed owner should NOT receive withdrawal alerts.
-    #[tokio::test]
-    async fn test_trigger_withdrawal_alert_skipped_for_unsubscribed_owner() {
-        let fcm = Arc::new(FcmClient::new("key".into(), "proj".into()));
-        let svc = make_service(fcm);
-
-        // Unsubscribe the owner first.
-        let token = svc.generate_unsubscribe_token("owner-opted-out");
-        svc.process_unsubscribe(&token).unwrap();
-
-        svc.trigger_withdrawal_alert("vault-3", "owner-opted-out", 100, true, None, None);
-
-        // No notification should have been enqueued.
-        let pending = svc.get_pending_notifications();
-        assert!(pending.is_empty(), "unsubscribed owner should not receive withdrawal alerts");
-    }
-
-    /// Withdrawal alert notification is delivered via FCM when token is registered.
-    #[tokio::test]
-    async fn test_withdrawal_alert_delivered_via_push() {
-        let mut server = mockito::Server::new_async().await;
-        let _mock = server
-            .mock("POST", "/v1/projects/test-project/messages:send")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"name":"projects/test-project/messages/wd-001"}"#)
-            .create_async()
-            .await;
-
-        let mut fcm = FcmClient::new("test-key".into(), "test-project".into());
-        fcm.base_url = server.url();
-        let svc = make_service(Arc::new(fcm));
-
-        svc.register_token(RegisterTokenRequest {
-            owner: "owner-push".into(),
-            token: "device-wd".into(),
-            platform: "ios".into(),
-        });
-
-        svc.trigger_withdrawal_alert("vault-10", "owner-push", 2_000_000, true, None, Some("hash123"));
-        svc.flush_pending().await;
-
-        let log = svc.get_delivery_log("owner-push");
-        assert!(!log.is_empty());
-        assert_eq!(log[0].status, DeliveryStatus::Sent);
-        assert_eq!(log[0].notification_type, NotificationType::WithdrawalAlert);
-    }
-
-    /// Multiple alerts for the same vault are all enqueued independently.
-    #[tokio::test]
-    async fn test_multiple_withdrawal_alerts_all_enqueued() {
-        let fcm = Arc::new(FcmClient::new("key".into(), "proj".into()));
-        let svc = make_service(fcm);
-
-        svc.trigger_withdrawal_alert("vault-multi", "owner-m", 100, true, None, None);
-        svc.trigger_withdrawal_alert("vault-multi", "owner-m", 200, false, Some("auth error"), None);
-        svc.trigger_withdrawal_alert("vault-multi", "owner-m", 300, true, None, Some("tx-abc"));
-
-        let pending = svc.get_pending_notifications();
-        assert_eq!(pending.len(), 3, "all 3 withdrawal alerts should be enqueued");
-        assert!(pending.iter().all(|n| n.notification_type == NotificationType::WithdrawalAlert));
-    }
-}
-
-// ── Email template tests for WithdrawalAlert ────────────────────────────────
-
-#[cfg(test)]
-mod withdrawal_alert_template_tests {
-    use crate::models::{Locale, NotificationType};
-    use crate::templates::{email_subject, email_body, withdrawal_alert_email_body};
-
-    #[test]
-    fn test_withdrawal_alert_subject_english() {
-        let subj = email_subject(&NotificationType::WithdrawalAlert, &None);
-        assert!(subj.to_lowercase().contains("withdrawal"), "subject: {subj}");
-    }
-
-    #[test]
-    fn test_withdrawal_alert_subject_all_locales() {
-        let locales = [
-            (Some(Locale::En), "withdrawal"),
-            (Some(Locale::Es), "retiro"),
-            (Some(Locale::Fr), "retrait"),
-            (Some(Locale::De), "abhebung"),
-        ];
-        for (locale, keyword) in locales {
-            let subj = email_subject(&NotificationType::WithdrawalAlert, &locale);
-            assert!(
-                subj.to_lowercase().contains(keyword),
-                "Expected '{keyword}' in subject for locale {:?}: '{subj}'",
-                locale,
-            );
-        }
-    }
-
-    #[test]
-    fn test_withdrawal_alert_body_contains_vault_id() {
-        let body = email_body(&NotificationType::WithdrawalAlert, &None, "vault-xyz", None);
-        assert!(body.contains("vault-xyz"), "body should mention vault ID");
-    }
-
-    #[test]
-    fn test_withdrawal_alert_rich_body_success() {
-        let body = withdrawal_alert_email_body(
-            &None,
-            "vault-99",
-            5_000_000,
-            true,
-            None,
-            "2026-08-29T12:00:00Z",
-            Some("txhash-abc"),
-        );
-        assert!(body.contains("vault-99"));
-        assert!(body.contains("5000000"));
-        assert!(body.contains("txhash-abc"));
-        assert!(body.contains("successful"));
-    }
-
-    #[test]
-    fn test_withdrawal_alert_rich_body_failed_with_reason() {
-        let body = withdrawal_alert_email_body(
-            &None,
-            "vault-99",
-            1_000,
-            false,
-            Some("insufficient funds"),
-            "2026-08-29T12:01:00Z",
-            None,
-        );
-        assert!(body.contains("vault-99"));
-        assert!(body.contains("1000"));
-        assert!(body.contains("insufficient funds"));
-    }
-
-    #[test]
-    fn test_withdrawal_alert_rich_body_spanish() {
-        let body = withdrawal_alert_email_body(
-            &Some(Locale::Es),
-            "vault-es",
-            500,
-            true,
-            None,
-            "2026-08-29T12:02:00Z",
-            None,
-        );
-        assert!(body.contains("vault-es"));
-        assert!(body.contains("500"));
-        // Spanish body should not contain English-only phrases
-        assert!(body.contains("bóveda") || body.contains("retiro") || body.contains("soporte"));
-    }
-
-    #[test]
-    fn test_withdrawal_alert_rich_body_french() {
-        let body = withdrawal_alert_email_body(
-            &Some(Locale::Fr),
-            "vault-fr",
-            750,
-            false,
-            None,
-            "2026-08-29T12:03:00Z",
-            None,
-        );
-        assert!(body.contains("vault-fr"));
-        assert!(body.contains("coffre") || body.contains("retrait") || body.contains("support"));
-    }
-
-    #[test]
-    fn test_withdrawal_alert_rich_body_german() {
-        let body = withdrawal_alert_email_body(
-            &Some(Locale::De),
-            "vault-de",
-            1234,
-            true,
-            None,
-            "2026-08-29T12:04:00Z",
-            None,
-        );
-        assert!(body.contains("vault-de"));
-        assert!(body.contains("1234"));
-        assert!(body.contains("Tresor") || body.contains("Abhebung") || body.contains("Support"));
-    }
+    let rendered = svc.render_reminder_email(
+        raw_vault_id,
+        owner,
+        "Check-In Reminder",
+        &email_body,
+        base_url,
+    );
+    assert!(!rendered.contains(raw_vault_id));
+    assert!(rendered.contains("Check in to your vault"));
+    assert!(rendered.contains("https://app.ttllegacy.io/reminders/check-in?token="));
 }

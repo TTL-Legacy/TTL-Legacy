@@ -211,6 +211,16 @@ pub struct UnsubscribeToken {
     pub created_at: DateTime<Utc>,
 }
 
+// ── Token-based reminder links (#1286) ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderToken {
+    pub token: String,
+    pub vault_id: String,
+    pub owner: String,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Channel fallback delivery log (#827) ────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -733,6 +743,110 @@ pub struct SimulateReleaseResponse {
     pub simulated_at: DateTime<Utc>,
 }
 
+// ── Passkey Recovery Flow (#1299) ──────────────────────────────────────────
+
+/// A registered passkey for a vault owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Passkey {
+    pub passkey_id: String,
+    pub owner: String,
+    pub vault_id: String,
+    pub credential_id: String,
+    /// Device name (e.g., "iPhone", "YubiKey 5", "Chrome")
+    pub device_name: String,
+    pub registered_at: DateTime<Utc>,
+    pub last_used: Option<DateTime<Utc>>,
+    pub is_backup: bool,
+}
+
+/// A single recovery code for account recovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryCode {
+    pub code_id: String,
+    pub owner: String,
+    pub vault_id: String,
+    /// The recovery code itself (hashed for storage)
+    pub code_hash: String,
+    pub generated_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+}
+
+/// Recovery codes bundle for a vault owner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryCodeSet {
+    pub set_id: String,
+    pub owner: String,
+    pub vault_id: String,
+    /// Array of plaintext codes (only shown once at generation)
+    pub codes: Vec<String>,
+    pub generated_at: DateTime<Utc>,
+    pub codes_used: u32,
+    pub total_codes: u32,
+}
+
+/// Request to register an additional passkey.
+#[derive(Debug, Deserialize)]
+pub struct RegisterPasskeyRequest {
+    pub vault_id: String,
+    pub owner: String,
+    pub credential_id: String,
+    pub device_name: String,
+    pub is_backup: Option<bool>,
+}
+
+/// Response when registering a new passkey.
+#[derive(Debug, Serialize)]
+pub struct RegisterPasskeyResponse {
+    pub passkey_id: String,
+    pub vault_id: String,
+    pub device_name: String,
+    pub registered_at: DateTime<Utc>,
+}
+
+/// Request to initiate recovery using a backup passkey or recovery code.
+#[derive(Debug, Deserialize)]
+pub struct RecoveryRequest {
+    pub vault_id: String,
+    pub owner: String,
+    /// Either a backup passkey credential or a recovery code
+    pub recovery_credential: String,
+    pub recovery_method: RecoveryMethod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMethod {
+    BackupPasskey,
+    RecoveryCode,
+}
+
+/// Response when recovery is successful.
+#[derive(Debug, Serialize)]
+pub struct RecoveryResponse {
+    pub recovery_id: String,
+    pub vault_id: String,
+    pub owner: String,
+    pub recovery_method: RecoveryMethod,
+    pub authenticated_at: DateTime<Utc>,
+}
+
+/// Request to generate new recovery codes.
+#[derive(Debug, Deserialize)]
+pub struct GenerateRecoveryCodesRequest {
+    pub vault_id: String,
+    pub owner: String,
+}
+
+/// Response with newly generated recovery codes (shown only once).
+#[derive(Debug, Serialize)]
+pub struct GenerateRecoveryCodesResponse {
+    pub set_id: String,
+    pub vault_id: String,
+    pub recovery_codes: Vec<String>,
+    pub generated_at: DateTime<Utc>,
+    pub note: String,
+}
+
 // --- Issue #1143: Vesting Bonus Backend API ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,6 +882,78 @@ pub struct VestingBonusResponse {
     pub configured: bool,
     pub bonus_bps: Option<u32>,
     pub on_time_window_seconds: Option<u64>,
+}
+
+// ── Persistent audit log (SQLite-backed, written by audit::audit_middleware) ─
+// Issue #1173: these types are referenced throughout db.rs/audit.rs but were
+// never actually defined anywhere in the crate.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub timestamp: DateTime<Utc>,
+    pub user_id: String,
+    pub action: String,
+    pub resource: String,
+    pub result: String,
+    pub ip_address: String,
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AuditLogQuery {
+    pub user_id: Option<String>,
+    pub action: Option<String>,
+    pub resource: Option<String>,
+    pub result: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response body for GET /api/vaults/{id}/release-history — Issue #1173.
+#[derive(Debug, Serialize)]
+pub struct VaultReleaseHistory {
+    pub vault_id: String,
+    /// Every audit-logged API request against this vault's release-related
+    /// endpoints (e.g. /simulate-release, /sponsored-release), oldest last.
+    pub audit_entries: Vec<AuditLogEntry>,
+    /// Sponsored-release attempts/completions recorded for this vault.
+    pub sponsored_releases: Vec<crate::fee_sponsorship::SponsoredRelease>,
+}
+
+// ── Auth: refresh token rotation (Issue #1177) ───────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshClaims {
+    pub sub: String,
+    /// Unique ID for this refresh token — the primary key in `refresh_tokens`.
+    pub jti: String,
+    /// Shared by every token descended from the same original login; used to
+    /// revoke an entire family if a rotated-out token is presented again.
+    pub family_id: String,
+    pub exp: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub sub: String,
+    #[serde(default)]
+    pub vault_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenPairResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    /// Access token lifetime in seconds, for client-side proactive refresh.
+    pub expires_in: i64,
 }
 
 

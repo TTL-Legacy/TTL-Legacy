@@ -3,6 +3,7 @@ use crate::models::{
     VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
     ReminderPreferences, Channel, Frequency,
     Subscription, SubscriptionChannel, SubscriptionFrequency,
+    Passkey, RecoveryCode, RecoveryCodeSet,
 };
 
 use chrono::Utc;
@@ -16,6 +17,9 @@ pub type BackupStore = Arc<Mutex<HashMap<String, VaultBackup>>>;
 pub type ShareStore = Arc<Mutex<Vec<VaultShare>>>;
 pub type ShareTokenStore = Arc<Mutex<HashMap<String, ShareToken>>>;
 pub type NotificationStore = Arc<Mutex<HashMap<String, VaultNotificationPreferences>>>;
+pub type PasskeyStore = Arc<Mutex<Vec<Passkey>>>;
+pub type RecoveryCodeStore = Arc<Mutex<Vec<RecoveryCode>>>;
+pub type RecoveryCodeSetStore = Arc<Mutex<Vec<RecoveryCodeSet>>>;
 
 
 pub fn create_vault_store() -> VaultStore {
@@ -46,6 +50,27 @@ pub fn create_notification_store() -> NotificationStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// Runs the versioned migrations under `backend/migrations/` against the
+/// SQLite file at `path` — Issue #1176.
+///
+/// This is intentionally independent of `Db::migrate`'s older ad-hoc
+/// in-Rust migration list (kept as-is, for backward compatibility with
+/// existing deployments' `schema_migrations` bookkeeping): sqlx tracks its
+/// own applied-migration state in a separate `_sqlx_migrations` table, so
+/// the two systems can coexist against the same file without conflict.
+/// Every table introduced going forward should be added as a new file
+/// under `migrations/` and applied via this function instead of extending
+/// the old list.
+pub async fn run_sqlx_migrations(path: &str) -> Result<(), sqlx::Error> {
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let url = format!("sqlite://{path}?mode=rwc");
+    let pool = SqlitePoolOptions::new().connect(&url).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    pool.close().await;
+    Ok(())
+}
+
 // ── Shared application state for axum routes ─────────────────────────────────
 
 pub struct AppState {
@@ -55,6 +80,9 @@ pub struct AppState {
     pub audit_store: AuditStore,
     pub share_store: ShareStore,
     pub share_token_store: ShareTokenStore,
+    pub passkey_store: PasskeyStore,
+    pub recovery_code_store: RecoveryCodeStore,
+    pub recovery_code_set_store: RecoveryCodeSetStore,
 }
 
 pub fn search_vaults(
@@ -595,6 +623,12 @@ impl Db {
                 CREATE TABLE IF NOT EXISTS unsubscribed_users (
                     owner TEXT PRIMARY KEY
                 );
+                CREATE TABLE IF NOT EXISTS reminder_tokens (
+                    token      TEXT PRIMARY KEY,
+                    vault_id   TEXT NOT NULL,
+                    owner      TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 "#,
             ),
             (
@@ -1071,6 +1105,37 @@ impl Db {
         token
     }
 
+    // ── Token-based reminder links (#1286) ──────────────────────────────────
+
+    pub fn store_reminder_token(&self, token: &str, vault_id: &str, owner: &str) {
+        let _ = self.conn.lock().unwrap().execute(
+            r#"INSERT OR REPLACE INTO reminder_tokens (token, vault_id, owner, created_at)
+               VALUES (?1, ?2, ?3, ?4)"#,
+            params![token, vault_id, owner, chrono::Utc::now().to_rfc3339()],
+        );
+    }
+
+    pub fn generate_reminder_token(&self, vault_id: &str, owner: &str) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        self.store_reminder_token(&token, vault_id, owner);
+        token
+    }
+
+    pub fn resolve_reminder_token(&self, token: &str) -> Result<(String, String), String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT vault_id, owner FROM reminder_tokens WHERE token = ?1",
+            params![token],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "invalid or expired reminder token".to_string())
+    }
+
+    pub fn generate_reminder_url(&self, vault_id: &str, owner: &str, base_url: &str) -> String {
+        let token = self.generate_reminder_token(vault_id, owner);
+        format!("{base_url}/reminders/check-in?token={token}")
+    }
+
     // ── Audit Log persistence (#961) ─────────────────────────────────────────
 
     pub fn insert_audit_log(&self, entry: &AuditLogEntry) -> Result<(), rusqlite::Error> {
@@ -1172,6 +1237,109 @@ impl Db {
             params![cutoff],
         )?;
         Ok(count as u64)
+    }
+
+    /// Audit-log entries for release-related requests against a given vault
+    /// (e.g. POST /api/vaults/{id}/sponsored-release, GET .../simulate-release)
+    /// — Issue #1173.
+    pub fn get_vault_release_audit_logs(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<crate::models::AuditLogEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%/vaults/{}/%release%", vault_id);
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, user_id, action, resource, result, ip_address, details
+             FROM audit_logs WHERE resource LIKE ?1 ORDER BY timestamp DESC",
+        )?;
+        let rows = stmt.query_map(params![pattern], |r| {
+            let timestamp_str: String = r.get(1)?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+                })?;
+            let details_str: Option<String> = r.get(7)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+            Ok(crate::models::AuditLogEntry {
+                id: r.get(0)?,
+                timestamp,
+                user_id: r.get(2)?,
+                action: r.get(3)?,
+                resource: r.get(4)?,
+                result: r.get(5)?,
+                ip_address: r.get(6)?,
+                details,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // ── Refresh token rotation (Issue #1177) ─────────────────────────────────
+
+    pub fn insert_refresh_token(
+        &self,
+        jti: &str,
+        family_id: &str,
+        sub: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO refresh_tokens (jti, family_id, sub, created_at, expires_at, revoked_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, NULL)"#,
+            params![
+                jti,
+                family_id,
+                sub,
+                chrono::Utc::now().to_rfc3339(),
+                expires_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns (family_id, sub, revoked) for a refresh token, or None if it
+    /// was never issued (unknown / already garbage-collected).
+    pub fn get_refresh_token(
+        &self,
+        jti: &str,
+    ) -> Result<Option<(String, String, bool)>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT family_id, sub, revoked_at FROM refresh_tokens WHERE jti = ?1",
+        )?;
+        let row = stmt.query_row(params![jti], |r| {
+            let revoked_at: Option<String> = r.get(2)?;
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, revoked_at.is_some()))
+        });
+        match row {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn revoke_refresh_token(&self, jti: &str) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE refresh_tokens SET revoked_at = ?1 WHERE jti = ?2 AND revoked_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), jti],
+        )?;
+        Ok(())
+    }
+
+    /// Revokes every token in a rotation family — used when a refresh token
+    /// that was already rotated out gets presented again, which indicates
+    /// the token may have been stolen and replayed.
+    pub fn revoke_refresh_token_family(&self, family_id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE refresh_tokens SET revoked_at = ?1 WHERE family_id = ?2 AND revoked_at IS NULL",
+            params![chrono::Utc::now().to_rfc3339(), family_id],
+        )?;
+        Ok(())
     }
 
     // ── Sponsored Release tracking (#1122) ───────────────────────────────────

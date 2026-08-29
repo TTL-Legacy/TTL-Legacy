@@ -13,7 +13,7 @@ use tracing::instrument;
 
 use crate::{
     audit,
-    db::Db,
+    db::{AppState, Db},
     error::AppError,
     handlers::{
         claim_vesting_bonus_handler,
@@ -22,15 +22,15 @@ use crate::{
         simulate_release_handler,
     },
     models::{
+        AuditLogEntry,
         ClaimBonusRequest,
         ReminderPreferences,
         SetPreferencesRequest,
         SetSubscriptionRequest,
-        SetWithdrawalAlertPrefsRequest,
         SimulateReleaseQuery,
         SimulateReleaseResponse,
         Subscription,
-        WithdrawalAlertPreferences,
+        VaultReleaseHistory,
     },
 };
 
@@ -142,6 +142,33 @@ pub async fn unsubscribe(
         )),
         Err(_) => Err(AppError::InvalidInput(
             "Invalid or expired unsubscribe token".into(),
+        )),
+    }
+}
+
+// ── Token-based reminder check-in endpoint (#1286) ──────────────────────────
+
+#[derive(Deserialize)]
+pub struct ReminderTokenQuery {
+    pub token: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ResolveReminderTokenResponse {
+    pub vault_id: String,
+    pub owner: String,
+}
+
+#[instrument(skip(state))]
+pub async fn resolve_reminder_token(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ReminderTokenQuery>,
+) -> Result<Json<ResolveReminderTokenResponse>, AppError> {
+    let db = &state.db;
+    match db.resolve_reminder_token(&query.token) {
+        Ok((vault_id, owner)) => Ok(Json(ResolveReminderTokenResponse { vault_id, owner })),
+        Err(_) => Err(AppError::InvalidInput(
+            "Invalid or expired reminder token".into(),
         )),
     }
 }
@@ -275,62 +302,77 @@ pub async fn get_vesting_bonus(
     Ok(Json(result))
 }
 
-// ── Withdrawal Alert Preferences endpoints ────────────────────────────────────
+// ── Notification subscriptions (email/SMS/webhook channels) ─────────────────
+// Referenced from main.rs's router table but previously never implemented —
+// filled in as part of Issue #1174 (idempotency-key support for reminder
+// endpoints), which needs a real POST handler to attach that support to.
 
-/// GET /api/vaults/:vault_id/withdrawal-alert-preferences
-///
-/// Returns the current withdrawal alert notification preferences for a vault.
-/// Defaults to both email and push disabled when no record exists.
-#[instrument(skip(state), fields(vault_id = %vault_id))]
-pub async fn get_withdrawal_alert_prefs(
+#[instrument(skip(state, headers), fields(vault_id = %vault_id))]
+pub async fn set_subscription(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<u64>,
-) -> Result<Json<WithdrawalAlertPreferences>, AppError> {
-    let prefs = state
-        .db
-        .get_withdrawal_alert_prefs(vault_id)?
-        .unwrap_or_else(|| WithdrawalAlertPreferences {
-            vault_id,
-            owner: String::new(),
-            email_enabled: false,
-            push_enabled: false,
-        });
-    Ok(Json(prefs))
-}
-
-/// PUT /api/vaults/:vault_id/withdrawal-alert-preferences
-///
-/// Create or replace withdrawal alert notification preferences for a vault.
-/// Owners can independently opt in to email alerts, push alerts, or both.
-#[instrument(skip(state), fields(vault_id = %vault_id))]
-pub async fn set_withdrawal_alert_prefs(
-    State(state): State<Arc<AppState>>,
-    Path(vault_id): Path<u64>,
-    Json(body): Json<SetWithdrawalAlertPrefsRequest>,
-) -> Result<(StatusCode, Json<WithdrawalAlertPreferences>), AppError> {
-    if body.owner.is_empty() {
-        return Err(AppError::InvalidInput("owner must not be empty".into()));
+    headers: HeaderMap,
+    Json(body): Json<SetSubscriptionRequest>,
+) -> Result<(StatusCode, Json<Subscription>), AppError> {
+    let db = &state.db;
+    if body.channels.is_empty() {
+        return Err(AppError::InvalidInput("channels must not be empty".into()));
     }
 
-    let prefs = WithdrawalAlertPreferences {
+    // Issue #1174: idempotency-key support, mirroring set_preferences (#825)
+    // exactly so retried/duplicated subscription requests (email or SMS
+    // channel changes) can't double-apply.
+    if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
+        if let Some(cached) = db.check_idempotency(idem_key) {
+            let cached_sub: Subscription = serde_json::from_str(&cached.response_body).unwrap();
+            return Ok((StatusCode::OK, Json(cached_sub)));
+        }
+    }
+
+    let sub = Subscription {
         vault_id,
         owner: body.owner,
-        email_enabled: body.email_enabled,
-        push_enabled: body.push_enabled,
+        channels: body.channels,
+        frequency: body.frequency,
     };
+    db.upsert_subscription(&sub)?;
 
-    state.db.upsert_withdrawal_alert_prefs(&prefs)?;
-    Ok((StatusCode::OK, Json(prefs)))
+    if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
+        let body_json = serde_json::to_string(&sub).unwrap();
+        db.store_idempotency(idem_key, 200, &body_json);
+    }
+
+    Ok((StatusCode::OK, Json(sub)))
 }
 
-/// DELETE /api/vaults/:vault_id/withdrawal-alert-preferences
-///
-/// Remove withdrawal alert preferences for a vault (opt-out of all alerts).
 #[instrument(skip(state), fields(vault_id = %vault_id))]
-pub async fn delete_withdrawal_alert_prefs(
+pub async fn delete_subscription(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<u64>,
 ) -> Result<StatusCode, AppError> {
-    state.db.delete_withdrawal_alert_prefs(vault_id)?;
+    state.db.delete_subscription(vault_id)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Vault release history (Issue #1173) ──────────────────────────────────────
+
+/// GET /api/vaults/:vault_id/release-history
+/// Combines audit-logged requests against this vault's release-related
+/// endpoints with its recorded sponsored-release attempts/completions, so
+/// beneficiaries and auditors don't have to parse Stellar transaction
+/// history by hand to answer "what release activity has happened here."
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_vault_release_history(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<VaultReleaseHistory>, AppError> {
+    let db = &state.db;
+    let audit_entries: Vec<AuditLogEntry> = db.get_vault_release_audit_logs(&vault_id)?;
+    let sponsored_releases = db.list_sponsored_releases_for_vault(&vault_id)?;
+
+    Ok(Json(VaultReleaseHistory {
+        vault_id,
+        audit_entries,
+        sponsored_releases,
+    }))
 }
