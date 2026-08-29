@@ -22,12 +22,28 @@ class CheckInSyncWorker @AssistedInject constructor(
         val pending = dao.getAll()
         if (pending.isEmpty()) return Result.success()
 
+        // Warn about items that may have already expired before we can submit them.
+        val nowMillis = System.currentTimeMillis()
+        val expired = pending.filter { it.ttlExpiresAt > 0 && it.ttlExpiresAt < nowMillis }
+        if (expired.isNotEmpty()) {
+            notificationHelper.notifyExpiredCheckInsInQueue(
+                vaultIds = expired.map { it.vaultId }
+            )
+        }
+
         var hasNetworkFailure = false
         for (item in pending) {
-            when (apiClient.checkIn(item.vaultId)) {
-                is ApiResult.Success -> dao.delete(item)
+            when (val result = apiClient.checkIn(item.vaultId)) {
+                is ApiResult.Success -> {
+                    dao.delete(item)
+                    notificationHelper.notifyCheckInSyncSuccess(item.vaultId)
+                }
                 ApiResult.NetworkUnavailable -> hasNetworkFailure = true
-                is ApiResult.Error -> dao.delete(item)
+                is ApiResult.Error -> {
+                    // Remove from queue even on error — prevent infinite retry loops.
+                    // The server-side response will reflect the true vault state.
+                    dao.delete(item)
+                }
             }
         }
 

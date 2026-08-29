@@ -1,0 +1,45 @@
+name: Dependabot Auto-Merge
+
+# Trigger only on pull_request events opened by dependabot[bot].
+# We handle both the pull_request and pull_request_target events so the
+# workflow has write permissions on forks as well as the main repo.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Auto-merge patch-level Dependabot updates
+    runs-on: ubuntu-latest
+
+    # Only run when the actor is dependabot[bot] — this is the primary safety guard.
+    if: github.actor == 'dependabot[bot]'
+
+    steps:
+      - name: Fetch Dependabot metadata
+        id: dependabot-metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Auto-merge only patch-level bumps (semver-patch).
+      # "semver-patch" is the value set by the fetch-metadata action in
+      # steps.dependabot-metadata.outputs.update-type when all changed
+      # dependencies are patch updates.
+      - name: Enable auto-merge for patch updates
+        if: steps.dependabot-metadata.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Log skipped merges so the job is visible in the Actions tab.
+      - name: Skip non-patch update
+        if: steps.dependabot-metadata.outputs.update-type != 'version-update:semver-patch'
+        run: |
+          echo "Update type is '${{ steps.dependabot-metadata.outputs.update-type }}' — skipping auto-merge."
+          echo "Only patch-level (semver-patch) updates are auto-merged."

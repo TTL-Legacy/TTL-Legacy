@@ -40,6 +40,10 @@ csv = "1"
 # SQLite used by the axum DB contract (Db::open/migrate/upsert/get/all)
 rusqlite = { version = "0.33", features = ["bundled"] }
 
+# Versioned schema migrations (Issue #1176) — runs migrations/*.sql against
+# the same SQLite file the rusqlite-based Db above queries at runtime.
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+
 # Push notifications (FCM via HTTP v1 API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
@@ -48,6 +52,10 @@ jsonwebtoken = "9"
 
 # Distributed cache for multi-node consensus checks
 redis = "0.27"
+
+# Recovery code generation and hashing
+rand = "0.8"
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"

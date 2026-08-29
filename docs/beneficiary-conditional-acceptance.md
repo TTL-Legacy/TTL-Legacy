@@ -215,9 +215,41 @@ client.create_vault(&owner, &beneficiary, &interval, &None);
 
 If `owner == beneficiary`, the contract returns `ContractError::InvalidBeneficiary`.
 
+## Interacting with Decline Threshold (Issue #503)
+
+Beneficiaries can both **accept** and **decline** with thresholds on the same vault:
+
+- `accept_with_threshold(min)`: Sets minimum balance required for release. If `balance < min`, release **fails**.
+- `decline_with_threshold(max, reason)`: Signals unwillingness to accept if `balance < max`. Release proceeds regardless.
+
+These are **independent** mechanisms:
+- Acceptance threshold **blocks** release if not met
+- Decline threshold is purely **informational**
+
+**Example Workflow**:
+```rust
+// Beneficiary accepts if balance >= 100,000
+client.accept_with_threshold(&vault_id, &100_000i128)?;
+
+// Beneficiary signals they'd prefer >= 500,000
+client.decline_with_threshold(
+    &vault_id,
+    &500_000i128,
+    &String::from_str(&env, "Vault is smaller than expected")
+)?;
+
+// After expiry:
+// - If balance < 100,000: release fails (acceptance not met)
+// - If 100,000 <= balance < 500,000: release succeeds, but decline signal is active (owner notified)
+// - If balance >= 500,000: release succeeds, decline signal is inactive
+```
+
+See [Beneficiary Conditional Decline with Threshold](beneficiary-conditional-decline.md) for details.
+
 ## Future Enhancements
 
 - Allow beneficiary to update threshold before release
 - Support multiple threshold conditions (e.g., min AND max balance)
 - Time-based threshold adjustments (e.g., threshold decreases over time)
 - Conditional acceptance with custom logic (e.g., threshold based on token price)
+- Integrated decline escalation (auto-route to alternative recipient if beneficiary declines)

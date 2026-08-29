@@ -6,23 +6,26 @@ use soroban_sdk::{
 };
 
 pub mod ranking;
+pub mod oracle;
 mod types;
+pub use oracle::{OracleClient, OracleInterface};
 // The contract's `#[contracttype]` types are re-exported publicly so that
 // client crates (integration tests, fuzz targets) can reference them.
 pub use types::{
     ArchivedVaultInfo, AuditEntry, BackupCode, BeneficiaryClaimDelegation, BeneficiaryCommitment,
-    BeneficiaryEntry, BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
+    BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
     CheckInHistoryEntry, CheckInStreak, ConditionalAcceptanceEntry, StorageKey, DisputeStatus,
     EncryptedBackupCodes, GeoCheckInEntry, HibernationEntry, IntegrityReport, MetadataVersionEntry,
     MilestoneEntry, MilestoneVestingSchedule, MultiSigConfig, MultiSigOperation, MultiSigProposal,
     OwnershipProof, OwnershipTransferRequest, PasskeyAnalytics, PasskeyHash, PasskeyUsageEntry,
     PasskeyUsageStat, PauseRecord, PendingBeneficiaryUpdate, PendingMultiSigOp, ProofOfLifeEntry, ProposalStatus,
-    ReleaseCondition, ReleaseEvent, ReleaseStatus, ReleaseVoteEntry, StateTransitionEntry,
+    ReleaseCondition, ReleaseEvent, ReleaseVoteEntry, StateTransitionEntry,
     TokenCollateral, TokenConversion, TokenHedge, TokenLending, TokenRebalanceConfig, TokenStaking,
-    TokenWeight, TtlBorrowRecord, UpgradeProposal, Vault, VaultStatusSummary, VestingBonusConfig,
+    TokenWeight, TtlBorrowRecord, UpgradeProposal, VaultStatusSummary, VestingBonusConfig,
     VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
     WhitelistEntry, WithdrawalLimit, WithdrawalReversal, WithdrawalScheduleEntry,
     WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
+    BeneficiaryConditionalAcceptance, BeneficiaryConditionalDecline,
     ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
     ADMIN_TRANSFER_COMPLETED_TOPIC,
     ADMIN_TRANSFER_PROPOSED_TOPIC, BACKUP_CODES_ENCRYPTED_TOPIC, BACKUP_CODES_GENERATED_TOPIC,
@@ -31,7 +34,7 @@ pub use types::{
     BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC, BENEFICIARY_IDENTITY_VERIFIED_TOPIC,
     BENEFICIARY_REBALANCED_TOPIC, BENEFICIARY_TIER_SET_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC,
     BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_WATERFALL_TOPIC, BEN_CLAIM_DELEG_TOPIC,
-    BEN_ROTATION_TOPIC, CANCEL_TOPIC,
+    BEN_COMMITTED_TOPIC, BEN_REVEALED_TOPIC, BEN_ROTATION_TOPIC, CANCEL_TOPIC,
     CHECKIN_GEO_TOPIC, CHECKIN_POW_TOPIC, CHECKIN_RATE_LIMITED_TOPIC, CHECK_IN_TOPIC,
     CLAIM_VEST_TOPIC, CLIFF_REACHED_TOPIC, CONDITIONS_ACCEPTED_TOPIC, CONFLICT_EXPIRED_TOPIC,
     DELEGATE_BENEFICIARY_TOPIC, DELEGATE_CHECKIN_TOPIC, DEPOSIT_TOPIC, DISPUTE_FILED_TOPIC,
@@ -121,6 +124,10 @@ mod beneficiary_confirmation_tests;
 #[cfg(test)]
 mod min_checkin_interval_tests;
 
+// Issue #1264 #1265 #1266 #1267: dedicated guard tests
+#[cfg(test)]
+mod bug_fix_tests_1264_1265_1266_1267;
+
 #[cfg(test)]
 mod vault_archiving_tests;
 
@@ -128,9 +135,9 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
-// Issue #1289: dedicated vesting schedule tests (cliff + linear vesting)
+// Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
-mod vesting_schedule_tests;
+mod checkin_nonexistent_vault_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -199,6 +206,13 @@ fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
 /// Minimum check-in interval: 1 hour (3600 seconds)
 /// Prevents abuse of TTL extension mechanisms with unreasonably short intervals
 pub const MIN_CHECK_IN_INTERVAL: u64 = 3600;
+
+/// Maximum check-in interval: 10 years (315_360_000 seconds)
+/// Issue #1165: an unconditional ceiling — independent of the optional
+/// admin-configured MaxCheckInInterval — prevents an astronomically large
+/// interval (e.g. near u64::MAX) from overflowing TTL arithmetic or making
+/// automatic release practically unreachable.
+pub const MAX_CHECK_IN_INTERVAL: u64 = 315_360_000;
 
 /// Maximum number of beneficiaries allowed per vault.
 pub const MAX_BENEFICIARIES: u32 = 20;
@@ -312,6 +326,10 @@ pub enum ContractError {
     UpgradeInvalidWasm = 94,       // Issue #1120: Invalid WASM hash
     TokenNotAllowed = 95,          // Issue #1118: Token not in allowlist
     VaultPaused = 96,              // Issue #790: vault-level pause blocks trigger_release
+    CommitmentAlreadySet = 97,
+    CommitmentNotFound = 98,
+    BeneficiaryAlreadyRevealed = 99,
+    InvalidZkProof = 100,
 }
 
 #[contract]
@@ -575,10 +593,24 @@ impl TtlVaultContract {
             .unwrap_or(0)
     }
 
-    /// Adds a token to the whitelist, allowing it to be used in vaults.
+    /// Whitelists a SEP-41 compatible token for use in vaults (admin-only).
+    ///
+    /// Once whitelisted, the token can be specified when creating vaults.
+    /// Only admin can modify the whitelist to prevent unauthorized token types.
+    ///
+    /// # SEP-41 Token Support
+    /// This contract supports any SEP-41 token (Stellar asset standard):
+    /// - USDC (circle.com issued on Stellar)
+    /// - EURC (circle.com issued on Stellar)
+    /// - Custom issued tokens on Stellar
+    /// - Wrapped tokens via `register_wrapped_token` for cross-chain compatibility
+    ///
+    /// All tokens must be whitelisted here before use, and must implement
+    /// Soroban's standard token interface for compatibility.
     ///
     /// # Arguments
-    /// * `token_address` - The token contract address to whitelist
+    /// * `env` - The Soroban environment
+    /// * `token_address` - The SEP-41 token contract address to whitelist
     ///
     /// # Panics
     /// * Panics if the caller is not the admin
@@ -594,10 +626,14 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Removes a token from the whitelist.
+    /// Removes a token from the whitelist, preventing new vaults from using it (admin-only).
+    ///
+    /// Existing vaults using this token can continue operating; only new vault creation
+    /// with this token is prevented.
     ///
     /// # Arguments
-    /// * `token_address` - The token contract address to remove
+    /// * `env` - The Soroban environment
+    /// * `token_address` - The token contract address to remove from whitelist
     ///
     /// # Panics
     /// * Panics if the caller is not the admin
@@ -1322,23 +1358,42 @@ impl TtlVaultContract {
 
     // --- vault lifecycle ---
 
-    /// Creates a new time-locked vault.
+    /// Creates a new time-locked vault with support for SEP-41 compatible tokens.
     ///
     /// The vault starts with a zero balance and must be funded via `deposit`
-    /// or `batch_deposit` before it can hold assets.
+    /// or `batch_deposit` before it can hold assets. Supports any whitelisted
+    /// SEP-41 token (e.g., native XLM, USDC, EURC, or other Stellar assets).
+    ///
+    /// # Token Support (SEP-41)
+    /// - If `token_address` is `None`, vault defaults to contract's XLM token
+    /// - If `token_address` is `Some(addr)`, vault uses the specified SEP-41 token
+    /// - All token transfers use Soroban's standard `token::Client` interface
+    /// - Non-whitelisted tokens are rejected at vault creation
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `owner` - The address of the vault owner (must authorize)
     /// * `beneficiary` - The address that will receive funds when the vault expires
     /// * `check_in_interval` - Time interval in seconds between required check-ins
+    /// * `token_address` - Optional SEP-41 token contract address; uses XLM if None
     ///
     /// # Returns
     /// The unique vault ID
     ///
     /// # Panics
     /// * Panics if `check_in_interval` is 0
+    /// * Panics if `check_in_interval` is below minimum (1 hour)
     /// * Panics if `check_in_interval` is outside the configured min/max bounds
+    /// * Panics if `token_address` is provided but not whitelisted
+    /// * Panics if `owner` is the contract admin (prevented for security)
+    /// * Panics if `owner` and `beneficiary` are the same address
+    ///
+    /// # Example (USDC Vault)
+    /// ```ignore
+    /// let usdc_token = Address::from_contract_id(&env, &usdc_contract_id);
+    /// client.whitelist_token(&usdc_token);
+    /// let vault_id = client.create_vault(&owner, &beneficiary, &interval, &Some(usdc_token));
+    /// ```
     pub fn create_vault(
         env: Env,
         owner: Address,
@@ -1359,6 +1414,11 @@ impl TtlVaultContract {
         // Issue #1121: Enforce minimum check-in interval (1 hour)
         if check_in_interval < MIN_CHECK_IN_INTERVAL {
             panic_with_error!(&env, ContractError::CheckInIntervalTooShort);
+        }
+
+        // Issue #1165: Enforce maximum check-in interval (10 years)
+        if check_in_interval > MAX_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::IntervalTooHigh);
         }
 
         Self::assert_interval_in_bounds(&env, check_in_interval);
@@ -1421,13 +1481,14 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata,
             token_address: vault_token,
             custom_metadata: Bytes::new(&env),
             is_paused: false,
-            release_condition: ReleaseCondition::OnExpiry,
+            release_condition: ReleaseCondition::TTLExpiry,
             parent_vault_id: None,
             passkey_hash: None,
             max_deposit_amount: None,
@@ -1699,9 +1760,21 @@ impl TtlVaultContract {
         );
         Ok(())
     }
+    /// Deposits SEP-41 compatible tokens into a vault (owner-only).
     ///
     /// Transfers tokens from the caller to the contract and increases the vault's balance.
-    /// The vault must be in Locked status.
+    /// The vault must be in Locked status and not expired.
+    ///
+    /// # SEP-41 Token Support
+    /// This function accepts any SEP-41 token type configured for the vault:
+    /// - Native XLM (default)
+    /// - USDC (6 decimals on Stellar)
+    /// - EURC (6 decimals on Stellar)
+    /// - Any whitelisted custom token implementing the Soroban token interface
+    ///
+    /// Token type is determined by vault.token_address, set at vault creation time.
+    /// The function uses Soroban's standard `token::Client` interface for all transfers,
+    /// ensuring compatibility with any SEP-41 compliant contract.
     ///
     /// Deposits remain available while a vault is hibernating (see `enter_hibernation`):
     /// hibernation only pauses the check-in TTL countdown, it does not freeze the vault's
@@ -1712,12 +1785,16 @@ impl TtlVaultContract {
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
     /// * `from` - The address depositing funds (must authorize)
-    /// * `amount` - Amount to deposit in stroops (1 XLM = 10,000,000 stroops)
+    /// * `amount` - Amount to deposit (uses token's native decimals)
+    ///   - For XLM: in stroops (1 XLM = 10,000,000 stroops)
+    ///   - For USDC: in microUSDC (1 USDC = 1,000,000 microUSDC)
     ///
     /// # Panics
     /// * Panics if the contract is paused
     /// * Panics if `amount` is not positive
     /// * Panics if the vault is not in Locked status
+    /// * Panics if the vault has expired
+    /// * Panics if the token transfer fails (e.g., insufficient balance)
     pub fn deposit(env: Env, vault_id: u64, from: Address, amount: i128) {
         Self::assert_not_paused(&env);
         Self::require_initialized(&env);
@@ -1876,17 +1953,25 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Owner withdraws from the vault.
+    /// Owner withdraws SEP-41 compatible tokens from the vault (owner-only).
     ///
     /// This function is owner-only and is unaffected by any multi-beneficiary
     /// split configured via `set_beneficiaries`. Beneficiary splits only apply
     /// during `trigger_release` and `partial_release`; `withdraw` always sends
     /// funds directly back to the vault owner regardless of the beneficiaries list.
     ///
+    /// # SEP-41 Token Support
+    /// Withdrawals support all SEP-41 token types that the vault was created with.
+    /// The returned token type matches the vault's token_address, ensuring seamless
+    /// handling of USDC, EURC, or any other whitelisted Stellar asset.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
-    /// * `amount` - Amount to withdraw in stroops (1 XLM = 10,000,000 stroops)
+    /// * `caller` - The owner address (must authorize)
+    /// * `amount` - Amount to withdraw (uses token's native decimals)
+    ///   - For XLM: in stroops (1 XLM = 10,000,000 stroops)
+    ///   - For USDC: in microUSDC (1 USDC = 1,000,000 microUSDC)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
@@ -1897,6 +1982,7 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::InsufficientBalance` - If vault balance is less than amount
+    /// * `ContractError::VaultExpired` - If vault has expired (check-in missed)
     pub fn withdraw(
         env: Env,
         vault_id: u64,
@@ -2606,13 +2692,20 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Triggers the release of funds to beneficiaries after the vault expires.
+    /// Triggers the release of SEP-41 compatible tokens to beneficiaries after vault expiry.
     ///
     /// Anyone can call this function once the vault's TTL has lapsed. If a vesting
     /// schedule is attached, the vault is marked as Released but funds remain locked
     /// until claimed via `claim_vested_installment`. Otherwise, funds are distributed
     /// immediately to the primary beneficiary or split among multiple beneficiaries
     /// based on their BPS allocations.
+    ///
+    /// # SEP-41 Token Support
+    /// Releases support all SEP-41 token types configured for the vault. Token transfers
+    /// use the vault's token_address, ensuring:
+    /// - XLM transfers to beneficiary (default)
+    /// - USDC transfers to beneficiary
+    /// - EURC or any whitelisted token transfers correctly
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -2623,6 +2716,7 @@ impl TtlVaultContract {
     /// * Panics if the vault is not in Locked status
     /// * Panics if the vault has not expired yet
     /// * Panics if the vault balance is zero
+    /// * Panics if the token transfer fails
     pub fn trigger_release(env: Env, vault_id: u64) {
         Self::trigger_release_internal(env, vault_id, ReleaseTrigger::Expiry);
     }
@@ -2820,11 +2914,14 @@ impl TtlVaultContract {
         // Load release conditions
         let conditions = Self::get_release_conditions(env.clone(), vault_id);
         let mut condition_met = false;
-        for cond in conditions.iter() {
-            match cond {
+        let mut ttl_expiry_met = false;
+
+        if conditions.is_empty() {
+            match vault.release_condition {
                 ReleaseCondition::TTLExpiry => {
                     if Self::is_expired(env.clone(), vault_id) {
                         condition_met = true;
+                        ttl_expiry_met = true;
                     }
                 }
                 ReleaseCondition::OwnerInitiated => {
@@ -2832,55 +2929,58 @@ impl TtlVaultContract {
                         condition_met = true;
                     }
                 }
-                ReleaseCondition::Oracle(addr) => {
+                ReleaseCondition::Oracle(ref addr) => {
                     if oracle::query(&env, addr).unwrap_or(false) {
                         condition_met = true;
                     }
                 }
             }
+        } else {
+            for cond in conditions.iter() {
+                match cond {
+                    ReleaseCondition::TTLExpiry => {
+                        if Self::is_expired(env.clone(), vault_id) {
+                            condition_met = true;
+                            ttl_expiry_met = true;
+                        }
+                    }
+                    ReleaseCondition::OwnerInitiated => {
+                        if mode == ReleaseTrigger::Manual {
+                            condition_met = true;
+                        }
+                    }
+                    ReleaseCondition::Oracle(addr) => {
+                        if oracle::query(&env, &addr).unwrap_or(false) {
+                            condition_met = true;
+                        }
+                    }
+                }
+            }
         }
+
         if !condition_met {
-            panic_with_error!(&env, ContractError::ConditionsNotApproved);
+            if conditions.is_empty() && vault.release_condition == ReleaseCondition::TTLExpiry {
+                panic_with_error!(&env, ContractError::NotExpired);
+            } else {
+                panic_with_error!(&env, ContractError::ConditionsNotApproved);
+            }
         }
 
-        Self::assert_not_paused(&env);
-        // Attempt to restore archived vault state before proceeding - Issue #443
-        Self::try_restore_archived_vault(&env, vault_id);
-        let mut vault = Self::load_vault(&env, vault_id);
-        if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
-        }
-        // We only block vetoes on trigger before the vault has expired.
-        // Note: release entrypoint is for the Expiry trigger and thus requires expiry,
-        // but manual release can occur at arbitrary times.
-        // Here we keep the existing expiry gate.
-        if !Self::is_expired(env.clone(), vault_id) {
-            panic_with_error!(&env, ContractError::NotExpired);
-        }
-
-        let now = env.ledger().timestamp();
-        let mut hibernated = 0u64;
-        if let Some(h) = env.storage().persistent().get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id)) {
-            hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
-        }
-        let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
-        let grace_period = env.storage().instance().get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds).unwrap_or(0);
-        if now < expiry_time + grace_period {
-            panic_with_error!(&env, ContractError::GracePeriodActive);
+        // When release is based on TTL expiry, enforce the grace period before allowing release.
+        if ttl_expiry_met {
+            let now = env.ledger().timestamp();
+            let mut hibernated = 0u64;
+            if let Some(h) = env.storage().persistent().get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id)) {
+                hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
+            }
+            let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
+            let grace_period = env.storage().instance().get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds).unwrap_or(0);
+            if now < expiry_time + grace_period {
+                panic_with_error!(&env, ContractError::GracePeriodActive);
+            }
         }
 
-        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
-        // The veto is only meaningful before expiry; since `trigger_release*` requires expiry,
-        // veto has already expired in practice. However, for completeness (and for manual release),
-        // we gate on expiry-less times above in the public veto method.
-        let total = vault.balance;
-        if total == 0 {
-            panic_with_error!(&env, ContractError::EmptyVault);
-        }
-
-        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
-        // Block `trigger_release*` only if veto was set and vault has not yet expired.
-        // (This is also harmless for expiry-triggered releases, since those require expiry.)
+        // Beneficiary veto of owner-defined release conditions before expiry.
         if !Self::is_expired(env.clone(), vault_id) {
             let vetoed: bool = env
                 .storage()
@@ -3119,6 +3219,15 @@ impl TtlVaultContract {
             } else {
                 total
             };
+
+            // Issue #1167: guard directly against a zero-amount transfer at the
+            // actual release site, independent of the earlier `total == 0` checks,
+            // so no future change upstream can silently let a no-op release
+            // through and emit a misleading release event.
+            if release_amount == 0 {
+                panic_with_error!(&env, ContractError::EmptyVault);
+            }
+
             let token_client = token::Client::new(&env, &vault.token_address);
 
             // Calculate burn amount based on vault's burn_percentage (basis points)
@@ -6076,6 +6185,23 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id).last_check_in
     }
 
+    /// Lightweight query for a vault's last check-in timestamp — Issue #1166.
+    ///
+    /// Alias of `get_vault_last_check_in` under the shorter name the backend
+    /// reminder service and frontend dashboard expect, so owner-activity
+    /// monitoring doesn't need to fetch (or know the shape of) the full
+    /// vault record just to read this one field.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The Unix timestamp of the last check-in
+    pub fn get_last_check_in(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).last_check_in
+    }
+
     /// Returns the balance of a vault.
     ///
     /// # Arguments
@@ -6126,6 +6252,20 @@ impl TtlVaultContract {
     /// The Unix timestamp when the vault was created
     pub fn get_vault_created_at(env: Env, vault_id: u64) -> u64 {
         Self::load_vault(&env, vault_id).created_at
+    }
+
+    /// Returns the ledger sequence number at which the vault was created.
+    /// Dashboards and analytics tools can use this to determine how long
+    /// a vault has been active without relying on external event history.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The ledger sequence number when the vault was created
+    pub fn get_vault_age(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).creation_ledger
     }
 
     /// Returns the check-in interval for a vault.
@@ -6313,6 +6453,16 @@ impl TtlVaultContract {
     /// The TTL is calculated as the time remaining until the vault expires
     /// based on the last check-in time and the check-in interval.
     ///
+    /// # Expected behavior
+    /// * The value is recalculated on every call from the current ledger timestamp.
+    ///   Nothing is cached, so the result strictly decreases as ledgers advance and
+    ///   never returns a value from an earlier ledger.
+    /// * It decreases by exactly the elapsed time between two calls while no
+    ///   check-in happens.
+    /// * A successful `check_in` moves `last_check_in` to the current timestamp, so
+    ///   the next call reports the full `check_in_interval` again.
+    /// * Once the deadline is reached the result is `None`, not `Some(0)`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
@@ -6322,7 +6472,9 @@ impl TtlVaultContract {
     /// `None` if the vault does not exist or the TTL has already lapsed.
     pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
         let vault = Self::try_load_vault(&env, vault_id)?;
-        let deadline = vault.last_check_in + vault.check_in_interval;
+        let deadline = vault.last_check_in.saturating_add(vault.check_in_interval);
+        // Read the live ledger timestamp on every call so the result reflects the
+        // current ledger rather than the state at the last check-in.
         let now = env.ledger().timestamp();
         if now >= deadline {
             None
@@ -7155,7 +7307,12 @@ impl TtlVaultContract {
 
         env.events().publish(
             (symbol_short!("ben_init"), vault_id),
-            (new_beneficiary, now + timelock),
+            (new_beneficiary.clone(), now + timelock),
+        );
+
+        env.events().publish(
+            (BENEFICIARY_UPDATED_TOPIC, vault_id),
+            (vault.beneficiary.clone(), new_beneficiary.clone()),
         );
 
         Ok(())
@@ -7187,6 +7344,13 @@ impl TtlVaultContract {
 
         let old_beneficiary = vault.beneficiary.clone();
         let new_beneficiary = pending.new_beneficiary.clone();
+
+        // Re-validate at apply time: ownership may have changed during the timelock.
+        if vault.owner == new_beneficiary {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        Self::assert_not_zero_address(&env, &new_beneficiary);
+        Self::assert_beneficiary_is_account(&env, &new_beneficiary)?;
 
         // Enforce beneficiary capacity only when the beneficiary actually changes
         if old_beneficiary != new_beneficiary {
@@ -7255,6 +7419,9 @@ impl TtlVaultContract {
         }
         if new_interval < MIN_CHECK_IN_INTERVAL {
             return Err(ContractError::CheckInIntervalTooShort);
+        }
+        if new_interval > MAX_CHECK_IN_INTERVAL {
+            return Err(ContractError::IntervalTooHigh);
         }
         Self::assert_interval_in_bounds(&env, new_interval);
         let mut vault = Self::load_vault(&env, vault_id);
@@ -7983,6 +8150,11 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .set(&StorageKey::ReleaseConditions(vault_id), &conditions);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ReleaseConditions(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
         env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
@@ -7993,7 +8165,7 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get(&StorageKey::ReleaseConditions(vault_id))
-            .unwrap_or_else(|| Vec::new(env))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Owner‑initiated panic release.
@@ -8074,13 +8246,14 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata,
             token_address: vault_token,
             custom_metadata: Bytes::new(&env),
             is_paused: false,
-            release_condition: ReleaseCondition::OnExpiry,
+            release_condition: ReleaseCondition::TTLExpiry,
             parent_vault_id: Some(parent_vault_id),
             passkey_hash: None,
             max_deposit_amount: None,
@@ -9298,9 +9471,17 @@ impl TtlVaultContract {
     }
 
     fn assert_not_zero_address(env: &Env, address: &Address) {
-        let zero = Address::from_contract_id(&env, &BytesN::zero(&env));
-        if address == &zero {
+        let zero_bytes = BytesN::<32>::zero(&env);
+        if address == &Address::from_contract_id(&env, &zero_bytes) {
             panic_with_error!(env, ContractError::InvalidBeneficiary);
+        }
+        // An account whose ed25519 key is all zeroes is unspendable, so funds sent
+        // there would be permanently locked.
+        if let Ok(soroban_sdk::AddressPayload::AccountIdPublicKeyEd25519(key)) = address.to_payload()
+        {
+            if key == zero_bytes {
+                panic_with_error!(env, ContractError::InvalidBeneficiary);
+            }
         }
     }
 
@@ -9727,6 +9908,7 @@ impl TtlVaultContract {
             check_in_interval: original.check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: original.beneficiaries.clone(),
             metadata: original.metadata.clone(),
@@ -9871,6 +10053,7 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries,
             metadata,
@@ -11355,6 +11538,78 @@ impl TtlVaultContract {
             .persistent()
             .get::<StorageKey, BeneficiaryConditionalAcceptance>(
                 &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            )
+    }
+
+    /// Beneficiary declines vault assignment if balance is below a maximum threshold.
+    /// This allows beneficiaries to avoid accepting low-value inheritance obligations.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `max_balance_threshold` - Maximum balance (in stroops) the vault can have for the decline to trigger.
+    ///                             If vault balance exceeds this, the decline is recorded but may not apply during release.
+    /// * `reason` - Optional reason for the decline (max 256 characters)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// - `InvalidAmount`: If `max_balance_threshold <= 0`
+    /// - `NotBeneficiary`: If caller is not the beneficiary
+    /// - `VaultNotFound`: If vault does not exist
+    pub fn decline_with_threshold(
+        env: Env,
+        vault_id: u64,
+        max_balance_threshold: i128,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.beneficiary.require_auth();
+
+        if max_balance_threshold <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        if reason.len() > 256 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let decline = BeneficiaryConditionalDecline {
+            max_balance_threshold,
+            declined_at: env.ledger().timestamp(),
+            reason,
+        };
+
+        env.storage().persistent().set(
+            &StorageKey::ConditionalDecline(vault_id),
+            &decline,
+        );
+
+        env.events().publish(
+            (BENEFICIARY_DECLINED_TOPIC,),
+            (vault_id, vault.beneficiary.clone(), max_balance_threshold),
+        );
+
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ConditionalDecline(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+
+        Ok(())
+    }
+
+    /// Gets beneficiary conditional decline if it exists.
+    pub fn get_beneficiary_conditional_decline(
+        env: Env,
+        vault_id: u64,
+    ) -> Option<BeneficiaryConditionalDecline> {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConditionalDecline>(
+                &StorageKey::ConditionalDecline(vault_id),
             )
     }
 

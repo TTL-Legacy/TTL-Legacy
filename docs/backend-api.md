@@ -528,3 +528,76 @@ For issues or questions:
 
 - **GitHub Issues**: https://github.com/TTL-Legacy/TTL-Legacy/issues
 - **Documentation**: https://github.com/TTL-Legacy/TTL-Legacy/blob/main/docs/
+
+---
+
+## Request Input Sanitization (Issue #1199)
+
+All **mutating** endpoints (`POST`, `PUT`, `PATCH`) with a `Content-Type: application/json`
+body are processed by a centralized sanitization middleware before reaching any route handler.
+The middleware enforces the following limits to prevent memory exhaustion and slow-regex attacks.
+
+### Limits
+
+| Constraint                         | Value     | HTTP Response                         |
+|------------------------------------|-----------|---------------------------------------|
+| Maximum request body size          | 64 KB     | `413 Payload Too Large`               |
+| Maximum string field length        | 512 chars | `400 Bad Request`                     |
+| Unexpected top-level JSON fields   | rejected  | `400 Bad Request`                     |
+
+### Error Response Format
+
+All sanitization errors return a JSON body with a `code` and `message`:
+
+```json
+{
+  "code": "payload_too_large",
+  "message": "Request body exceeds the maximum allowed size of 65536 bytes"
+}
+```
+
+Possible `code` values:
+
+| Code                  | HTTP Status | Meaning                                     |
+|-----------------------|-------------|---------------------------------------------|
+| `payload_too_large`   | 413         | Body exceeds the 64 KB limit                |
+| `field_too_long`      | 400         | A string field value exceeds 512 characters |
+| `unexpected_field`    | 400         | An unrecognised top-level key was present   |
+
+### Examples
+
+**Oversized body (413)**:
+
+```bash
+# Generate a 70 KB JSON file
+python3 -c "import json; print(json.dumps({'note': 'x' * 70000}))" > big.json
+curl -X POST http://localhost:3000/api/vaults/1/reminder-preferences \
+  -H "Content-Type: application/json" \
+  --data @big.json
+# → 413 Payload Too Large
+```
+
+**Field too long (400)**:
+
+```bash
+curl -X POST http://localhost:3000/api/vaults/1/reminder-preferences \
+  -H "Content-Type: application/json" \
+  -d "{\"note\": \"$(python3 -c "print('a' * 600)")\"}"
+# → 400 Bad Request {"code":"field_too_long","message":"Field 'note' exceeds ..."}
+```
+
+**Unexpected field (400)**:
+
+```bash
+curl -X POST http://localhost:3000/api/vaults/1/reminder-preferences \
+  -H "Content-Type: application/json" \
+  -d '{"hack_field": "injected"}'
+# → 400 Bad Request {"code":"unexpected_field","message":"Unexpected field: 'hack_field'"}
+```
+
+### Implementation
+
+The middleware is in `backend/src/sanitization.rs`.
+It is registered globally as an Axum `Layer` in `backend/src/main.rs` and applies to **all** routes.
+`GET` / `DELETE` / `HEAD` requests and non-JSON content types are passed through without body inspection.
+

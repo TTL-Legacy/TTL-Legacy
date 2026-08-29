@@ -68,6 +68,10 @@ fn test_app_with_db(db: Arc<Db>) -> Router {
             "/notifications/unsubscribe",
             get(routes::unsubscribe),
         )
+        .route(
+            "/reminders/check-in",
+            get(routes::resolve_reminder_token),
+        )
         .with_state(state)
 }
 
@@ -380,6 +384,119 @@ async fn test_cors_rejected_origin() {
         Some(val) => assert_ne!(val, "http://evil.com"),
         None => {} // No header is also acceptable
     }
+}
+
+// ── Issue #1179: Hardened CORS tests ─────────────────────────────────────────
+
+/// Build a small test router with `build_cors_layer()` applied.
+/// `app_env` and `allowed_origins` are injected via environment variables.
+fn build_cors_test_app(app_env: &str, allowed_origins: &str) -> Router {
+    // Set env vars before building the layer; clear them after.
+    std::env::set_var("APP_ENV", app_env);
+    std::env::set_var("ALLOWED_ORIGINS", allowed_origins);
+    let cors = crate::build_cors_layer();
+    std::env::remove_var("APP_ENV");
+    std::env::remove_var("ALLOWED_ORIGINS");
+
+    let state = test_state(Arc::new(Db::open(":memory:").unwrap()));
+    Router::new()
+        .route("/health", get(health_handler))
+        .layer(cors)
+        .with_state(state)
+}
+
+/// With `APP_ENV=production` and a valid origin in the whitelist, the
+/// `access-control-allow-origin` header should reflect the allowed origin.
+#[tokio::test]
+async fn test_cors_hardened_allowed_origin() {
+    let app = build_cors_test_app("production", "http://allowed.example.com");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://allowed.example.com")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The allowed origin must appear in the response header.
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_some(),
+        "access-control-allow-origin must be present for an allowed origin"
+    );
+    assert_eq!(
+        allow_origin.unwrap(),
+        "http://allowed.example.com",
+        "access-control-allow-origin must match the allowed origin"
+    );
+}
+
+/// With `APP_ENV=production` and a disallowed origin, the
+/// `access-control-allow-origin` header must not reflect the disallowed origin.
+#[tokio::test]
+async fn test_cors_hardened_disallowed_origin() {
+    let app = build_cors_test_app("production", "http://allowed.example.com");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://evil.example.com")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    match allow_origin {
+        Some(val) => assert_ne!(
+            val, "http://evil.example.com",
+            "disallowed origin must not appear in access-control-allow-origin"
+        ),
+        None => {} // No header is also acceptable — origin was rejected.
+    }
+}
+
+/// With `APP_ENV=development`, the CORS layer should be permissive and allow
+/// cross-origin requests from any origin (wildcard or reflected).
+#[tokio::test]
+async fn test_cors_development_mode_allows_all() {
+    let app = build_cors_test_app("development", "");
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/health")
+                .header("origin", "http://any-origin.local")
+                .header("access-control-request-method", "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // In permissive mode, the response status must be 2xx (not blocked)
+    // and the allow-origin header must be present.
+    assert!(
+        res.status().is_success() || res.status().as_u16() == 204,
+        "dev CORS must not block preflight: got status {}",
+        res.status()
+    );
+    let allow_origin = res.headers().get("access-control-allow-origin");
+    assert!(
+        allow_origin.is_some(),
+        "access-control-allow-origin must be present in development mode"
+    );
 }
 
 // ── #824: Scheduler resilience tests ─────────────────────────────────────────
@@ -1699,4 +1816,73 @@ async fn test_get_vesting_bonus_not_configured() {
     assert!(!json["configured"].as_bool().unwrap());
     assert!(json["bonus_bps"].is_null());
     assert!(json["on_time_window_seconds"].is_null());
+}
+
+// ── #1286: Token-based reminder link security tests ─────────────────────────
+
+#[tokio::test]
+async fn test_resolve_reminder_token_success() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+    let token = db.generate_reminder_token("vault-999", "owner-alice");
+
+    let app = test_app_with_db(Arc::clone(&db));
+    let res = get_req(app, &format!("/reminders/check-in?token={token}")).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["vault_id"], "vault-999");
+    assert_eq!(json["owner"], "owner-alice");
+}
+
+#[tokio::test]
+async fn test_resolve_reminder_token_invalid() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let app = test_app_with_db(Arc::clone(&db));
+    let res = get_req(app, "/reminders/check-in?token=invalid_opaque_token").await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_reminder_email_does_not_contain_raw_vault_id() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+    let raw_vault_id = "sensitive-vault-secret-123";
+    let owner = "owner-bob";
+    let base_url = "https://app.ttllegacy.io";
+
+    let url = db.generate_reminder_url(raw_vault_id, owner, base_url);
+    assert!(!url.contains(raw_vault_id));
+    assert!(url.starts_with("https://app.ttllegacy.io/reminders/check-in?token="));
+
+    let fcm = Arc::new(crate::notifications::FcmClient::new("key".into(), "project".into()));
+    let svc = crate::notifications::NotificationService::new(
+        fcm,
+        crate::notifications::create_token_store(),
+        crate::notifications::create_prefs_store(),
+        crate::notifications::create_schedule_store(),
+        crate::notifications::create_delivery_store(),
+    );
+
+    let email_body = crate::templates::email_body(
+        &crate::models::NotificationType::CheckInReminder,
+        &Some(crate::models::Locale::En),
+        raw_vault_id,
+        None,
+    );
+    assert!(!email_body.contains(raw_vault_id));
+
+    let rendered = svc.render_reminder_email(
+        raw_vault_id,
+        owner,
+        "Check-In Reminder",
+        &email_body,
+        base_url,
+    );
+    assert!(!rendered.contains(raw_vault_id));
+    assert!(rendered.contains("Check in to your vault"));
+    assert!(rendered.contains("https://app.ttllegacy.io/reminders/check-in?token="));
 }
