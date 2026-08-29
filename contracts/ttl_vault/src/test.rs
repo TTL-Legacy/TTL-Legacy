@@ -3258,6 +3258,29 @@ fn test_security_reentrancy_protection() {
 }
 
 #[test]
+fn test_double_trigger_release_rejected() {
+    // Regression test for issue #1270: calling `trigger_release` a second
+    // time (e.g. two rapid calls before a caller observes the first result)
+    // must never transfer funds twice. The `ReleaseAttempted` guard is set
+    // before any external token transfer, so the second call must fail.
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &100u64, &Some(token_address.clone()));
+    client.deposit(&id, &owner, &100_000i128);
+
+    // Advance past expiry.
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    client.trigger_release(&id);
+    assert_eq!(client.get_vault(&id).balance, 0, "funds should be released once");
+
+    let result = client.try_trigger_release(&id);
+    assert!(result.is_err(), "second trigger_release call must be rejected");
+
+    // Balance must still reflect a single release, not a double payout.
+    assert_eq!(client.get_vault(&id).balance, 0);
+}
+
+#[test]
 fn test_security_integer_overflow_protection() {
     let (env, owner, beneficiary, _, token_address, client) = setup();
     
@@ -5625,6 +5648,39 @@ fn test_enter_hibernation_already_hibernating_fails() {
 
     client.enter_hibernation(&id, &owner, &3600u64).unwrap();
     let err = client.try_enter_hibernation(&id, &owner, &3600u64).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // AlreadyHibernating
+}
+
+#[test]
+fn test_enter_hibernation_allows_reentry_after_stale_window_closes() {
+    // Regression test for issue #1271: `enter_hibernation` used to block on
+    // the mere *existence* of a hibernation record, so an owner who forgot
+    // to call `exit_hibernation` before the window closed was permanently
+    // locked out of hibernating again.
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &1000u64).unwrap();
+
+    // Let the hibernation window fully elapse without ever calling
+    // `exit_hibernation`.
+    env.ledger().with_mut(|l| l.timestamp += 1000 + 1);
+
+    // The stale entry must not block a fresh hibernation.
+    client.enter_hibernation(&id, &owner, &500u64).unwrap();
+    let h = client.get_hibernation(&id).unwrap();
+    assert_eq!(h.duration_seconds, 500u64);
+}
+
+#[test]
+fn test_enter_hibernation_still_blocked_while_active() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &1000u64).unwrap();
+
+    // Still well inside the window — must remain blocked.
+    let err = client.try_enter_hibernation(&id, &owner, &500u64).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // AlreadyHibernating
 }
 
