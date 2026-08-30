@@ -957,3 +957,60 @@ pub struct TokenPairResponse {
 }
 
 
+
+// ── Issue #1337: Beneficiary archival notification ───────────────────────────
+
+/// Contact information for a vault beneficiary.
+///
+/// The beneficiary registers their contact details so the backend can notify
+/// them when the vault's TTL expires and funds become claimable.
+/// The vault owner cannot read the contact details — they are stored
+/// server-side and used exclusively for outbound notifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeneficiaryContact {
+    /// Stellar address of the beneficiary.
+    pub beneficiary_address: String,
+    /// Vault ID this contact entry belongs to.
+    pub vault_id: String,
+    /// Optional email address for archival notifications.
+    pub email: Option<String>,
+    /// Optional phone number for SMS archival notifications.
+    pub phone: Option<String>,
+    /// When this contact entry was created or last updated.
+    pub updated_at: DateTime<Utc>,
+    /// Whether the beneficiary has opted in to archival notifications.
+    /// Defaults to `true` — the beneficiary can opt out at any time.
+    pub opted_in: bool,
+}
+
+/// Request body for `POST /api/vaults/{id}/beneficiary/contact`.
+#[derive(Debug, Deserialize)]
+pub struct SetBeneficiaryContactRequest {
+    /// Stellar address of the beneficiary (used to verify the caller).
+    pub beneficiary_address: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+}
+
+/// Request body for `PUT /api/vaults/{id}/beneficiary/notifications/opt-in`.
+#[derive(Debug, Deserialize)]
+pub struct BeneficiaryNotificationOptInRequest {
+    pub beneficiary_address: String,
+    /// `true` to opt in, `false` to opt out.
+    pub opted_in: bool,
+}
+
+/// An archival notification dispatch record — written when the backend sends
+/// a TTL-expiry notification to a beneficiary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeneficiaryArchivalNotification {
+    pub id: String,
+    pub vault_id: String,
+    pub beneficiary_address: String,
+    /// Channel used for this dispatch ("email" | "sms").
+    pub channel: String,
+    pub dispatched_at: DateTime<Utc>,
+    pub status: DeliveryStatus,
+    /// Error message if delivery failed.
+    pub error: Option<String>,
+}

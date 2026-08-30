@@ -289,6 +289,31 @@ pub const ARBITRATION_RULED_TOPIC: Symbol = symbol_short!("arb_rul");
 // Issue #497: Beneficiary Notification
 pub const VAULT_NOTIFY_TOPIC: Symbol = symbol_short!("v_notif");
 
+// Issue #1337: beneficiary archival notification opt-in/out
+pub const BENEFICIARY_ARCHIVAL_OPTIN_TOPIC: Symbol = symbol_short!("ben_ao");
+pub const BENEFICIARY_CONTACT_SET_TOPIC: Symbol = symbol_short!("ben_cs");
+
+/// On-chain beneficiary contact record for archival notifications (Issue #1337).
+///
+/// Stores only an opaque, owner-encrypted contact blob — the plaintext is never
+/// readable on-chain.  The vault owner or beneficiary stores a base64-encoded,
+/// symmetrically-encrypted payload (e.g., AES-256-GCM) so that only the
+/// designated off-chain notification service (which holds the decryption key)
+/// can read the contact details.  The `opted_in` flag is stored in cleartext
+/// so the scheduler can honour opt-out requests without decrypting.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryContactInfo {
+    /// Opaque encrypted contact blob (max 512 bytes).
+    /// Plaintext (before encryption) format: `email:<addr>|sms:<phone>`
+    pub encrypted_contact: Bytes,
+    /// Whether this beneficiary has opted in to archival notifications.
+    /// Defaults to `true` on first set.
+    pub opted_in: bool,
+    /// Ledger timestamp when this entry was last updated.
+    pub updated_at: u64,
+}
+
 // Issue #569: Withdrawal Audit Trail
 pub const WITHDRAWAL_AUDIT_TOPIC: Symbol = symbol_short!("wd_audit");
 pub const WITHDRAWAL_FAILED_TOPIC: Symbol = symbol_short!("wd_fail");
@@ -531,6 +556,8 @@ pub enum StorageKey {
     VaultLocked(u64),
     // Issue 3: per-vault configurable low-TTL warning threshold (seconds)
     VaultLowTtlThreshold(u64),
+    // Issue #1337: beneficiary archival notification contact info
+    BeneficiaryContactInfo(u64, Address),
 }
 
 
@@ -786,6 +813,20 @@ pub struct WithdrawalRequest {
     pub amount: i128,
     pub requested_at: u64,
     pub approved: bool,
+}
+
+/// Batch withdrawal instruction - Issue #1292
+///
+/// Describes a single pending withdrawal to be executed as part of a batched
+/// `batch_withdraw` call. By grouping several instructions into a single
+/// transaction an owner can settle multiple withdrawals while paying network
+/// fees only once.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchWithdrawal {
+    pub vault_id: u64,
+    pub destination: Address,
+    pub amount: i128,
 }
 
 /// Deposit proof - Issue #405
@@ -1680,3 +1721,46 @@ pub struct ReleaseSchedule {
 // Issue #951: topic constants for release schedule events
 pub const SET_RELEASE_SCHEDULE_TOPIC: Symbol = symbol_short!("rl_sched");
 pub const TRANCHE_CLAIMED_TOPIC: Symbol = symbol_short!("tr_claim");
+
+// Issue #1338: vault export/import for disaster recovery
+pub const VAULT_EXPORTED_TOPIC: Symbol = symbol_short!("v_export");
+pub const VAULT_IMPORTED_TOPIC: Symbol = symbol_short!("v_import");
+
+/// Exported vault configuration for disaster recovery (Issue #1338).
+///
+/// This struct captures all configuration needed to reconstruct a vault
+/// if its on-chain state is lost due to TTL expiry/archival. It does NOT
+/// include the balance (funds must be re-deposited) or runtime state
+/// (last_check_in, creation_ledger, status) — those are reset on import.
+///
+/// The `exported_at` timestamp and `original_vault_id` serve as a
+/// content-fingerprint so importers can verify they are re-creating the
+/// right vault and detect stale / tampered exports.
+#[contracttype]
+#[derive(Clone)]
+pub struct VaultExportConfig {
+    /// ID of the vault this config was exported from.
+    pub original_vault_id: u64,
+    /// Vault owner address.
+    pub owner: Address,
+    /// Primary beneficiary address.
+    pub beneficiary: Address,
+    /// Check-in interval in seconds.
+    pub check_in_interval: u64,
+    /// Token contract address used by the vault.
+    pub token_address: Address,
+    /// Multi-beneficiary split (empty = 100% to `beneficiary`).
+    pub beneficiaries: Vec<BeneficiaryEntry>,
+    /// Optional short metadata / IPFS label.
+    pub metadata: String,
+    /// Optional custom metadata bytes (max 2 KB).
+    pub custom_metadata: Bytes,
+    /// Optional spending limit per trigger_release call (stroops).
+    pub spending_limit: Option<i128>,
+    /// Optional maximum deposit amount (stroops).
+    pub max_deposit_amount: Option<i128>,
+    /// Release condition (TTLExpiry, OwnerInitiated, or Oracle).
+    pub release_condition: ReleaseCondition,
+    /// Ledger timestamp when this config was exported.
+    pub exported_at: u64,
+}

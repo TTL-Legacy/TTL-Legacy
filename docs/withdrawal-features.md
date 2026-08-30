@@ -355,3 +355,127 @@ client.schedule_withdrawal(
 3. **Batch Reversals**: Reverse multiple withdrawals in a single transaction
 4. **Limit Adjustments**: Allow dynamic limit adjustments without resetting trackers
 5. **Whitelist Expiry**: Add expiration dates to whitelist entries
+
+---
+
+## Issue #1294: Withdrawal Dispute Window
+
+### Overview
+Allows vault owners to dispute unauthorized or suspicious withdrawals within a **24-hour grace period** after the transaction was recorded. Disputed withdrawals are flagged for admin review and resolution.
+
+The dispute is linked directly to a specific entry in the vault's withdrawal audit log (identified by its zero-based index), ensuring traceability to the exact on-chain transaction.
+
+### Key Functions
+
+#### `dispute_withdrawal(vault_id, caller, audit_log_index, reason) -> Result<(), ContractError>`
+Files a dispute against an existing successful withdrawal.
+
+**Parameters:**
+- `vault_id`: The vault ID
+- `caller`: The vault owner (must be authenticated)
+- `audit_log_index`: Zero-based index into `get_withdrawal_audit_log` identifying the disputed withdrawal
+- `reason`: Human-readable description of the dispute
+
+**Returns:**
+- `Ok(())` on success
+- `Err(ContractError::NotOwner)` if caller is not the vault owner
+- `Err(ContractError::WithdrawalDisputeNotFound)` if the audit log index is invalid or references a failed (non-fund-moving) withdrawal
+- `Err(ContractError::WithdrawalDisputeWindowExpired)` if more than 24 hours have elapsed since the withdrawal
+- `Err(ContractError::DisputeFiled)` if an open dispute already exists for that withdrawal
+
+**Events:**
+- `WITHDRAWAL_DISPUTE_FILED_TOPIC` (`wd_disp`): Emitted on successful filing, with `(caller, withdrawal_timestamp, reason)`
+
+#### `resolve_withdrawal_dispute(vault_id, dispute_index, approved) -> Result<(), ContractError>`
+Resolves a pending dispute. **Admin-only.**
+
+**Parameters:**
+- `vault_id`: The vault ID
+- `dispute_index`: Zero-based index into `get_withdrawal_disputes`
+- `approved`: `true` = dispute upheld (`Resolved`), `false` = dispute dismissed (`None`)
+
+**Returns:**
+- `Ok(())` on success
+- `Err(ContractError::NotAdmin)` if caller is not the contract admin
+- `Err(ContractError::WithdrawalDisputeNotFound)` if `dispute_index` is out of range or no disputes exist
+- `Err(ContractError::DisputeFiled)` if the dispute is not in `Filed` state (already resolved/dismissed)
+
+**Events:**
+- `WITHDRAWAL_DISPUTE_RESOLVED_TOPIC` (`wd_disp_r`): Emitted on resolution, with `(admin, dispute_index, approved)`
+
+#### `get_withdrawal_disputes(vault_id) -> Vec<WithdrawalDispute>`
+Returns all dispute entries (filed, resolved, and dismissed) for a vault.
+
+#### `file_withdrawal_dispute(vault_id, caller, audit_log_index, reason) -> Result<(), ContractError>` *(legacy shim)*
+Backwards-compatible wrapper; delegates to `dispute_withdrawal`. New integrations should call `dispute_withdrawal` directly.
+
+### Data Structures
+
+#### `WithdrawalDispute`
+```rust
+pub struct WithdrawalDispute {
+    pub vault_id: u64,
+    /// Timestamp of the withdrawal that is being disputed (from the audit log entry).
+    pub withdrawal_timestamp: u64,
+    /// Timestamp when the dispute was filed.
+    pub dispute_filed_at: u64,
+    /// Deadline by which the dispute window closes (withdrawal_timestamp + 24 h).
+    pub dispute_expires_at: u64,
+    pub status: DisputeStatus,
+    pub reason: String,
+    /// Set when the dispute is resolved or dismissed.
+    pub resolved_at: Option<u64>,
+}
+```
+
+#### `DisputeStatus`
+```rust
+pub enum DisputeStatus {
+    None,     // Dismissed or not yet filed
+    Filed,    // Active, awaiting admin resolution
+    Resolved, // Upheld by admin
+}
+```
+
+### Error Codes
+- `WithdrawalDisputeWindowExpired = 101`: More than 24 hours since the withdrawal
+- `WithdrawalDisputeNotFound = 102`: Invalid audit log index or no disputes at the given dispute index
+
+### Implementation Details
+- The 24-hour window is measured from `WithdrawalAuditEntry.timestamp` (the block time the withdrawal was recorded), not the time of filing.
+- Only **successful** withdrawals (those that moved funds) can be disputed. Failed audit entries return `WithdrawalDisputeNotFound`.
+- Duplicate open disputes for the same withdrawal timestamp are prevented; a dismissed dispute allows the window to be re-opened.
+- Resolution is admin-only: vault owners cannot resolve their own disputes to prevent self-clearing.
+- Disputes are stored per-vault in a persistent `Vec<WithdrawalDispute>` under `StorageKey::WithdrawalDisputes(vault_id)`.
+
+### Usage Example
+
+```rust
+// 1. After a withdrawal occurs, query the audit log to find its index.
+let audit_log = client.get_withdrawal_audit_log(&vault_id);
+let idx = 0u32; // index of the suspicious withdrawal
+
+// 2. File a dispute (must be called within 24 h of the withdrawal).
+client.dispute_withdrawal(
+    &vault_id,
+    &owner,
+    &idx,
+    &String::from_str(&env, "I did not authorize this withdrawal"),
+)?;
+
+// 3. Admin reviews and resolves.
+client.resolve_withdrawal_dispute(
+    &vault_id,
+    &0u32,  // dispute index in get_withdrawal_disputes
+    &true,  // true = upheld, false = dismissed
+)?;
+
+// 4. Check final status.
+let disputes = client.get_withdrawal_disputes(&vault_id);
+assert_eq!(disputes.get(0).unwrap().status, DisputeStatus::Resolved);
+```
+
+### Security Considerations
+- The 24-hour window limits the exposure window while giving owners reasonable time to detect anomalies.
+- Linking disputes to audit log entries creates a tamper-evident chain between the on-chain transaction record and the dispute.
+- Admin-only resolution prevents conflicts of interest and ensures neutral arbitration.
