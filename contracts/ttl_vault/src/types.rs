@@ -361,13 +361,47 @@ pub const MAX_CUSTOM_METADATA_LEN: u32 = 2048;
 /// Maximum length, in bytes, of a vault's release memo (Issue #791).
 pub const MAX_RELEASE_MEMO_LEN: u32 = 256;
 
+/// All persistent-storage keys used by the TTL-Vault contract.
+///
+/// # Key-namespace conventions
+///
+/// Soroban stores each key as its XDR-serialised `ScVal`.  A `#[contracttype]`
+/// enum variant serialises as a two-element vector `[discriminant_symbol, …payload…]`.
+/// Two variants therefore *cannot* collide as long as they have **distinct names** or
+/// distinct payload types — the Soroban host uses the full serialised value as the
+/// lookup key.
+///
+/// Specific rules enforced here:
+///
+/// 1. **Counter vs. data separation** — `VaultCount` (no payload) and `Vault(u64)`
+///    (vault-ID payload) are separate variants, so `VaultCount` never aliases
+///    `Vault(0)` or any other vault data entry.
+///
+/// 2. **Per-vault keys always carry the `vault_id`** — e.g. `Hibernation(u64)`,
+///    `WithdrawalAuditLog(u64)` etc.  Two vaults can never share the same slot.
+///
+/// 3. **Compound keys use a tuple payload** — e.g. `VestingSchedule(u64, u32)`
+///    to isolate vault + schedule-index combinations.
+///
+/// 4. **Global singleton keys have no payload** — e.g. `Admin`, `Paused`, `VaultCount`.
+///    They live in instance storage (short-TTL, contract-lifetime keys) or persistent
+///    storage (long-TTL keys), never in the same bucket as vault-scoped data.
+///
+/// The `test_storage_key_no_collisions` unit test verifies at compile/test time that
+/// every variant listed here produces a unique serialised key when the same u64 / u32
+/// / Address payload is reused across all variants.
 #[contracttype(export = false)]
 #[derive(Clone)]
 pub enum StorageKey {
+    /// Per-vault data blob; keyed by the numeric vault ID assigned at creation.
+    /// Never aliases `VaultCount` because they are distinct enum variants.
     Vault(u64),
     OwnerVaults(Address),
     MaxVaultsPerOwner,
     BeneficiaryVaults(Address),
+    /// Global monotonically-increasing vault counter (last assigned vault ID).
+    /// Stored in *persistent* storage under the `VaultCount` discriminant, which
+    /// serialises differently from `Vault(u64)` — there is no collision risk.
     VaultCount,
     TokenAddress,
     Admin,
@@ -664,6 +698,44 @@ pub struct ReleaseEvent {
     pub beneficiary: Address,
     pub amount: i128,
     pub memo: Bytes,
+}
+
+/// Structured event emitted on every successful deposit — Issue #1329.
+///
+/// Emitted with topic `(DEPOSIT_TOPIC, vault_id)` so off-chain indexers and
+/// audit dashboards can stream deposits without polling vault balances.
+///
+/// Fields:
+/// - `vault_id`   — the vault that received the funds
+/// - `depositor`  — the address that transferred the tokens
+/// - `amount`     — the number of tokens deposited (in token-native units)
+/// - `new_total`  — the vault's total balance after the deposit
+#[contracttype]
+#[derive(Clone)]
+pub struct DepositEvent {
+    pub vault_id: u64,
+    pub depositor: Address,
+    pub amount: i128,
+    pub new_total: i128,
+}
+
+/// Structured event emitted on every successful withdrawal — Issue #1330.
+///
+/// Emitted with topic `(WITHDRAW_TOPIC, vault_id)` so off-chain audit systems
+/// can track withdrawals without polling vault balances.
+///
+/// Fields:
+/// - `vault_id`           — the vault from which funds were withdrawn
+/// - `owner`              — the vault owner who authorised the withdrawal
+/// - `amount`             — the number of tokens withdrawn (in token-native units)
+/// - `remaining_balance`  — the vault's remaining balance after the withdrawal
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawEvent {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub amount: i128,
+    pub remaining_balance: i128,
 }
 
 /// A single beneficiary entry: (address, basis_points, minimum_threshold).

@@ -15,6 +15,7 @@ pub use types::{
     ArchivedVaultInfo, AuditEntry, BackupCode, BeneficiaryClaimDelegation, BeneficiaryCommitment,
     BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
     CheckInHistoryEntry, CheckInStreak, ConditionalAcceptanceEntry, StorageKey, DisputeStatus,
+    DepositEvent, WithdrawEvent,
     EncryptedBackupCodes, GeoCheckInEntry, HibernationEntry, IntegrityReport, MetadataVersionEntry,
     MilestoneEntry, MilestoneVestingSchedule, MultiSigConfig, MultiSigOperation, MultiSigProposal,
     OwnershipProof, OwnershipTransferRequest, PasskeyAnalytics, PasskeyHash, PasskeyUsageEntry,
@@ -138,6 +139,12 @@ mod storage_key_collision_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
 mod checkin_nonexistent_vault_tests;
+#[cfg(test)]
+mod hibernation_cleanup_tests;
+#[cfg(test)]
+mod deposit_structured_event_tests;
+#[cfg(test)]
+mod withdraw_structured_event_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -1874,10 +1881,15 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         
-        // Emit comprehensive FundsDeposited event with all required fields
-        // Includes: depositor, amount, new_balance, and timestamp for indexer detection
+        // Issue #1329: emit structured DepositEvent so off-chain indexers and dashboards
+        // can detect deposits without polling vault balances.
         env.events()
-            .publish((DEPOSIT_TOPIC, vault_id), (&from, amount, vault.balance, now));
+            .publish((DEPOSIT_TOPIC, vault_id), DepositEvent {
+                vault_id,
+                depositor: from.clone(),
+                amount,
+                new_total: vault.balance,
+            });
     }
 
     /// Deposits funds into multiple vaults in a single transfer.
@@ -1961,10 +1973,15 @@ impl TtlVaultContract {
                 (&vault.token_address, amount),
             );
             
-            // Emit comprehensive FundsDeposited event for each vault deposit
+            // Issue #1329: emit structured DepositEvent for each vault deposit
             env.events().publish(
                 (DEPOSIT_TOPIC, vault_id),
-                (&from, amount, vault.balance, now),
+                DepositEvent {
+                    vault_id,
+                    depositor: from.clone(),
+                    amount,
+                    new_total: vault.balance,
+                },
             );
         }
         env.storage()
@@ -2209,8 +2226,15 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        // Issue #1330: emit structured WithdrawEvent so off-chain audit systems
+        // can track withdrawals without polling vault balances.
         env.events()
-            .publish((WITHDRAW_TOPIC, vault_id), (amount, vault.balance));
+            .publish((WITHDRAW_TOPIC, vault_id), WithdrawEvent {
+                vault_id,
+                owner: caller.clone(),
+                amount,
+                remaining_balance: vault.balance,
+            });
         Ok(())
     }
 
@@ -3092,6 +3116,10 @@ impl TtlVaultContract {
                         (ACCEPTANCE_DEADLINE_EXPIRED_TOPIC,),
                         (vault_id, vault.owner.clone(), total),
                     );
+                    // Issue #1327: clear stale hibernation state on vault cancellation
+                    env.storage()
+                        .persistent()
+                        .remove(&StorageKey::Hibernation(vault_id));
                     return;
                 }
             }
@@ -3319,6 +3347,14 @@ impl TtlVaultContract {
                 .instance()
                 .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         }
+
+        // Issue #1327: clear hibernation state after a successful release so
+        // that get_hibernation / is_hibernating never return stale data and
+        // ledger space is not wasted.  The remove is a no-op when no
+        // hibernation entry exists, so it is safe to call unconditionally.
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::Hibernation(vault_id));
     }
 
     /// Applies TTL decay to a vault if no check-in for 30 days.
