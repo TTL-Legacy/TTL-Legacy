@@ -2356,7 +2356,7 @@ fn test_get_release_status_returns_locked_released_cancelled() {
     assert_eq!(token_client.balance(&owner2), 500_000i128);
 }
 
-// ---- Issue #318: batch_withdraw ----
+// ---- Issue #1292: batch_withdraw (BatchWithdrawal instruction type) ----
 
 #[test]
 fn test_batch_withdraw_decrements_multiple_vaults() {
@@ -2370,8 +2370,19 @@ fn test_batch_withdraw_decrements_multiple_vaults() {
     client.deposit(&vault_id_2, &owner, &300i128);
 
     client.batch_withdraw(
-        &vec![&env, vault_id_1, vault_id_2],
-        &vec![&env, 200i128, 100i128],
+        &vec![
+            &env,
+            BatchWithdrawal {
+                vault_id: vault_id_1,
+                destination: owner.clone(),
+                amount: 200i128,
+            },
+            BatchWithdrawal {
+                vault_id: vault_id_2,
+                destination: owner.clone(),
+                amount: 100i128,
+            },
+        ],
         &owner,
     );
 
@@ -2382,14 +2393,20 @@ fn test_batch_withdraw_decrements_multiple_vaults() {
 }
 
 #[test]
-fn test_batch_withdraw_validates_mismatched_lengths() {
+fn test_batch_withdraw_rejects_non_positive_amount() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
 
     let err = client
         .try_batch_withdraw(
-            &vec![&env, vault_id],
-            &vec![&env, 100i128, 200i128], // one extra amount
+            &vec![
+                &env,
+                BatchWithdrawal {
+                    vault_id,
+                    destination: owner.clone(),
+                    amount: 0i128,
+                },
+            ],
             &owner,
         )
         .unwrap_err()
@@ -2406,11 +2423,22 @@ fn test_batch_withdraw_rolls_back_on_insufficient_balance() {
     client.deposit(&vault_id_1, &owner, &100i128);
     // vault_id_2 has 0 balance
 
-    // Attempting to withdraw from vault_id_2 should fail; vault_id_1 must be unchanged
+    // Attempting to withdraw more than vault_id_2 holds must fail; vault_id_1 must be unchanged
     assert!(client
         .try_batch_withdraw(
-            &vec![&env, vault_id_1, vault_id_2],
-            &vec![&env, 50i128, 1i128],
+            &vec![
+                &env,
+                BatchWithdrawal {
+                    vault_id: vault_id_1,
+                    destination: owner.clone(),
+                    amount: 50i128,
+                },
+                BatchWithdrawal {
+                    vault_id: vault_id_2,
+                    destination: owner.clone(),
+                    amount: 1i128,
+                },
+            ],
             &owner,
         )
         .is_err());
