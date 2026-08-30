@@ -85,6 +85,9 @@ pub use types::{
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
+// Issues #1323, #1324, #1325, #1326: structured event emission tests
+#[cfg(test)]
+mod event_emission_tests;
 #[cfg(test)]
 mod beneficiary_pooling_tests;#[cfg(test)]
 mod beneficiary_vesting_auction_tests;
@@ -1573,7 +1576,12 @@ impl TtlVaultContract {
         );
         env.events().publish(
             (VAULT_CREATED_TOPIC,),
-            (vault_id, owner, beneficiary, check_in_interval, timestamp),
+            VaultCreatedEvent {
+                vault_id,
+                owner,
+                beneficiary,
+                check_in_interval,
+            },
         );
         vault_id
     }
@@ -1781,7 +1789,11 @@ impl TtlVaultContract {
         let new_expiry = vault.last_check_in + vault.check_in_interval;
         env.events().publish(
             (CHECK_IN_RECORDED_TOPIC, vault_id),
-            (vault.owner.clone(), new_expiry),
+            CheckInEvent {
+                vault_id,
+                new_ttl: new_expiry,
+                caller,
+            },
         );
         Ok(())
     }
@@ -2745,7 +2757,11 @@ impl TtlVaultContract {
             let new_expiry = now + vault.check_in_interval;
             env.events().publish(
                 (CHECK_IN_RECORDED_TOPIC, vault_id),
-                (vault.owner.clone(), new_expiry),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_expiry,
+                    caller: caller.clone(),
+                },
             );
         }
         env.storage()
@@ -3248,6 +3264,7 @@ impl TtlVaultContract {
                     beneficiary: vault.beneficiary.clone(),
                     // Amount is 0 here — funds are held for graduated release
                     amount: 0,
+                    memo: release_memo.clone(),
                 },
             );
         } else if has_vesting || has_milestone_vesting {
@@ -3485,7 +3502,11 @@ impl TtlVaultContract {
             let new_expiry = now + vault.check_in_interval;
             env.events().publish(
                 (CHECK_IN_RECORDED_TOPIC, vault_id),
-                (vault.owner.clone(), new_expiry),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_expiry,
+                    caller: caller.clone(),
+                },
             );
         }
 
@@ -7378,7 +7399,11 @@ impl TtlVaultContract {
 
         env.events().publish(
             (BENEFICIARY_UPDATED_TOPIC, vault_id),
-            (vault.beneficiary.clone(), new_beneficiary.clone()),
+            BeneficiaryUpdatedEvent {
+                vault_id,
+                old_beneficiary: vault.beneficiary.clone(),
+                new_beneficiary: new_beneficiary.clone(),
+            },
         );
 
         Ok(())
@@ -13446,7 +13471,11 @@ impl TtlVaultContract {
             let new_expiry = now + vault.check_in_interval;
             env.events().publish(
                 (CHECK_IN_RECORDED_TOPIC, vault_id),
-                (vault.owner.clone(), new_expiry),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_expiry,
+                    caller: caller.clone(),
+                },
             );
         }
         env.storage()
