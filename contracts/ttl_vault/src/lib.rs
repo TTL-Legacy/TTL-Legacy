@@ -106,6 +106,8 @@ mod beneficiary_waitlist_tests;
 #[cfg(test)]
 mod beneficiary_notification_tests;
 #[cfg(test)]
+mod beneficiary_archival_notification_tests;
+#[cfg(test)]
 mod beneficiary_identity_verification_tests;
 #[cfg(test)]
 mod beneficiary_memo_tests;
