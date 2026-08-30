@@ -80,6 +80,8 @@ pub use types::{
     TOKEN_ALLOWLIST_ADDED_TOPIC, TOKEN_ALLOWLIST_REMOVED_TOPIC,
     VAULT_LOCK_TOPIC, VAULT_UNLOCK_TOPIC, LOW_TTL_WARNING_TOPIC,
     VESTING_SCHEDULE_ADDED_TOPIC,
+    // Issue #1338: vault export/import for disaster recovery
+    VaultExportConfig, VAULT_EXPORTED_TOPIC, VAULT_IMPORTED_TOPIC,
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
@@ -92,6 +94,9 @@ mod beneficiary_vesting_tests;
 mod bps_invariant_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+// Issue #1338: vault export/import roundtrip tests
+#[cfg(test)]
+mod vault_export_import_tests;
 #[cfg(test)]
 mod regression_tests;
 #[cfg(test)]
@@ -17482,5 +17487,228 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
         Ok(new_ttls)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1338: Vault Export / Import for Disaster Recovery
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Exports the configuration of an existing vault as a `VaultExportConfig`
+    /// value that can be stored off-chain and used to recreate the vault if its
+    /// on-chain state is ever lost due to TTL expiry or archival.
+    ///
+    /// Only the vault owner is authorised to export.  The export does NOT
+    /// include the vault balance — funds must be re-deposited after import.
+    /// Runtime state (last_check_in, status, creation metadata) is also
+    /// excluded because it is reset when the vault is re-created via
+    /// `import_vault`.
+    ///
+    /// # Arguments
+    /// * `env`      – The Soroban environment
+    /// * `vault_id` – ID of the vault to export
+    /// * `caller`   – Must be the vault owner
+    ///
+    /// # Returns
+    /// A `VaultExportConfig` containing all configuration required to
+    /// recreate the vault.
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound`  – Vault does not exist
+    /// * `ContractError::NotOwner`       – Caller is not the vault owner
+    pub fn export_vault_config(env: Env, vault_id: u64, caller: Address) -> VaultExportConfig {
+        caller.require_auth();
+        Self::require_initialized(&env);
+
+        let vault = Self::load_vault(&env, vault_id);
+
+        // Only the vault owner may export its configuration.
+        if caller != vault.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        let config = VaultExportConfig {
+            original_vault_id: vault_id,
+            owner: vault.owner.clone(),
+            beneficiary: vault.beneficiary.clone(),
+            check_in_interval: vault.check_in_interval,
+            token_address: vault.token_address.clone(),
+            beneficiaries: vault.beneficiaries.clone(),
+            metadata: vault.metadata.clone(),
+            custom_metadata: vault.custom_metadata.clone(),
+            spending_limit: vault.spending_limit,
+            max_deposit_amount: vault.max_deposit_amount,
+            release_condition: vault.release_condition.clone(),
+            exported_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (VAULT_EXPORTED_TOPIC,),
+            (vault_id, vault.owner, env.ledger().timestamp()),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        config
+    }
+
+    /// Recreates a vault from a previously exported `VaultExportConfig`.
+    ///
+    /// This is the disaster-recovery entry point.  It creates a brand-new
+    /// vault with a fresh vault ID, restoring the owner, beneficiary,
+    /// check-in interval, token, multi-beneficiary split, metadata,
+    /// spending limit, and release condition from the export.
+    ///
+    /// The imported vault starts with a zero balance — the owner must
+    /// re-deposit funds.  The check-in clock starts fresh from the import
+    /// timestamp.
+    ///
+    /// Validation rules applied are identical to `create_vault`:
+    /// * Contract must be initialised and not paused.
+    /// * `caller` must be the `config.owner` address (authorised by them).
+    /// * Interval must be within bounds.
+    /// * Owner ≠ beneficiary.
+    /// * If a token address is specified it must be on the whitelist.
+    ///
+    /// # Arguments
+    /// * `env`    – The Soroban environment
+    /// * `config` – The `VaultExportConfig` obtained from `export_vault_config`
+    /// * `caller` – Must equal `config.owner`
+    ///
+    /// # Returns
+    /// The new vault ID assigned to the re-created vault.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`   – Caller ≠ config.owner
+    /// * `ContractError::InvalidInterval` / `CheckInIntervalTooShort` / `IntervalTooHigh`
+    /// * `ContractError::InvalidBeneficiary` – owner == beneficiary
+    /// * `ContractError::TokenNotAllowed`    – token not whitelisted
+    pub fn import_vault(env: Env, config: VaultExportConfig, caller: Address) -> u64 {
+        caller.require_auth();
+        Self::require_initialized(&env);
+        Self::assert_not_paused(&env);
+
+        // The caller must be the recorded owner.
+        if caller != config.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        let check_in_interval = config.check_in_interval;
+
+        // Reuse the same interval validation as create_vault.
+        if check_in_interval == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        if check_in_interval < MIN_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::CheckInIntervalTooShort);
+        }
+        if check_in_interval > MAX_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::IntervalTooHigh);
+        }
+        Self::assert_interval_in_bounds(&env, check_in_interval);
+
+        if config.owner == config.beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+        }
+
+        // Validate beneficiary is a regular account (same as create_vault).
+        if let Err(e) = Self::assert_beneficiary_is_account(&env, &config.beneficiary) {
+            panic_with_error!(&env, e);
+        }
+
+        // Validate token (must be whitelisted if not the default XLM token).
+        let default_token = Self::load_token(&env);
+        let vault_token = if config.token_address == default_token {
+            default_token.clone()
+        } else {
+            Self::assert_token_whitelisted(&env, &config.token_address);
+            config.token_address.clone()
+        };
+
+        let timestamp = env.ledger().timestamp();
+        let vault_id = Self::vault_count(env.clone()) + 1;
+
+        let vault = Vault {
+            owner: config.owner.clone(),
+            beneficiary: config.beneficiary.clone(),
+            balance: 0,
+            check_in_interval,
+            last_check_in: timestamp,
+            created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
+            status: ReleaseStatus::Locked,
+            beneficiaries: config.beneficiaries.clone(),
+            metadata: config.metadata.clone(),
+            token_address: vault_token,
+            custom_metadata: config.custom_metadata.clone(),
+            is_paused: false,
+            release_condition: config.release_condition.clone(),
+            parent_vault_id: None,
+            passkey_hash: None,
+            max_deposit_amount: config.max_deposit_amount,
+            withdrawal_approval_threshold: None,
+            spending_limit: config.spending_limit,
+            inactivity_penalty_bps: None,
+            burn_percentage: 0,
+            penalty_recipient: None,
+            passkey_rotation_period_seconds: 0,
+            challenge_timeout_seconds: 300,
+            multi_sig_threshold: 1,
+            check_in_score: 10000,
+            total_check_ins: 0,
+            on_time_check_ins: 0,
+            multisig_required_ops: Vec::new(&env),
+            adaptive_interval_enabled: false,
+        };
+
+        Self::save_vault(&env, vault_id, &vault);
+        Self::add_owner_vault_id(&env, &config.owner, vault_id, check_in_interval);
+        Self::add_beneficiary_vault_id(&env, &config.beneficiary, vault_id, check_in_interval);
+
+        // Initialise empty passkeys and backup codes.
+        let empty_passkeys: Vec<PasskeyHash> = Vec::new(&env);
+        let empty_codes: Vec<BackupCode> = Vec::new(&env);
+        let ttl = vault_ttl_ledgers(check_in_interval);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::VaultPasskeys(vault_id), &empty_passkeys);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BackupCodes(vault_id), &empty_codes);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::VaultPasskeys(vault_id),
+            VAULT_TTL_THRESHOLD,
+            ttl,
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BackupCodes(vault_id),
+            VAULT_TTL_THRESHOLD,
+            ttl,
+        );
+
+        // Persist the new VaultCount.
+        let count_key = StorageKey::VaultCount;
+        env.storage().persistent().set(&count_key, &vault_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (VAULT_IMPORTED_TOPIC,),
+            (
+                vault_id,
+                config.original_vault_id,
+                config.owner,
+                config.beneficiary,
+                check_in_interval,
+                timestamp,
+            ),
+        );
+
+        vault_id
     }
 }
