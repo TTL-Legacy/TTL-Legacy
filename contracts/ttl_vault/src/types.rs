@@ -810,6 +810,20 @@ pub struct WithdrawalRequest {
     pub approved: bool,
 }
 
+/// Batch withdrawal instruction - Issue #1292
+///
+/// Describes a single pending withdrawal to be executed as part of a batched
+/// `batch_withdraw` call. By grouping several instructions into a single
+/// transaction an owner can settle multiple withdrawals while paying network
+/// fees only once.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchWithdrawal {
+    pub vault_id: u64,
+    pub destination: Address,
+    pub amount: i128,
+}
+
 /// Deposit proof - Issue #405
 #[contracttype]
 #[derive(Clone)]

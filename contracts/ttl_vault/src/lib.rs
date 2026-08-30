@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, panic_with_error, symbol_short, token, Address, AddressPayload, Bytes,
-    BytesN, Env, String, Vec,
+    BytesN, Env, String, Vec, map::Map,
 };
 
 pub mod ranking;
@@ -145,6 +145,8 @@ mod storage_key_collision_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
 mod checkin_nonexistent_vault_tests;
+#[cfg(test)]
+mod batch_withdrawal_tests;
 
 // Issue #1294: withdrawal dispute window
 #[cfg(test)]
@@ -2228,119 +2230,146 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    // --- Issue #318: batch_withdraw ---
+    // --- Issue #1292: BatchWithdrawal instruction type ---
 
-    /// Withdraws from multiple vaults owned by the same caller in a single transaction.
+    /// Executes multiple pending withdrawals in a single transaction.
     ///
-    /// This is more efficient than calling `withdraw` multiple times as it reduces
-    /// transaction overhead. All vault_ids and amounts are validated before any
-    /// state mutation occurs.
+    /// Each entry in `withdrawals` is a [`BatchWithdrawal`] instruction describing a
+    /// vault, a destination address and an amount. Grouping several pending
+    /// withdrawals into one call lets an owner pay network transaction fees only
+    /// once instead of once per withdrawal.
+    ///
+    /// All instructions are validated before any state is mutated. In particular the
+    /// summed amount requested from each vault is checked against that vault's
+    /// balance, so the call is atomic: either every instruction in the batch is
+    /// executed or none are.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
-    /// * `vault_ids` - Vector of vault IDs to withdraw from
-    /// * `amounts` - Vector of amounts (in stroops) to withdraw from each vault
-    /// * `caller` - The address of the caller (must be the owner of all vaults)
+    /// * `withdrawals` - Vector of [`BatchWithdrawal`] instructions to execute
+    /// * `caller` - The address of the caller (must be the owner of every vault referenced)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
     ///
     /// # Errors
     /// * `ContractError::Paused` - If the contract is paused
-    /// * `ContractError::InvalidAmount` - If vault_ids.len() != amounts.len() or any amount is not positive
-    /// * `ContractError::VaultNotFound` - If any vault does not exist
-    /// * `ContractError::NotOwner` - If caller is not the owner of any vault
-    /// * `ContractError::AlreadyReleased` - If any vault is not in Locked status
-    /// * `ContractError::InsufficientBalance` - If any vault balance is less than the requested amount
+    /// * `ContractError::InvalidAmount` - If `withdrawals` is empty or any amount is not positive
+    /// * `ContractError::VaultNotFound` - If any referenced vault does not exist
+    /// * `ContractError::NotOwner` - If caller is not the owner of any referenced vault
+    /// * `ContractError::AlreadyReleased` - If any referenced vault is not in Locked status
+    /// * `ContractError::WithdrawalDestinationNotWhitelisted` - If any destination is not whitelisted
+    /// * `ContractError::InsufficientBalance` - If the total amount for any vault exceeds its balance
     pub fn batch_withdraw(
         env: Env,
-        vault_ids: Vec<u64>,
-        amounts: Vec<i128>,
+        withdrawals: Vec<BatchWithdrawal>,
         caller: Address,
     ) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
-        if vault_ids.len() != amounts.len() {
+        if withdrawals.is_empty() {
             return Err(ContractError::InvalidAmount);
         }
         caller.require_auth();
 
-        // Validate all entries before mutating state
-        for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
-            if amount <= 0 {
+        // First pass: validate every instruction individually and accumulate the
+        // total requested amount per vault so we can validate against the balance.
+        let mut vault_totals: Map<u64, i128> = Map::new(&env);
+        for w in withdrawals.iter() {
+            if w.amount <= 0 {
                 Self::record_withdrawal_audit(
                     &env,
-                    vault_id,
+                    w.vault_id,
                     &caller,
-                    amount,
+                    w.amount,
                     false,
                     "Invalid amount",
                 );
                 return Err(ContractError::InvalidAmount);
             }
-            let vault = Self::try_load_vault(&env, vault_id).ok_or(ContractError::VaultNotFound)?;
+            let vault = Self::try_load_vault(&env, w.vault_id).ok_or(ContractError::VaultNotFound)?;
             if caller != vault.owner {
-                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Not owner");
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Not owner",
+                );
                 return Err(ContractError::NotOwner);
             }
             if vault.status != ReleaseStatus::Locked {
                 Self::record_withdrawal_audit(
                     &env,
-                    vault_id,
+                    w.vault_id,
                     &caller,
-                    amount,
+                    w.amount,
                     false,
                     "Vault already released",
                 );
                 return Err(ContractError::AlreadyReleased);
             }
-            if vault.balance < amount {
+            if !Self::is_whitelisted(&env, w.vault_id, &w.destination) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Destination not whitelisted",
+                );
+                return Err(ContractError::WithdrawalDestinationNotWhitelisted);
+            }
+            let current = vault_totals.get(w.vault_id).unwrap_or(0i128);
+            vault_totals.set(w.vault_id, current + w.amount);
+        }
+
+        // Second pass: validate the summed amount for each vault against its balance.
+        let mut keys = vault_totals.keys();
+        while let Some(vault_id) = keys.next() {
+            let total = vault_totals.get(vault_id).unwrap_or(0i128);
+            let vault = Self::load_vault(&env, vault_id);
+            if vault.balance < total {
                 Self::record_withdrawal_audit(
                     &env,
                     vault_id,
                     &caller,
-                    amount,
+                    total,
                     false,
-                    "Insufficient balance",
+                    "Batch total exceeds vault balance",
                 );
                 return Err(ContractError::InsufficientBalance);
             }
         }
 
-        // All validations passed — apply withdrawals
-        // Note: batch_withdraw requires all vaults to use the same token (default XLM)
-        let default_token = Self::load_token(&env);
-        let token_client = token::Client::new(&env, &default_token);
-        for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
-            let mut vault = Self::load_vault(&env, vault_id);
-            if vault.token_address != default_token {
-                Self::record_withdrawal_audit(
-                    &env,
-                    vault_id,
-                    &caller,
-                    amount,
-                    false,
-                    "Incompatible token",
-                );
-                return Err(ContractError::InvalidAmount);
-            }
-            token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
-            vault.balance -= amount;
+        // All validations passed — execute every withdrawal in this single transaction.
+        for w in withdrawals.iter() {
+            let mut vault = Self::load_vault(&env, w.vault_id);
+            let token_client = token::Client::new(&env, &vault.token_address);
+            token_client.transfer(&env.current_contract_address(), &w.destination, &w.amount);
+            vault.balance -= w.amount;
             let remaining = vault.balance;
-            Self::save_vault(&env, vault_id, &vault);
+            Self::save_vault(&env, w.vault_id, &vault);
+
+            // Issue #568: Record withdrawal for potential reversal (grace period: 24 hours)
+            Self::record_withdrawal_for_reversal(&env, w.vault_id, w.amount, 86_400);
+
+            Self::log_audit_entry(&env, w.vault_id, "batch_withdraw", &caller, "");
+            Self::append_activity_log(&env, w.vault_id, "batch_withdraw", &caller, "");
 
             // Issue #569: Record successful withdrawal in audit trail
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, true, "");
+            Self::record_withdrawal_audit(&env, w.vault_id, &caller, w.amount, true, "");
 
             // Issue #571: Emit withdrawal notification event
             env.events().publish(
-                (WITHDRAWAL_NOTIF_TOPIC, vault_id),
-                (&caller, amount, env.ledger().timestamp()),
+                (WITHDRAWAL_NOTIF_TOPIC, w.vault_id),
+                (&caller, w.amount, env.ledger().timestamp()),
             );
 
             env.events()
-                .publish((WITHDRAW_TOPIC, vault_id), (amount, remaining));
+                .publish((WITHDRAW_TOPIC, w.vault_id), (w.amount, remaining));
         }
         env.storage()
             .instance()
