@@ -647,6 +647,11 @@ pub enum ReleaseStatus {
     Released,
     Cancelled,
     EmergencyFrozen,
+    /// Issue #1281: a release was initiated (conditions passed, release
+    /// attempted) but the token transfer to the beneficiary/beneficiaries
+    /// failed, leaving the vault's funds in the contract rather than either
+    /// still-Locked or fully Released.
+    Failed,
 }
 
 #[contracttype]

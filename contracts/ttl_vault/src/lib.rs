@@ -138,6 +138,14 @@ mod storage_key_collision_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
 mod checkin_nonexistent_vault_tests;
+#[cfg(test)]
+mod deposit_total_tests;
+#[cfg(test)]
+mod vault_id_atomicity_tests;
+#[cfg(test)]
+mod release_transfer_failure_tests;
+#[cfg(test)]
+mod hibernation_duration_bounds_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -187,6 +195,12 @@ pub const OWNERSHIP_TRANSFER_EXPIRY: u64 = 604_800;
 /// Contract upgrade timelock - Issue #1120
 /// 72-hour time-lock before upgrade can be executed (in seconds)
 pub const UPGRADE_TIMELOCK: u64 = 259_200; // 72 hours
+
+/// Minimum hibernation duration in seconds - Issue #1280.
+/// Mirrors `MIN_CHECK_IN_INTERVAL`: a hibernation shorter than the shortest
+/// allowed check-in interval provides no meaningful relief from check-ins,
+/// so durations below this (including zero, i.e. an instant no-op) are rejected.
+pub const MIN_HIBERNATION_SECONDS: u64 = 3600; // 1 hour
 
 /// Maximum hibernation duration in seconds.
 /// Soroban's maximum persistent entry TTL is 3_110_400 ledgers at ~5 s/ledger ≈ 180 days.
@@ -330,6 +344,8 @@ pub enum ContractError {
     CommitmentNotFound = 98,
     BeneficiaryAlreadyRevealed = 99,
     InvalidZkProof = 100,
+    HibernationDurationTooShort = 101, // Issue #1280: enter_hibernation duration below MIN_HIBERNATION_SECONDS
+    HibernationDurationTooLong = 102,  // Issue #1280: enter_hibernation duration above MAX_HIBERNATION_SECONDS
 }
 
 #[contract]
@@ -1470,7 +1486,7 @@ impl TtlVaultContract {
             None => Self::load_token(&env),
         };
 
-        let vault_id = Self::vault_count(env.clone()) + 1;
+        let vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let metadata = String::from_str(&env, "");
         Self::assert_metadata_len(&env, &metadata);
@@ -1528,21 +1544,10 @@ impl TtlVaultContract {
             VAULT_TTL_THRESHOLD,
             ttl,
         );
-        // VaultCount is an incrementing generation ID and must be updated
-        // only after the vault and its owner/beneficiary indexes are persisted.
-        //
-        // Ordering guarantee:
-        //  1) Compute next ID from current vault count
-        //  2) Persist the vault and owner/beneficiary indexes
-        //  3) Persist VaultCount only after the vault is fully saved
-        // If any prior call (save_vault/add_owner_vault_id/add_beneficiary_vault_id)
-        // panics, VaultCount remains unchanged and consumers cannot observe
-        // a hole in the sequence.
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is now allocated atomically up front by
+        // `next_vault_id` (see above), so there is no separate late write of
+        // the counter here — that was the read/write split that made the
+        // counter non-atomic under concurrent vault creation.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -3257,11 +3262,33 @@ impl TtlVaultContract {
                 env.events().publish((BURN_EVENT_TOPIC, vault_id), burn_amount);
             }
             if vault.beneficiaries.is_empty() {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &vault.beneficiary,
-                    &release_amount,
-                );
+                // Issue #1281: use `try_transfer` instead of the panicking
+                // `transfer` so a failed token transfer (e.g. the token
+                // contract trapping or a spend-authorization failure) can be
+                // recorded as `ReleaseStatus::Failed` rather than leaving no
+                // trace at all of the attempted release.
+                if token_client
+                    .try_transfer(
+                        &env.current_contract_address(),
+                        &vault.beneficiary,
+                        &release_amount,
+                    )
+                    .is_err()
+                {
+                    vault.status = ReleaseStatus::Failed;
+                    Self::save_vault(&env, vault_id, &vault);
+                    Self::record_state_transition(
+                        &env,
+                        vault_id,
+                        ReleaseStatus::Locked,
+                        ReleaseStatus::Failed,
+                        &vault.owner,
+                    );
+                    env.storage()
+                        .instance()
+                        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+                    return;
+                }
                 env.events().publish(
                     (RELEASE_TOPIC,),
                     ReleaseEvent {
@@ -6241,12 +6268,16 @@ impl TtlVaultContract {
     /// the full vault struct. Lightweight alternative to `get_vault` when only
     /// the balance is needed.
     ///
+    /// Issue #1278: uses `try_load_vault`'s try-get pattern (including its
+    /// archived-vault fallback), so a missing or archived vault cleanly
+    /// returns `Err(VaultNotFound)` instead of panicking on the ledger lookup.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// `Ok(balance)` if the vault exists, or `ContractError::VaultNotFound`
+    /// `Ok(balance)` if the vault exists (live or archived), or `ContractError::VaultNotFound`
     pub fn get_deposit_total(env: Env, vault_id: u64) -> Result<i128, ContractError> {
         Self::try_load_vault(&env, vault_id)
             .map(|vault| vault.balance)
@@ -6513,7 +6544,10 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// The `ReleaseStatus` enum value (Locked, Released, or Cancelled)
+    /// The `ReleaseStatus` enum value (Locked, Released, Cancelled,
+    /// EmergencyFrozen, or Failed — Issue #1281: `Failed` means a release
+    /// was attempted but the token transfer did not go through, so the
+    /// vault's balance is still held by the contract).
     ///
     /// # Panics
     /// Panics if the vault does not exist
@@ -6531,7 +6565,7 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// * `Ok(ReleaseStatus)` - The vault status (Locked, Released, Cancelled, or EmergencyFrozen)
+    /// * `Ok(ReleaseStatus)` - The vault status (Locked, Released, Cancelled, EmergencyFrozen, or Failed)
     /// * `Err(ContractError::VaultNotFound)` - If the vault does not exist
     pub fn get_vault_status(env: Env, vault_id: u64) -> Result<ReleaseStatus, ContractError> {
         Self::try_load_vault(&env, vault_id)
@@ -6551,6 +6585,27 @@ impl TtlVaultContract {
             .persistent()
             .get(&StorageKey::VaultCount)
             .unwrap_or(0u64)
+    }
+
+    /// Issue #1279: allocates the next vault ID as a single atomic
+    /// read-modify-write, instead of reading `VaultCount` early and writing
+    /// the incremented value back much later (after unrelated storage
+    /// operations). Splitting the read and write allowed two vault-creation
+    /// paths to observe the same `VaultCount` value and mint duplicate IDs;
+    /// performing both steps back-to-back here removes that window.
+    fn next_vault_id(env: &Env) -> u64 {
+        let key = StorageKey::VaultCount;
+        let next_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().persistent().set(&key, &next_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        next_id
     }
 
     /// Returns the total number of vaults created on the contract.
@@ -8259,7 +8314,7 @@ impl TtlVaultContract {
             None => Self::load_token(&env),
         };
 
-        let vault_id = Self::vault_count(env.clone()) + 1;
+        let vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let metadata = String::from_str(&env, "");
         let new_vault = Vault {
@@ -8298,11 +8353,7 @@ impl TtlVaultContract {
         Self::add_owner_vault_id(&env, &caller, vault_id, check_in_interval);
         Self::add_beneficiary_vault_id(&env, &new_beneficiary, vault_id, check_in_interval);
 
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is allocated atomically by `next_vault_id` above.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -9327,8 +9378,20 @@ impl TtlVaultContract {
     ///
     /// # Returns
     /// `Some(Vault)` if the vault exists, `None` otherwise
+    ///
+    /// Issue #1278: falls back to the archived snapshot (see `archive_vault`)
+    /// when the live `Vault` entry is gone, so read-only callers like
+    /// `get_deposit_total` cleanly report `None`/`VaultNotFound` for an
+    /// archived vault instead of relying on a live entry that archiving
+    /// does not guarantee stays around.
     fn try_load_vault(env: &Env, vault_id: u64) -> Option<Vault> {
-        env.storage().persistent().get(&StorageKey::Vault(vault_id))
+        if let Some(vault) = env.storage().persistent().get(&StorageKey::Vault(vault_id)) {
+            return Some(vault);
+        }
+        env.storage()
+            .persistent()
+            .get::<StorageKey, ArchivedVaultInfo>(&StorageKey::ArchivedVault(vault_id))
+            .map(|info| info.vault)
     }
 
     fn load_owner_vault_ids(env: &Env, owner: &Address) -> Vec<u64> {
@@ -9922,7 +9985,7 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::InvalidBeneficiary);
         }
 
-        let new_vault_id = Self::vault_count(env.clone()) + 1;
+        let new_vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let cloned_vault = Vault {
             owner: new_owner.clone(),
@@ -9964,11 +10027,7 @@ impl TtlVaultContract {
             original.check_in_interval,
         );
 
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &new_vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is allocated atomically by `next_vault_id` above.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -10067,7 +10126,7 @@ impl TtlVaultContract {
             None => original.metadata.clone(),
         };
 
-        let new_vault_id = Self::vault_count(env.clone()) + 1;
+        let new_vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let cloned_vault = Vault {
             owner: new_owner.clone(),
@@ -10104,11 +10163,7 @@ impl TtlVaultContract {
         Self::add_owner_vault_id(&env, &new_owner, new_vault_id, check_in_interval);
         Self::add_beneficiary_vault_id(&env, &new_beneficiary, new_vault_id, check_in_interval);
 
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &new_vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is allocated atomically by `next_vault_id` above.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -14386,7 +14441,8 @@ impl TtlVaultContract {
     /// # Arguments
     /// * `vault_id`         - The vault to hibernate
     /// * `caller`           - Must be the vault owner
-    /// * `duration_seconds` - How long (in seconds) the hibernation lasts (> 0)
+    /// * `duration_seconds` - How long (in seconds) the hibernation lasts.
+    ///   Must be within `[MIN_HIBERNATION_SECONDS, MAX_HIBERNATION_SECONDS]`.
     ///
     /// # Errors
     /// * `ContractError::NotOwner`          - Caller is not the vault owner
@@ -14394,7 +14450,8 @@ impl TtlVaultContract {
     /// * `ContractError::AlreadyHibernating`- Vault has an *active* hibernation
     ///   window (a stale entry left over from a hibernation period that has
     ///   already elapsed does not block re-entry)
-    /// * `ContractError::InvalidInterval`   - `duration_seconds` is zero
+    /// * `ContractError::HibernationDurationTooShort` - `duration_seconds` is below `MIN_HIBERNATION_SECONDS` (includes zero)
+    /// * `ContractError::HibernationDurationTooLong`  - `duration_seconds` is above `MAX_HIBERNATION_SECONDS`
     pub fn enter_hibernation(
         env: Env,
         vault_id: u64,
@@ -14402,8 +14459,13 @@ impl TtlVaultContract {
         duration_seconds: u64,
     ) -> Result<(), ContractError> {
         caller.require_auth();
-        if duration_seconds == 0 {
-            return Err(ContractError::InvalidInterval);
+        // Issue #1280: reject both an instant no-op (0, or any value with no
+        // meaningful check-in relief) and an unbounded/"permanent freeze" duration.
+        if duration_seconds < MIN_HIBERNATION_SECONDS {
+            return Err(ContractError::HibernationDurationTooShort);
+        }
+        if duration_seconds > MAX_HIBERNATION_SECONDS {
+            return Err(ContractError::HibernationDurationTooLong);
         }
         let vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
@@ -17035,29 +17097,11 @@ impl TtlVaultContract {
     /// `Ok(())` on success
     ///
     /// # Errors
-    /// * `ContractError::NotOwner`          - Caller is not the vault owner
-    /// * `ContractError::AlreadyReleased`   - Vault is not Locked
-    /// * `ContractError::AlreadyHibernating`- Vault is already hibernating
-    /// * `ContractError::InvalidInterval`   - `duration_seconds` is zero
-    pub fn enter_hibernation(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-        duration_seconds: u64,
-    ) -> Result<(), ContractError> {
-        caller.require_auth();
-        if duration_seconds == 0 {
-            return Err(ContractError::InvalidInterval);
-        }
-        if duration_seconds > MAX_HIBERNATION_SECONDS {
-            return Err(ContractError::HibernationDurationTooLong);
-        }
-        let vault = Self::load_vault(&env, vault_id);
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
+    /// * `ContractError::NotAdmin` - If caller is not the admin
+    /// * `ContractError::Paused` - If contract is paused
+    pub fn add_allowed_token(env: Env, token: Address) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
         }
         Self::require_admin(&env);
 
