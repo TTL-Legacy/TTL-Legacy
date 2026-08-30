@@ -210,11 +210,11 @@ fn test_create_vault_emits_vault_created_event() {
     });
 
     assert!(created_event.is_some(), "VaultCreated event not emitted");
-    let data: (u64, Address, Address, u64, u64) = created_event.unwrap().2.into_val(&env);
-    assert_eq!(data.0, vault_id);
-    assert_eq!(data.1, owner);
-    assert_eq!(data.2, beneficiary);
-    assert_eq!(data.3, 100u64);
+    let data: VaultCreatedEvent = created_event.unwrap().2.into_val(&env);
+    assert_eq!(data.vault_id, vault_id);
+    assert_eq!(data.owner, owner);
+    assert_eq!(data.beneficiary, beneficiary);
+    assert_eq!(data.check_in_interval, 100u64);
 }
 
 #[test]
@@ -2274,10 +2274,10 @@ fn test_update_beneficiary_event_contains_old_and_new_beneficiary() {
     });
     assert!(ben_event.is_some(), "beneficiary_updated event not emitted");
 
-    let data = ben_event.unwrap().2.clone();
-    let (old, new): (Address, Address) = data.try_into_val(&env).unwrap();
-    assert_eq!(old, old_beneficiary);
-    assert_eq!(new, new_beneficiary);
+    let data: BeneficiaryUpdatedEvent = ben_event.unwrap().2.clone().try_into_val(&env).unwrap();
+    assert_eq!(data.vault_id, vault_id);
+    assert_eq!(data.old_beneficiary, old_beneficiary);
+    assert_eq!(data.new_beneficiary, new_beneficiary);
 }
 
 #[test]

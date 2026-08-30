@@ -1675,3 +1675,36 @@ pub struct ReleaseSchedule {
 // Issue #951: topic constants for release schedule events
 pub const SET_RELEASE_SCHEDULE_TOPIC: Symbol = symbol_short!("rl_sched");
 pub const TRANCHE_CLAIMED_TOPIC: Symbol = symbol_short!("tr_claim");
+
+/// Structured event emitted by `create_vault` on successful vault creation.
+/// Issue #1325: allows off-chain indexers to detect new vaults without polling.
+#[contracttype]
+#[derive(Clone)]
+pub struct VaultCreatedEvent {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub beneficiary: Address,
+    pub check_in_interval: u64,
+}
+
+/// Structured event emitted by `check_in` on successful TTL extension.
+/// Issue #1323: allows off-chain listeners (reminders, dashboards) to detect check-ins
+/// without polling vault state.
+#[contracttype]
+#[derive(Clone)]
+pub struct CheckInEvent {
+    pub vault_id: u64,
+    /// The new expiry timestamp after the check-in (last_check_in + check_in_interval).
+    pub new_ttl: u64,
+    pub caller: Address,
+}
+
+/// Structured event emitted by `update_beneficiary` when a beneficiary change is initiated.
+/// Issue #1326: allows off-chain systems to audit beneficiary changes.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryUpdatedEvent {
+    pub vault_id: u64,
+    pub old_beneficiary: Address,
+    pub new_beneficiary: Address,
+}
