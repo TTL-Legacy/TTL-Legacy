@@ -155,6 +155,10 @@ mod batch_withdrawal_tests;
 #[cfg(test)]
 mod withdrawal_dispute_tests;
 
+// Issue #1340: vault ownership transfer with two-step acceptance flow
+#[cfg(test)]
+mod ownership_transfer_1340_tests;
+
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const VAULT_TTL_THRESHOLD: u32 = 1000;
