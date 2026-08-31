@@ -493,6 +493,14 @@ pub enum StorageKey {
     EncryptedBackupCodes(u64),
     // Issue #569: Withdrawal Audit Trail
     WithdrawalAuditLog(u64),
+    // Issue #1293: withdrawal history ring buffer
+    /// Head pointer (0-based) into the per-vault ring buffer.
+    WithdrawalHistoryHead(u64),
+    /// Individual ring buffer slot: (vault_id, slot_index).
+    WithdrawalHistoryEntry(u64, u32),
+    /// Number of withdrawal events ever recorded (saturates at MAX_WITHDRAWAL_HISTORY
+    /// once the buffer is full, then stays there).
+    WithdrawalHistoryLen(u64),
     // Issue #572: Withdrawal Dispute
     WithdrawalDisputes(u64),
     // Issue #565: withdrawal scheduling validation
@@ -1244,6 +1252,42 @@ pub struct WithdrawalAuditEntry {
     pub timestamp: u64,
     pub success: bool,
     pub error_reason: String,
+}
+
+/// Maximum number of withdrawal events kept in the per-vault ring buffer.
+///
+/// Older entries are silently evicted once this limit is reached, keeping
+/// on-chain storage bounded regardless of how many withdrawals a vault
+/// accumulates over its lifetime.
+pub const MAX_WITHDRAWAL_HISTORY: u32 = 50;
+
+/// On-chain withdrawal event record stored in the ring buffer - Issue #1293
+///
+/// This is the canonical representation emitted and stored for every
+/// withdrawal attempt, whether the attempt succeeded or failed.  Fields are
+/// intentionally a superset of `WithdrawalAuditEntry` so that callers of
+/// `get_withdrawal_history` receive richer context without having to
+/// cross-reference the legacy audit log.
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawalEvent {
+    /// Vault that was the target of the withdrawal attempt.
+    pub vault_id: u64,
+    /// Address that initiated the withdrawal (may differ from the vault owner
+    /// in multi-sig or delegated-withdrawal flows).
+    pub caller: Address,
+    /// Requested withdrawal amount in stroops.  Negative values are rejected
+    /// before reaching this point, but the raw value is stored for auditability.
+    pub amount: i128,
+    /// Ledger timestamp (Unix seconds) at which the attempt was recorded.
+    pub timestamp: u64,
+    /// `true` if the withdrawal completed successfully, `false` otherwise.
+    pub success: bool,
+    /// Human-readable failure reason.  Empty string for successful withdrawals.
+    pub error_reason: String,
+    /// Sequential index within this vault's ring buffer (wraps at
+    /// `MAX_WITHDRAWAL_HISTORY`).  Useful for pagination and de-duplication.
+    pub sequence: u32,
 }
 
 /// Withdrawal dispute entry - Issue #572
