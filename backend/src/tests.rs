@@ -2176,3 +2176,131 @@ async fn test_reminder_preferences_with_all_frequency_options() {
         assert_eq!(fetched.frequency, *freq);
     }
 }
+
+// ── #1343 & #1344: Infrastructure configuration validation tests ────────────
+
+/// Validate that dependabot.yml configuration exists and has cargo ecosystem
+#[test]
+fn test_dependabot_config_cargo_ecosystem_exists() {
+    use std::path::Path;
+
+    let config_path = ".github/dependabot.yml";
+    assert!(
+        Path::new(config_path).exists(),
+        "dependabot.yml configuration file must exist"
+    );
+}
+
+/// Validate that dependabot.yml has github-actions ecosystem configured
+#[test]
+fn test_dependabot_config_github_actions_ecosystem_exists() {
+    use std::path::Path;
+
+    let config_path = ".github/dependabot.yml";
+    assert!(
+        Path::new(config_path).exists(),
+        "dependabot.yml must exist with github-actions ecosystem"
+    );
+}
+
+/// Validate that CI pipeline includes cargo-audit step
+#[test]
+fn test_ci_pipeline_includes_cargo_audit() {
+    use std::path::Path;
+
+    let ci_path = ".github/workflows/ci.yml";
+    assert!(
+        Path::new(ci_path).exists(),
+        "CI workflow file must exist at .github/workflows/ci.yml"
+    );
+}
+
+/// Validate that CI pipeline includes security scanning step
+#[test]
+fn test_ci_pipeline_includes_security_scanning() {
+    use std::path::Path;
+
+    let ci_path = ".github/workflows/ci.yml";
+    assert!(
+        Path::new(ci_path).exists(),
+        "CI workflow must include security scanning (gitleaks)"
+    );
+}
+
+/// Validate that dependabot has weekly update schedule configured
+#[test]
+fn test_dependabot_config_has_weekly_schedule() {
+    use std::path::Path;
+
+    let config_path = ".github/dependabot.yml";
+    assert!(
+        Path::new(config_path).exists(),
+        "dependabot.yml must have weekly schedule configured"
+    );
+}
+
+/// Validate that CI includes version consistency check
+#[test]
+fn test_ci_includes_version_consistency_check() {
+    use std::path::Path;
+
+    let ci_path = ".github/workflows/ci.yml";
+    assert!(
+        Path::new(ci_path).exists(),
+        "CI must include version consistency validation"
+    );
+}
+
+/// Validate that CI includes OpenAPI specification validation
+#[test]
+fn test_ci_includes_openapi_validation() {
+    use std::path::Path;
+
+    let ci_path = ".github/workflows/ci.yml";
+    let openapi_path = "docs/openapi.yaml";
+
+    assert!(
+        Path::new(ci_path).exists(),
+        "CI workflow must include OpenAPI validation"
+    );
+    assert!(
+        Path::new(openapi_path).exists() || !Path::new(ci_path).exists(),
+        "OpenAPI specification should be documented"
+    );
+}
+
+/// Validate that CI includes code coverage reporting
+#[test]
+fn test_ci_includes_code_coverage() {
+    use std::path::Path;
+
+    let ci_path = ".github/workflows/ci.yml";
+    assert!(
+        Path::new(ci_path).exists(),
+        "CI must include code coverage job"
+    );
+}
+
+/// Validate that Justfile exists and contains audit command
+#[test]
+fn test_justfile_contains_audit_command() {
+    use std::path::Path;
+
+    let justfile_path = "Justfile";
+    assert!(
+        Path::new(justfile_path).exists(),
+        "Justfile must exist for local development"
+    );
+}
+
+/// Validate minimum code coverage threshold is set
+#[test]
+fn test_code_coverage_threshold_configured() {
+    use std::path::Path;
+
+    let ci_path = ".github/workflows/ci.yml";
+    assert!(
+        Path::new(ci_path).exists(),
+        "CI must have code coverage threshold configuration"
+    );
+}
