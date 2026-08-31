@@ -2004,3 +2004,148 @@ async fn test_checkin_different_vaults_independent_limits() {
         .unwrap();
     assert_eq!(res_b.status(), StatusCode::OK);
 }
+
+// --- Issue #1350: Prometheus Metrics Endpoint Tests ---
+
+fn metrics_app() -> Router {
+    use crate::metrics::Metrics;
+    use axum::{
+        extract::State,
+        response::IntoResponse,
+    };
+
+    let metrics = Metrics::new();
+    metrics.vaults_total.store(42, std::sync::atomic::Ordering::Relaxed);
+    metrics.checkins_total.store(150, std::sync::atomic::Ordering::Relaxed);
+    metrics.releases_total.store(5, std::sync::atomic::Ordering::Relaxed);
+    metrics.active_vaults.store(37, std::sync::atomic::Ordering::Relaxed);
+    metrics.request_errors_total.store(3, std::sync::atomic::Ordering::Relaxed);
+    metrics.http_requests_total.store(500, std::sync::atomic::Ordering::Relaxed);
+
+    Router::new()
+        .route(
+            "/metrics",
+            get(|State(m): State<Arc<Metrics>>| async move {
+                m.render().into_response()
+            }),
+        )
+        .with_state(metrics)
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_responds_with_200() {
+    let app = metrics_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_prometheus_format() {
+    let app = metrics_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("# HELP ttl_legacy_vaults_total"));
+    assert!(text.contains("# TYPE ttl_legacy_vaults_total counter"));
+    assert!(text.contains("ttl_legacy_vaults_total 42"));
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_contains_request_counts() {
+    let app = metrics_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("ttl_legacy_http_requests_total 500"));
+    assert!(text.contains("ttl_legacy_request_errors_total 3"));
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_contains_checkin_rates() {
+    let app = metrics_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("ttl_legacy_checkins_total 150"));
+    assert!(text.contains("ttl_legacy_releases_total 5"));
+    assert!(text.contains("ttl_legacy_active_vaults 37"));
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_has_correct_content_type() {
+    let app = metrics_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let headers = res.headers();
+    assert!(headers
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().contains("text/plain"))
+        .unwrap_or(true));
+}
+
+#[tokio::test]
+async fn test_metrics_endpoint_includes_gauge_metrics() {
+    let app = metrics_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(text.contains("# TYPE ttl_legacy_active_vaults gauge"));
+    assert!(text.contains("ttl_legacy_active_vaults 37"));
+}
