@@ -1886,3 +1886,121 @@ async fn test_reminder_email_does_not_contain_raw_vault_id() {
     assert!(rendered.contains("Check in to your vault"));
     assert!(rendered.contains("https://app.ttllegacy.io/reminders/check-in?token="));
 }
+
+// ── Per-user check-in rate limiting tests ────────────────────────────────────
+
+/// Build a minimal test router that wires the check-in route with the
+/// per-user rate limiter.  The limiter uses a 1 req / 60s window so the
+/// *second* immediate request in the same test must return 429.
+fn checkin_rate_limit_app() -> Router {
+    use crate::rate_limit::{RateLimiter, RateLimitConfig, checkin_rate_limit_middleware};
+
+    let limiter = RateLimiter::new(RateLimitConfig::new(1, 60));
+
+    Router::new().route(
+        "/api/vaults/:vault_id/check-in",
+        post(routes::check_in)
+            .layer(middleware::from_fn_with_state(limiter, checkin_rate_limit_middleware)),
+    )
+}
+
+/// The first POST to `/api/vaults/:vault_id/check-in` must succeed with 200.
+#[tokio::test]
+async fn test_checkin_first_request_succeeds() {
+    let app = checkin_rate_limit_app();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/vaults/vault-42/check-in")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["vault_id"], "vault-42");
+    assert_eq!(json["message"], "Check-in recorded successfully");
+    assert!(json["checked_in_at"].is_string());
+}
+
+/// The second immediate POST for the same vault must return 429 with
+/// `Retry-After` and an `error` field in the JSON body.
+#[tokio::test]
+async fn test_checkin_second_request_rate_limited() {
+    use tower::ServiceExt;
+
+    let app = checkin_rate_limit_app();
+
+    // First request — must succeed.
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/vaults/vault-99/check-in")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Second immediate request — same vault_id, same window → 429.
+    // Because the RateLimiter store is shared via Arc, cloning the router
+    // keeps the same underlying counter.
+    let second = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/vaults/vault-99/check-in")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(second.headers().contains_key("retry-after"));
+
+    let body = axum::body::to_bytes(second.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "rate_limit_exceeded");
+}
+
+/// Two different vault IDs must have independent counters — both first
+/// requests must succeed even when issued back-to-back.
+#[tokio::test]
+async fn test_checkin_different_vaults_independent_limits() {
+    use tower::ServiceExt;
+
+    let app = checkin_rate_limit_app();
+
+    let res_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/vaults/vault-aaa/check-in")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_a.status(), StatusCode::OK);
+
+    let res_b = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/vaults/vault-bbb/check-in")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_b.status(), StatusCode::OK);
+}

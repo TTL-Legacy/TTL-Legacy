@@ -220,7 +220,7 @@ async fn main() {
     };
 
     let global_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(100, 60));
-    let checkin_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(10, 60));
+    let checkin_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(1, 60));
     let release_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(5, 60));
     let email_token_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(3, 60));
     let sensitive_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(20, 60));
@@ -265,6 +265,11 @@ async fn main() {
         .route(
             "/api/vaults/:vault_id/release-history",
             get(routes::get_vault_release_history),
+        )
+        .route(
+            "/api/vaults/:vault_id/check-in",
+            post(routes::check_in)
+                .layer(middleware::from_fn_with_state(checkin_limiter, rate_limit::checkin_rate_limit_middleware)),
         )
         .route("/api/auth/token", post(auth::login))
         .route("/api/auth/refresh", post(auth::refresh))
