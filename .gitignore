@@ -78,3 +78,4 @@ coverage/
 # Temporary / misc
 *.tmp
 *.bak
+target/

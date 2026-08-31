@@ -1014,3 +1014,213 @@ pub struct BeneficiaryArchivalNotification {
     /// Error message if delivery failed.
     pub error: Option<String>,
 }
+
+// ── Vault summary / bulk summary ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSummary {
+    pub vault_id: String,
+    pub owner: String,
+    pub status: VaultStatus,
+    pub ttl_remaining: Option<u64>,
+    pub balance: i128,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkSummaryRequest {
+    pub vault_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSummaryEntry {
+    pub vault_id: String,
+    pub status: Option<VaultStatus>,
+    pub ttl_remaining: Option<u64>,
+    pub balance: Option<i128>,
+    pub last_check_in: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkSummaryResponse {
+    pub summaries: Vec<VaultSummaryEntry>,
+}
+
+// ── Vault health scoring ────────────────────────────────────────────────────
+
+/// Per-factor breakdown of a vault health score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthFactors {
+    pub ttl_buffer: u8,
+    pub streak: u8,
+    pub balance: u8,
+    pub passkey_diversity: u8,
+}
+
+/// 0-100 health score with a per-factor breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultHealthResponse {
+    pub score: u8,
+    pub factors: HealthFactors,
+    pub computed_at: DateTime<Utc>,
+}
+
+// ── Escalation (#1101) ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum EscalationTier {
+    T1,
+    T2,
+    T3,
+}
+
+impl EscalationTier {
+    /// Hours before TTL expiry at which this tier triggers.
+    pub fn hours_before_expiry(self) -> u32 {
+        match self {
+            EscalationTier::T1 => 168,
+            EscalationTier::T2 => 72,
+            EscalationTier::T3 => 24,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationEvent {
+    pub id: String,
+    pub vault_id: u64,
+    pub tier: EscalationTier,
+    pub dispatched_at: DateTime<Utc>,
+    pub channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationState {
+    pub vault_id: u64,
+    pub last_escalation_tier: Option<EscalationTier>,
+    pub escalated_at: Option<DateTime<Utc>>,
+}
+
+// ── Vault timeline ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineEventKind {
+    EscalationSent,
+    WebhookDelivered,
+    WebhookFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub id: String,
+    pub vault_id: String,
+    pub kind: TimelineEventKind,
+    pub timestamp: DateTime<Utc>,
+    pub description: String,
+    pub amount: Option<i128>,
+    pub metadata: serde_json::Value,
+}
+
+// ── Webhook delivery / retry (#1102) ────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WebhookDeliveryStatus {
+    Pending,
+    Retrying,
+    Delivered,
+    DeliveryFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookAttempt {
+    pub attempted_at: DateTime<Utc>,
+    pub http_status: u16,
+    pub response_body: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDelivery {
+    pub id: String,
+    pub vault_id: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub endpoint_url: String,
+    pub status: WebhookDeliveryStatus,
+    pub attempt_count: u32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub attempts: Vec<WebhookAttempt>,
+}
+
+// ── Two-factor authentication (2FA) ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TwoFactorMethod {
+    Sms,
+    Email,
+    Totp,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Enable2FARequest {
+    pub method: TwoFactorMethod,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub otp: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Enable2FAResponse {
+    pub vault_id: String,
+    pub method: TwoFactorMethod,
+    pub secret: Option<String>,
+    pub provisioning_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwoFactorConfig {
+    pub vault_id: String,
+    pub method: TwoFactorMethod,
+    pub enabled: bool,
+    pub secret: Option<String>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub verified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TwoFactorStatusResponse {
+    pub vault_id: String,
+    pub enabled: bool,
+    pub method: Option<TwoFactorMethod>,
+    pub verified: bool,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+}
+
+// ── Request/response bodies for scenario simulation & sponsored releases ────
+
+#[derive(Debug, Deserialize)]
+pub struct ScenarioSimulationRequest {
+    pub scenario: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SponsoredReleaseRequest {
+    pub vault_id: String,
+    pub sponsor_address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SponsoredReleaseResponse {
+    pub release_id: String,
+    pub vault_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SponsoredReleaseListResponse {
+    pub releases: Vec<serde_json::Value>,
+}

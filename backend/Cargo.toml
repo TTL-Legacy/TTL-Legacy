@@ -38,7 +38,16 @@ thiserror = "1"
 csv = "1"
 
 # SQLite used by the axum DB contract (Db::open/migrate/upsert/get/all)
-rusqlite = { version = "0.33", features = ["bundled"] }
+# NOTE: rusqlite and sqlx-sqlite share `libsqlite3-sys` in this workspace.
+# rusqlite 0.30 and sqlx 0.7.4 both resolve to libsqlite3-sys 0.27, so the two
+# SQLite bindings unify to a single link unit; newer rusqlite pulls a newer
+# libsqlite3-sys that conflicts with sqlx-sqlite 0.7 (which pin ^0.27).
+rusqlite = { version = "0.30", features = ["bundled", "i128_blob"] }
+
+# 2FA (TOTP/HMAC-SHA1) and global lazy singletons
+hmac = { version = "0.12", features = ["std"] }
+sha1 = { version = "0.10" }
+once_cell = "1"
 
 # Versioned schema migrations (Issue #1176) — runs migrations/*.sql against
 # the same SQLite file the rusqlite-based Db above queries at runtime.

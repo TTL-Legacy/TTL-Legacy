@@ -4578,7 +4578,7 @@ fn test_accept_with_threshold_beneficiary_only() {
     let result = client.try_accept_with_threshold(&vault_id, &100_000i128);
     assert!(result.is_ok());
 
-    let acceptance = client.get_beneficiary_conditional_acceptance(&vault_id);
+    let acceptance = client.get_beneficiary_cond_acceptance(&vault_id);
     assert!(acceptance.is_some());
     assert_eq!(acceptance.unwrap().min_balance_threshold, 100_000i128);
 }
@@ -4676,11 +4676,11 @@ fn test_trigger_release_without_threshold_condition() {
 }
 
 #[test]
-fn test_get_beneficiary_conditional_acceptance_not_set() {
+fn test_get_beneficiary_cond_acceptance_not_set() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
 
-    let acceptance = client.get_beneficiary_conditional_acceptance(&vault_id);
+    let acceptance = client.get_beneficiary_cond_acceptance(&vault_id);
     assert!(acceptance.is_none());
 }
 
@@ -4693,7 +4693,7 @@ fn test_accept_with_threshold_stores_timestamp() {
     client.accept_with_threshold(&vault_id, &100_000i128);
     let after_timestamp = env.ledger().timestamp();
 
-    let acceptance = client.get_beneficiary_conditional_acceptance(&vault_id);
+    let acceptance = client.get_beneficiary_cond_acceptance(&vault_id);
     assert!(acceptance.is_some());
     let acc = acceptance.unwrap();
     assert!(acc.accepted_at >= before_timestamp && acc.accepted_at <= after_timestamp);
@@ -4750,7 +4750,7 @@ fn test_decline_with_threshold_beneficiary_only() {
     let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
     assert!(result.is_ok());
 
-    let decline = client.get_beneficiary_conditional_decline(&vault_id);
+    let decline = client.get_beneficiary_cond_decline(&vault_id);
     assert!(decline.is_some());
     assert_eq!(decline.unwrap().max_balance_threshold, 50_000i128);
 }
@@ -4805,7 +4805,7 @@ fn test_decline_with_threshold_stores_timestamp() {
     client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
     let after = env.ledger().timestamp();
 
-    let decline = client.get_beneficiary_conditional_decline(&vault_id);
+    let decline = client.get_beneficiary_cond_decline(&vault_id);
     assert!(decline.is_some());
     let dec = decline.unwrap();
     assert!(dec.declined_at >= before && dec.declined_at <= after);
@@ -4834,12 +4834,12 @@ fn test_decline_with_threshold_multiple_declines() {
 
     // First decline
     client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
-    let decline1 = client.get_beneficiary_conditional_decline(&vault_id);
+    let decline1 = client.get_beneficiary_cond_decline(&vault_id);
     assert_eq!(decline1.unwrap().max_balance_threshold, 50_000i128);
 
     // Second decline should overwrite the first
     client.decline_with_threshold(&vault_id, &100_000i128, &String::from_str(&env, "Still too low"));
-    let decline2 = client.get_beneficiary_conditional_decline(&vault_id);
+    let decline2 = client.get_beneficiary_cond_decline(&vault_id);
     assert_eq!(decline2.unwrap().max_balance_threshold, 100_000i128);
 }
 
@@ -4876,7 +4876,7 @@ fn test_decline_with_threshold_with_reason_stored() {
     let reason = String::from_str(&env, "Vault balance too low for obligations");
     client.decline_with_threshold(&vault_id, &100_000i128, &reason);
 
-    let decline = client.get_beneficiary_conditional_decline(&vault_id);
+    let decline = client.get_beneficiary_cond_decline(&vault_id);
     assert!(decline.is_some());
     let dec = decline.unwrap();
     assert_eq!(dec.reason, reason);
