@@ -2004,3 +2004,175 @@ async fn test_checkin_different_vaults_independent_limits() {
         .unwrap();
     assert_eq!(res_b.status(), StatusCode::OK);
 }
+
+// ── #1342: Configurable check-in reminder intervals tests ──────────────────────
+
+#[tokio::test]
+async fn test_set_reminder_preferences_with_custom_hours() {
+    let app = test_app();
+    let body = json!({
+        "channels": ["email"],
+        "hours_before_expiry": 72,
+        "frequency": "daily"
+    });
+    let res = post_json(app, "/api/vaults/1001/reminder-preferences", body).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["vault_id"], 1001);
+    assert_eq!(json["hours_before_expiry"], 72);
+}
+
+#[tokio::test]
+async fn test_get_reminder_preferences_multiple_channels() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 2001,
+        channels: vec![
+            crate::models::Channel::Email,
+            crate::models::Channel::Sms,
+        ],
+        hours_before_expiry: 48,
+        frequency: crate::models::Frequency::Daily,
+        deleted_at: None,
+    };
+    db.upsert(&prefs).unwrap();
+
+    let fetched = db.get(2001).unwrap();
+    assert_eq!(fetched.channels.len(), 2);
+    assert!(fetched.channels.contains(&crate::models::Channel::Email));
+    assert!(fetched.channels.contains(&crate::models::Channel::Sms));
+    assert_eq!(fetched.hours_before_expiry, 48);
+}
+
+#[tokio::test]
+async fn test_delete_reminder_preferences() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 3001,
+        channels: vec![crate::models::Channel::Email],
+        hours_before_expiry: 24,
+        frequency: crate::models::Frequency::Once,
+        deleted_at: None,
+    };
+    db.upsert(&prefs).unwrap();
+
+    db.soft_delete_reminder(3001).unwrap();
+
+    let result = db.get(3001);
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_reminder_frequency_hourly() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 4001,
+        channels: vec![crate::models::Channel::Push],
+        hours_before_expiry: 24,
+        frequency: crate::models::Frequency::Hourly,
+        deleted_at: None,
+    };
+    db.upsert(&prefs).unwrap();
+
+    let fetched = db.get(4001).unwrap();
+    assert_eq!(fetched.frequency, crate::models::Frequency::Hourly);
+}
+
+#[tokio::test]
+async fn test_reminder_frequency_weekly() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 5001,
+        channels: vec![crate::models::Channel::Email],
+        hours_before_expiry: 168,
+        frequency: crate::models::Frequency::Weekly,
+        deleted_at: None,
+    };
+    db.upsert(&prefs).unwrap();
+
+    let fetched = db.get(5001).unwrap();
+    assert_eq!(fetched.frequency, crate::models::Frequency::Weekly);
+}
+
+#[tokio::test]
+async fn test_reminder_frequency_monthly() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 6001,
+        channels: vec![crate::models::Channel::Sms],
+        hours_before_expiry: 720,
+        frequency: crate::models::Frequency::Monthly,
+        deleted_at: None,
+    };
+    db.upsert(&prefs).unwrap();
+
+    let fetched = db.get(6001).unwrap();
+    assert_eq!(fetched.frequency, crate::models::Frequency::Monthly);
+}
+
+#[tokio::test]
+async fn test_list_all_reminders() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let prefs1 = crate::models::ReminderPreferences {
+        vault_id: 7001,
+        channels: vec![crate::models::Channel::Email],
+        hours_before_expiry: 24,
+        frequency: crate::models::Frequency::Once,
+        deleted_at: None,
+    };
+    let prefs2 = crate::models::ReminderPreferences {
+        vault_id: 7002,
+        channels: vec![crate::models::Channel::Sms],
+        hours_before_expiry: 48,
+        frequency: crate::models::Frequency::Daily,
+        deleted_at: None,
+    };
+    db.upsert(&prefs1).unwrap();
+    db.upsert(&prefs2).unwrap();
+
+    let all = db.all().unwrap();
+    assert!(all.len() >= 2);
+}
+
+#[tokio::test]
+async fn test_reminder_preferences_with_all_frequency_options() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    for (idx, freq) in [
+        crate::models::Frequency::Once,
+        crate::models::Frequency::Hourly,
+        crate::models::Frequency::Daily,
+        crate::models::Frequency::Weekly,
+        crate::models::Frequency::Monthly,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let prefs = crate::models::ReminderPreferences {
+            vault_id: 8000 + idx as u64,
+            channels: vec![crate::models::Channel::Email],
+            hours_before_expiry: 24,
+            frequency: *freq,
+            deleted_at: None,
+        };
+        db.upsert(&prefs).unwrap();
+
+        let fetched = db.get(8000 + idx as u64).unwrap();
+        assert_eq!(fetched.frequency, *freq);
+    }
+}
