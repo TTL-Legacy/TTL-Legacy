@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, panic_with_error, symbol_short, Bytes, BytesN, Env,
+    contract, contractimpl, contracterror, contracttype, panic_with_error, symbol_short, Address,
+    Bytes, BytesN, Env,
 };
 
 pub const MAX_PROOF_SIZE: u32 = 4096;
@@ -21,9 +22,21 @@ pub enum VerifierError {
     ProofTooLarge = 3,
     /// Claim bytes exceed MAX_CLAIM_SIZE.
     ClaimTooLarge = 4,
+    /// The contract is already initialized.
+    AlreadyInitialized = 5,
+    /// The sender is not the registered admin.
+    NotAdmin = 6,
+    /// The given oracle address is not registered.
+    OracleNotFound = 7,
 }
 
-use keys::DataKey;
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey {
+    Admin,
+    Oracle(Address),
+    Attestation(BytesN<32>, BytesN<32>),
+}
 
 #[contract]
 pub struct ZkVerifierContract;
@@ -37,6 +50,13 @@ impl ZkVerifierContract {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+    }
+
+    fn require_admin(env: &Env) {
+        let Some(admin) = env.storage().instance().get::<DataKey, Address>(&DataKey::Admin) else {
+            panic_with_error!(env, VerifierError::NotAdmin);
+        };
+        admin.require_auth();
     }
 
     /// Register a trusted oracle. Admin only.
@@ -104,7 +124,7 @@ impl ZkVerifierContract {
         // Real ZK verification would replace this with cryptographic validation.
         let result = !(proof.len() == 1 && proof.get(0) == Some(0x00));
 
-        let claim_hash: BytesN<32> = env.crypto().sha256(&claim);
+        let claim_hash: BytesN<32> = env.crypto().sha256(&claim).into();
         env.events().publish((VERIFY_CLAIM_TOPIC,), (result, claim_hash));
 
         result

@@ -1,5 +1,5 @@
 use soroban_sdk::{contractclient, Address, Env};
-use crate::types::ContractError;
+use crate::ContractError;
 
 /// Minimal oracle interface for conditional release queries.
 /// External oracle contracts must expose a `query_release` function returning a boolean

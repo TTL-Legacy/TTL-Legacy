@@ -1,11 +1,14 @@
 use crate::models::*;
 use crate::db::*;
-use axum::http::HeaderMap;
+use crate::error::AppError;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::instrument;
 
 
@@ -925,9 +928,9 @@ pub fn get_vault_health_handler(
     store: &VaultStore,
     cache: &HealthCache,
     vault_id: &str,
-    /// Streak value sourced from external context (0 if unavailable).
+    // Streak value sourced from external context (0 if unavailable).
     streak: u32,
-    /// Number of registered passkeys (0 if unavailable).
+    // Number of registered passkeys (0 if unavailable).
     passkey_count: u32,
 ) -> Result<VaultHealthResponse, String> {
     // Return cached result if still fresh
@@ -1039,7 +1042,7 @@ fn check_bulk_rate_limit(rate_store: &BulkRateStore, user_id: &str) -> bool {
         window_start: now,
     });
     // Reset window if expired
-    if (now - entry.window_start).num_seconds() >= BULK_RATE_WINDOW_SECS {
+    if now.signed_duration_since(entry.window_start).num_seconds() >= BULK_RATE_WINDOW_SECS {
         entry.count = 0;
         entry.window_start = now;
     }
