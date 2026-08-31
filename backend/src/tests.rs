@@ -2304,3 +2304,174 @@ fn test_code_coverage_threshold_configured() {
         "CI must have code coverage threshold configuration"
     );
 }
+
+// ── Vault subscription and notification endpoint tests ───────────────────────
+
+#[tokio::test]
+async fn test_set_vault_subscription_with_email_channel() {
+    let app = test_app();
+    let body = json!({
+        "owner": "owner@example.com",
+        "channels": ["email"],
+        "frequency": "daily"
+    });
+    let res = post_json(app, "/api/vaults/5001/subscriptions", body).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["vault_id"], 5001);
+}
+
+#[tokio::test]
+async fn test_set_vault_subscription_with_sms_channel() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let sub = crate::models::Subscription {
+        vault_id: 5002,
+        owner: "owner-sms".to_string(),
+        channels: vec![crate::models::SubscriptionChannel::Sms],
+        frequency: crate::models::SubscriptionFrequency::Hourly,
+    };
+    db.upsert_subscription(&sub).unwrap();
+
+    let fetched = db.get_subscription(5002).unwrap();
+    assert!(fetched.is_some());
+    let fetched_sub = fetched.unwrap();
+    assert_eq!(fetched_sub.vault_id, 5002);
+}
+
+#[tokio::test]
+async fn test_delete_vault_subscription() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let sub = crate::models::Subscription {
+        vault_id: 5003,
+        owner: "owner-to-delete".to_string(),
+        channels: vec![crate::models::SubscriptionChannel::Email],
+        frequency: crate::models::SubscriptionFrequency::Daily,
+    };
+    db.upsert_subscription(&sub).unwrap();
+
+    db.delete_subscription(5003).unwrap();
+
+    let fetched = db.get_subscription(5003).unwrap();
+    assert!(fetched.is_none());
+}
+
+#[tokio::test]
+async fn test_vault_subscription_with_multiple_channels() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let sub = crate::models::Subscription {
+        vault_id: 5004,
+        owner: "owner-multi".to_string(),
+        channels: vec![
+            crate::models::SubscriptionChannel::Email,
+            crate::models::SubscriptionChannel::Sms,
+        ],
+        frequency: crate::models::SubscriptionFrequency::Weekly,
+    };
+    db.upsert_subscription(&sub).unwrap();
+
+    let fetched = db.get_subscription(5004).unwrap();
+    assert!(fetched.is_some());
+    let fetched_sub = fetched.unwrap();
+    assert_eq!(fetched_sub.channels.len(), 2);
+}
+
+#[tokio::test]
+async fn test_subscription_frequency_weekly() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let sub = crate::models::Subscription {
+        vault_id: 5005,
+        owner: "owner-weekly".to_string(),
+        channels: vec![crate::models::SubscriptionChannel::Email],
+        frequency: crate::models::SubscriptionFrequency::Weekly,
+    };
+    db.upsert_subscription(&sub).unwrap();
+
+    let fetched = db.get_subscription(5005).unwrap();
+    assert!(fetched.is_some());
+    assert_eq!(
+        fetched.unwrap().frequency,
+        crate::models::SubscriptionFrequency::Weekly
+    );
+}
+
+#[tokio::test]
+async fn test_subscription_frequency_monthly() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let sub = crate::models::Subscription {
+        vault_id: 5006,
+        owner: "owner-monthly".to_string(),
+        channels: vec![crate::models::SubscriptionChannel::Sms],
+        frequency: crate::models::SubscriptionFrequency::Monthly,
+    };
+    db.upsert_subscription(&sub).unwrap();
+
+    let fetched = db.get_subscription(5006).unwrap();
+    assert!(fetched.is_some());
+    assert_eq!(
+        fetched.unwrap().frequency,
+        crate::models::SubscriptionFrequency::Monthly
+    );
+}
+
+#[tokio::test]
+async fn test_idempotency_key_support_for_preferences() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let idem_key = "test-idem-key-12345";
+
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 6001,
+        channels: vec![crate::models::Channel::Email],
+        hours_before_expiry: 24,
+        frequency: crate::models::Frequency::Daily,
+        deleted_at: None,
+    };
+    db.upsert(&prefs).unwrap();
+
+    let body_json = serde_json::to_string(&prefs).unwrap();
+    db.store_idempotency(idem_key, 200, &body_json);
+
+    let cached = db.check_idempotency(idem_key);
+    assert!(cached.is_some());
+}
+
+#[tokio::test]
+async fn test_idempotency_prevents_duplicate_requests() {
+    let db = Arc::new(Db::open(":memory:").unwrap());
+    db.migrate().unwrap();
+
+    let idem_key = "duplicate-test-key";
+    let prefs = crate::models::ReminderPreferences {
+        vault_id: 6002,
+        channels: vec![crate::models::Channel::Sms],
+        hours_before_expiry: 48,
+        frequency: crate::models::Frequency::Hourly,
+        deleted_at: None,
+    };
+
+    let body_json = serde_json::to_string(&prefs).unwrap();
+    db.store_idempotency(idem_key, 200, &body_json);
+
+    let first_check = db.check_idempotency(idem_key);
+    assert!(first_check.is_some());
+
+    let second_check = db.check_idempotency(idem_key);
+    assert!(second_check.is_some());
+    assert_eq!(
+        first_check.unwrap().response_body,
+        second_check.unwrap().response_body
+    );
+}
