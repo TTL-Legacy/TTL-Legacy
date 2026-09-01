@@ -72,7 +72,7 @@ fn regression_checkin_extends_ttl() {
     assert!(ttl_before.is_some(), "TTL should exist after creation");
 
     env.ledger().set_sequence_number(env.ledger().sequence() + 500);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let ttl_after = client.get_ttl_remaining(&vault_id);
     assert!(ttl_after.is_some(), "TTL should exist after check-in");
@@ -165,7 +165,7 @@ fn regression_withdrawal_updates_balance() {
 
     let balance_before = client.get_vault_balance(&vault_id);
     let withdrawal_amount = 30_000i128;
-    client.withdraw(&vault_id, &withdrawal_amount);
+    client.withdraw(&vault_id, &withdrawal_amount, &None, &None, &None);
 
     let balance_after = client.get_vault_balance(&vault_id);
     assert_eq!(
@@ -184,7 +184,7 @@ fn regression_withdrawal_exceeds_balance_rejected() {
     let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
     client.deposit(&vault_id, &50_000i128);
 
-    let result = client.try_withdraw(&vault_id, &100_000i128);
+    let result = client.try_withdraw(&vault_id, &100_000i128, &None, &None, &None);
     assert!(result.is_err(), "Withdrawal exceeding balance should be rejected");
 }
 
@@ -197,7 +197,7 @@ fn regression_beneficiary_update_persists() {
     let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
     
     let new_beneficiary = Address::generate(&env);
-    client.update_beneficiary(&vault_id, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &new_beneficiary, &None, &None, &None);
 
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.beneficiary, new_beneficiary, "Beneficiary should be updated");
@@ -214,7 +214,7 @@ fn regression_only_owner_can_checkin() {
     let unauthorized_user = Address::generate(&env);
     env.mock_all_auths_allowing_non_root_auth();
 
-    let result = client.try_check_in(&vault_id);
+    let result = client.try_check_in(&vault_id, &None, &None);
     // Note: In a real scenario with proper auth, this would fail
     // This test documents the expected behavior
     assert!(result.is_ok() || result.is_err(), "Auth check should be enforced");

@@ -38,7 +38,7 @@ fn test_withdraw_rejected_for_non_owner() {
     let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
     client.deposit(&vault_id, &owner, &500_000i128);
 
-    let result = client.try_withdraw(&vault_id, &attacker, &100_000i128);
+    let result = client.try_withdraw(&vault_id, &attacker, &100_000i128, &None, &None, &None);
     assert!(result.is_err(), "withdraw should reject a non-owner caller");
     match result.unwrap_err().unwrap() {
         ContractError::NotOwner => {}
@@ -59,7 +59,7 @@ fn test_withdraw_rejected_for_beneficiary() {
     let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
     client.deposit(&vault_id, &owner, &500_000i128);
 
-    let result = client.try_withdraw(&vault_id, &beneficiary, &100_000i128);
+    let result = client.try_withdraw(&vault_id, &beneficiary, &100_000i128, &None, &None, &None);
     assert!(result.is_err());
     match result.unwrap_err().unwrap() {
         ContractError::NotOwner => {}
@@ -75,7 +75,7 @@ fn test_withdraw_succeeds_for_owner() {
     let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
     client.deposit(&vault_id, &owner, &500_000i128);
 
-    let result = client.try_withdraw(&vault_id, &owner, &100_000i128);
+    let result = client.try_withdraw(&vault_id, &owner, &100_000i128, &None, &None, &None);
     assert!(result.is_ok());
 
     let vault = client.get_vault(&vault_id);

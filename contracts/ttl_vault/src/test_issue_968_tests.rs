@@ -111,7 +111,7 @@ fn test_check_in_updates_last_check_in_timestamp() {
     // Check-in requires a passkey hash (use mock)
     let passkey_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
     let nonce = 0u64;
-    let _ = client.check_in(&vault_id, &owner, &passkey_hash, &nonce);
+    let _ = client.check_in(&vault_id, &owner, &passkey_hash, &nonce, &None, &None);
 
     let vault_after = client.get_vault(&vault_id);
 

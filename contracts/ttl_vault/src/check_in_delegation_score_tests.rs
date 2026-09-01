@@ -306,7 +306,7 @@ fn test_score_stays_perfect_after_on_time_check_in() {
 
     // Check in well within the interval
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     assert_eq!(client.get_check_in_score(&id), 10000u32);
     let vault = client.get_vault(&id);
@@ -324,7 +324,7 @@ fn test_score_decreases_after_late_check_in() {
 
     // Advance past the check-in interval → late
     env.ledger().with_mut(|l| l.timestamp += 7200);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     let score = client.get_check_in_score(&id);
     // 1 on-time out of 1 total would be 10000; but this was late → 0 on-time out of 1 = 0
@@ -343,7 +343,7 @@ fn test_score_stays_perfect_multiple_on_time() {
 
     for i in 1u64..=5 {
         env.ledger().with_mut(|l| l.timestamp = i * 100);
-        client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+        client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     }
 
     assert_eq!(client.get_check_in_score(&id), 10000u32);
@@ -361,19 +361,19 @@ fn test_score_proportional_mixed_check_ins() {
 
     // 1st: on time (within interval)
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     // 2nd: on time
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     // 3rd: late (past interval from 2nd check-in)
     env.ledger().with_mut(|l| l.timestamp += 7200);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     // 4th: late again
     env.ledger().with_mut(|l| l.timestamp += 7200);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     // 2 on-time out of 4 total → score = 2*10000/4 = 5000
     assert_eq!(client.get_check_in_score(&id), 5000u32);
@@ -436,7 +436,7 @@ fn test_score_mixed_owner_and_delegate_check_ins() {
 
     // Owner on-time check-in
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     // Delegate on-time check-in
     env.ledger().with_mut(|l| l.timestamp += 100);
@@ -444,7 +444,7 @@ fn test_score_mixed_owner_and_delegate_check_ins() {
 
     // Owner late check-in
     env.ledger().with_mut(|l| l.timestamp += 100_000);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     // 2 on-time, 3 total → 2*10000/3 = 6666
     let score = client.get_check_in_score(&id);
@@ -461,10 +461,10 @@ fn test_get_check_in_score_matches_vault_field() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     env.ledger().with_mut(|l| l.timestamp += 7200);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     let vault_score = client.get_vault(&id).check_in_score;
     let fn_score = client.get_check_in_score(&id);

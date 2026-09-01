@@ -50,7 +50,7 @@ fn test_calendar_export_ics_format_validity() {
 
     // Initial check in to reset the timestamp
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Get calendar export - should return valid iCal format
     // The contract should support GET /api/vaults/{id}/checkin/calendar.ics
@@ -69,7 +69,7 @@ fn test_calendar_export_includes_12_deadlines() {
     client.deposit(&owner, &vault_id, &deposit_amount);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Calendar export should include next 12 check-in deadlines
     let vault = client.get_vault(&vault_id);
@@ -87,7 +87,7 @@ fn test_calendar_export_custom_before_days_parameter() {
     client.deposit(&owner, &vault_id, &deposit_amount);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Test with different before_days values (default 3, custom values 1, 5, 7)
     let vault = client.get_vault(&vault_id);
@@ -105,7 +105,7 @@ fn test_calendar_export_cache_headers() {
     client.deposit(&owner, &vault_id, &deposit_amount);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Cache headers should be set to avoid regenerating on every request
     // Verify vault is retrievable (cache-related functionality)
@@ -125,7 +125,7 @@ fn test_calendar_export_deadline_accuracy() {
 
     let mut now = env.ledger().timestamp() + 100;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Get current vault state and verify deadlines are accurate
     let vault = client.get_vault(&vault_id);

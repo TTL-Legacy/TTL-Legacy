@@ -70,7 +70,7 @@ fn test_ttl_resets_after_check_in() {
 
     let passkey_hash = BytesN::<32>::from_array(&env, &[7u8; 32]);
     client.add_passkey(&vault_id, &owner, &passkey_hash);
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
 
     assert_eq!(client.get_ttl_remaining(&vault_id), Some(interval));
 }

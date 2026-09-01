@@ -51,11 +51,11 @@ fn test_full_lifecycle_single_beneficiary() {
 
     // 3. Multiple check-ins keep vault alive
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     assert!(!client.is_expired(&vault_id));
 
     // 4. Miss a check-in → vault expires
@@ -103,7 +103,7 @@ fn test_full_lifecycle_multi_beneficiary_bps_split() {
 
     // 5. Check-in once, then expire
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     env.ledger().with_mut(|l| l.timestamp += interval + 1);
     assert!(client.is_expired(&vault_id));
 
@@ -234,7 +234,7 @@ fn test_partial_liquidate_then_check_in_resets_ttl() {
 
     // Now check-in as normal and confirm TTL extends.
     let passkey = BytesN::from_array(&env, &[0u8; 32]);
-    client.check_in(&vault_id, &owner, &passkey).unwrap();
+    client.check_in(&vault_id, &owner, &passkey, &None, &None).unwrap();
     let ttl_after_checkin = client.get_ttl_remaining(&vault_id).unwrap();
     assert_eq!(ttl_after_checkin, interval);
 }

@@ -41,7 +41,7 @@ mod tests {
 
         env.ledger().with_mut(|l| l.timestamp = 5_000);
         client
-            .check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64)
+            .check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None)
             .unwrap();
 
         assert_eq!(client.get_last_check_in(&vault_id), 5_000);

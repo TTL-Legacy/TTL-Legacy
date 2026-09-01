@@ -106,7 +106,7 @@ fn lifecycle_full_flow() {
         &owner,
         &BytesN::from_array(&env, &[1u8; 32]),
         &0u64,
-    );
+    , &None, &None);
     assert!(
         !client.is_expired(&vault_id),
         "vault must not be expired after check-in"
@@ -244,7 +244,7 @@ fn test_activity_log_checkin_recorded() {
         &owner,
         &BytesN::from_array(&env, &[2u8; 32]),
         &0u64,
-    );
+    , &None, &None);
 
     // Vault should still be active after check-in
     assert!(!client.is_expired(&vault_id));
@@ -265,7 +265,7 @@ fn test_activity_log_sequence_of_events() {
         &owner,
         &BytesN::from_array(&env, &[3u8; 32]),
         &0u64,
-    );
+    , &None, &None);
 
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.balance, deposit_amount);
@@ -308,7 +308,7 @@ fn test_activity_log_persistence_across_operations() {
         &owner,
         &BytesN::from_array(&env, &[4u8; 32]),
         &0u64,
-    );
+    , &None, &None);
 
     // Second deposit
     client.deposit(&vault_id, &owner, &200_000i128);

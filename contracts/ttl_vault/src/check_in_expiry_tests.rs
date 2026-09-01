@@ -46,7 +46,7 @@ fn test_check_in_succeeds_before_expiry() {
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     assert!(!client.is_expired(&vault_id));
 }
@@ -71,7 +71,7 @@ fn test_check_in_rejected_after_expiry() {
         &owner,
         &BytesN::from_array(&env, &[1u8; 32]),
         &0u64,
-    );
+    , &None, &None);
     assert!(result.is_err(), "check_in should reject an already-expired vault");
     match result.unwrap_err().unwrap() {
         ContractError::VaultExpired => {}
@@ -101,7 +101,7 @@ fn test_check_in_rejected_exactly_at_deadline() {
         &owner,
         &BytesN::from_array(&env, &[1u8; 32]),
         &0u64,
-    );
+    , &None, &None);
     assert!(result.is_err());
     match result.unwrap_err().unwrap() {
         ContractError::VaultExpired => {}
