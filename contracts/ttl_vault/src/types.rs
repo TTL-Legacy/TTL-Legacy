@@ -69,6 +69,17 @@ pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vf
 pub const BENEFICIARY_CONFLICT_FILED_TOPIC: Symbol = symbol_short!("ben_conf");
 pub const BENEFICIARY_CONFLICT_RESOLVED_TOPIC: Symbol = symbol_short!("ben_res");
 pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
+// Issue #1297: automated conflict resolution
+pub const CONFLICT_CLAIMED_TOPIC: Symbol = symbol_short!("conf_clm");
+pub const CONFLICT_AUTO_RESOLVED_TOPIC: Symbol = symbol_short!("conf_aut");
+pub const CONFLICT_PRIORITY_SET_TOPIC: Symbol = symbol_short!("conf_pri");
+pub const CONFLICT_DISPUTE_WINDOW_SET_TOPIC: Symbol = symbol_short!("conf_dw");
+/// Default dispute window before a conflict can be auto-resolved (72 hours)
+pub const DEFAULT_CONFLICT_DISPUTE_WINDOW: u64 = 72 * 60 * 60;
+/// Minimum dispute window (1 hour)
+pub const MIN_CONFLICT_DISPUTE_WINDOW: u64 = 60 * 60;
+/// Maximum dispute window (30 days)
+pub const MAX_CONFLICT_DISPUTE_WINDOW: u64 = 30 * 24 * 60 * 60;
 pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
 pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
 // Issue #934: emergency vault recovery code
@@ -572,6 +583,11 @@ pub enum StorageKey {
     BeneficiaryClaimDelegation(u64),
     BeneficiaryConditionalAcceptance(u64),
     BeneficiaryConflict(u64),
+    // Issue #1297: automated conflict resolution
+    /// Duration in seconds of the dispute window before auto-resolution.
+    ConflictDisputeWindow(u64),
+    /// Owner-designated priority beneficiary address for conflict tie-breaking.
+    ConflictPriorityBeneficiary(u64),
     BeneficiaryVaultLimit,
     CompromisedPasskeys(u64),
     CountdownConfig(u64),
@@ -1168,7 +1184,7 @@ pub enum ConflictResolution {
     Rejected,
 }
 
-/// Beneficiary conflict entry - Issue #502
+/// Beneficiary conflict entry - Issue #502, #1297
 #[contracttype]
 #[derive(Clone)]
 pub struct BeneficiaryConflict {
@@ -1176,6 +1192,12 @@ pub struct BeneficiaryConflict {
     pub claims: Vec<BeneficiaryConflictClaim>,
     pub resolution: ConflictResolution,
     pub resolved_at: Option<u64>,
+    /// Unix timestamp after which auto-resolution may be triggered.
+    /// Set to `filed_at + dispute_window_seconds` when the first claim is filed.
+    pub dispute_window_ends_at: Option<u64>,
+    /// Owner-designated priority beneficiary. When set, this address wins over
+    /// first-registered claim order during auto-resolution.
+    pub priority_beneficiary: Option<Address>,
 }
 
 /// Activity log entry for forensic audit trail

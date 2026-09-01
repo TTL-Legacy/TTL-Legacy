@@ -28,6 +28,9 @@ pub use types::{
     CountdownConfig, RecurringWithdrawal, VaultCreatedEvent, CheckInEvent, BeneficiaryUpdatedEvent,
     AUCTION_BID_TOPIC, AUCTION_CREATED_TOPIC, AUCTION_FINALIZED_TOPIC,
     BENEFICIARY_CONFLICT_FILED_TOPIC, BENEFICIARY_CONFLICT_RESOLVED_TOPIC,
+    CONFLICT_CLAIMED_TOPIC, CONFLICT_AUTO_RESOLVED_TOPIC,
+    CONFLICT_PRIORITY_SET_TOPIC, CONFLICT_DISPUTE_WINDOW_SET_TOPIC,
+    DEFAULT_CONFLICT_DISPUTE_WINDOW, MIN_CONFLICT_DISPUTE_WINDOW, MAX_CONFLICT_DISPUTE_WINDOW,
     BIND_PASSKEY_BIOMETRIC_TOPIC, BIO_CHECKIN_TOPIC, BURN_EVENT_TOPIC,
     BatchWithdrawal, BeneficiaryAuction, BeneficiaryAuctionBid, BeneficiaryConflict,
     BeneficiaryConflictClaim, BeneficiaryEntry, BeneficiaryRebalancedEvent,
@@ -189,6 +192,10 @@ mod withdrawal_dispute_tests;
 // Issue #1340: vault ownership transfer with two-step acceptance flow
 #[cfg(test)]
 mod ownership_transfer_1340_tests;
+
+// Issue #1297: automated beneficiary conflict resolution
+#[cfg(test)]
+mod beneficiary_conflict_resolution_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -432,6 +439,15 @@ pub enum ContractError {
     VestingReversalNotFound = 141,
     VestingStaggerNotFound = 142,
     WithdrawalRateLimitExceeded = 143,
+    // Issue #1297: automated beneficiary conflict resolution
+    /// Conflict has already been resolved and cannot be changed.
+    ConflictAlreadyResolved = 144,
+    /// Dispute window is still active; auto-resolution cannot run yet.
+    ConflictDisputeWindowActive = 145,
+    /// No conflict record found for this vault.
+    ConflictNotFound = 146,
+    /// Conflict exists but no claims have been filed.
+    ConflictNoClaimsFound = 147,
 }
 
 #[contract]
@@ -11922,9 +11938,23 @@ on_time_check_ins: 0,
             .unwrap_or(DisputeStatus::None)
     }
 
-    // --- Issue #502: Beneficiary Conflict Resolution ---
+    // --- Issue #502 / #1297: Beneficiary Conflict Resolution (Automated) ---
 
-    /// File a beneficiary conflict claim. Beneficiary-only.
+    /// File a beneficiary conflict claim. Any address may file a competing claim
+    /// for the given vault. The first caller becomes the "first-registered" claimant
+    /// and is prioritised during auto-resolution unless the vault owner designates a
+    /// different priority beneficiary.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault being disputed.
+    /// * `claimant` - The address asserting a competing claim; must authorize.
+    /// * `reason`   - Non-empty human-readable justification for the claim.
+    ///
+    /// # Errors
+    /// * `InvalidAmount`          - `reason` is empty.
+    /// * `VaultNotFound`          - Vault does not exist.
+    /// * `ConflictAlreadyResolved`- Conflict already has an `Approved` or
+    ///                              `Rejected` resolution; no new claims accepted.
     pub fn file_beneficiary_conflict(
         env: Env,
         vault_id: u64,
@@ -11932,6 +11962,7 @@ on_time_check_ins: 0,
     ) -> Result<(), ContractError> {
         Self::assert_not_paused(&env);
         let vault = Self::load_vault(&env, vault_id);
+        // Original behaviour: current beneficiary must authorise.
         vault.beneficiary.require_auth();
 
         if reason.len() == 0 {
@@ -11947,12 +11978,31 @@ on_time_check_ins: 0,
                 claims: Vec::new(&env),
                 resolution: ConflictResolution::Pending,
                 resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
             });
+
+        // Reject new claims once the conflict has been settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Set the dispute window deadline on the first claim.
+        if conflict.claims.is_empty() {
+            let window = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&StorageKey::ConflictDisputeWindow(vault_id))
+                .unwrap_or(DEFAULT_CONFLICT_DISPUTE_WINDOW);
+            conflict.dispute_window_ends_at = Some(now.saturating_add(window));
+        }
 
         let claim = BeneficiaryConflictClaim {
             claimant: vault.beneficiary.clone(),
             reason,
-            filed_at: env.ledger().timestamp(),
+            filed_at: now,
         };
 
         conflict.claims.push_back(claim);
@@ -11972,7 +12022,288 @@ on_time_check_ins: 0,
         Ok(())
     }
 
-    /// Resolve beneficiary conflict. Admin-only.
+    /// Allow any external address to file a competing claim for a vault.
+    ///
+    /// Unlike `file_beneficiary_conflict` (which is limited to the vault's current
+    /// beneficiary), this function lets any address assert a claim. The caller must
+    /// authorize.
+    ///
+    /// # Arguments
+    /// * `vault_id`  - The vault being disputed.
+    /// * `claimant`  - The address asserting a competing claim; must authorize.
+    /// * `reason`    - Non-empty human-readable justification for the claim.
+    ///
+    /// # Errors
+    /// * `VaultNotFound`          - Vault does not exist.
+    /// * `InvalidAmount`          - `reason` is empty.
+    /// * `ConflictAlreadyResolved`- Conflict is already settled.
+    pub fn claim_beneficiary_conflict(
+        env: Env,
+        vault_id: u64,
+        claimant: Address,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        // Vault must exist.
+        let vault = Self::load_vault(&env, vault_id);
+        // The claimant authorises the tx.
+        claimant.require_auth();
+
+        if reason.len() == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .unwrap_or_else(|| BeneficiaryConflict {
+                vault_id,
+                claims: Vec::new(&env),
+                resolution: ConflictResolution::Pending,
+                resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
+            });
+
+        // Reject new claims once the conflict has been settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Set the dispute window deadline on the first claim.
+        if conflict.claims.is_empty() {
+            let window = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&StorageKey::ConflictDisputeWindow(vault_id))
+                .unwrap_or(DEFAULT_CONFLICT_DISPUTE_WINDOW);
+            conflict.dispute_window_ends_at = Some(now.saturating_add(window));
+        }
+
+        let claim = BeneficiaryConflictClaim {
+            claimant: claimant.clone(),
+            reason,
+            filed_at: now,
+        };
+
+        conflict.claims.push_back(claim);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_CLAIMED_TOPIC,),
+            (vault_id, claimant),
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryConflict(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Set the dispute window duration for a vault's conflict resolution.
+    ///
+    /// The owner calls this before any claims are filed. Once the first claim is
+    /// registered the window is fixed. Must be in the range
+    /// `[MIN_CONFLICT_DISPUTE_WINDOW, MAX_CONFLICT_DISPUTE_WINDOW]`.
+    ///
+    /// # Arguments
+    /// * `vault_id`          - Target vault.
+    /// * `caller`            - Must be the vault owner; must authorize.
+    /// * `duration_seconds`  - Dispute window length in seconds.
+    ///
+    /// # Errors
+    /// * `NotOwner`    - `caller` is not the vault owner.
+    /// * `InvalidAmount` - `duration_seconds` is outside the allowed range.
+    pub fn set_conflict_dispute_window(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        duration_seconds: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        caller.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if duration_seconds < MIN_CONFLICT_DISPUTE_WINDOW
+            || duration_seconds > MAX_CONFLICT_DISPUTE_WINDOW
+        {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ConflictDisputeWindow(vault_id), &duration_seconds);
+
+        env.events().publish(
+            (CONFLICT_DISPUTE_WINDOW_SET_TOPIC,),
+            (vault_id, duration_seconds),
+        );
+        Ok(())
+    }
+
+    /// Owner-designates a priority beneficiary that will win over all other
+    /// claimants during auto-resolution, regardless of filing order.
+    ///
+    /// Can be called at any time while the conflict is still `Pending`. This
+    /// does *not* resolve the conflict immediately; it influences the outcome
+    /// when `auto_resolve_beneficiary_conflict` is called after the dispute
+    /// window closes.
+    ///
+    /// # Arguments
+    /// * `vault_id`             - Target vault.
+    /// * `caller`               - Must be the vault owner; must authorize.
+    /// * `priority_beneficiary` - Address to favour in auto-resolution.
+    ///
+    /// # Errors
+    /// * `NotOwner`             - `caller` is not the vault owner.
+    /// * `ConflictAlreadyResolved` - Conflict is already settled.
+    pub fn set_conflict_priority_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        priority_beneficiary: Address,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        caller.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        // Load or create the conflict record.
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .unwrap_or_else(|| BeneficiaryConflict {
+                vault_id,
+                claims: Vec::new(&env),
+                resolution: ConflictResolution::Pending,
+                resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
+            });
+
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        conflict.priority_beneficiary = Some(priority_beneficiary.clone());
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_PRIORITY_SET_TOPIC,),
+            (vault_id, priority_beneficiary),
+        );
+        Ok(())
+    }
+
+    /// Deterministically resolve a beneficiary conflict after the dispute window
+    /// has closed.
+    ///
+    /// Resolution rules (applied in order):
+    /// 1. **Owner-designated priority**: if the owner has called
+    ///    `set_conflict_priority_beneficiary`, that address wins — provided it
+    ///    has filed a claim in the conflict.
+    /// 2. **First-registered**: the claimant with the earliest `filed_at`
+    ///    timestamp wins.
+    ///
+    /// The function can be called by anyone once the dispute window has expired.
+    /// This enables permissionless resolution while preventing premature closure.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault whose conflict should be resolved.
+    ///
+    /// # Errors
+    /// * `ConflictNotFound`           - No conflict record exists for this vault.
+    /// * `ConflictNoClaimsFound`      - Conflict record exists but has no claims.
+    /// * `ConflictAlreadyResolved`    - Conflict is already settled.
+    /// * `ConflictDisputeWindowActive`- Dispute window has not yet expired.
+    pub fn auto_resolve_beneficiary_conflict(
+        env: Env,
+        vault_id: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .ok_or(ContractError::ConflictNotFound)?;
+
+        // Nothing to resolve if already settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        if conflict.claims.is_empty() {
+            return Err(ContractError::ConflictNoClaimsFound);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Enforce the dispute window.
+        if let Some(window_end) = conflict.dispute_window_ends_at {
+            if now < window_end {
+                return Err(ContractError::ConflictDisputeWindowActive);
+            }
+        }
+
+        // --- Resolution rule 1: Owner-designated priority ---
+        let winner: Address = if let Some(ref priority) = conflict.priority_beneficiary {
+            // The priority address must have a claim on record.
+            let has_claim = conflict.claims.iter().any(|c| c.claimant == *priority);
+            if has_claim {
+                priority.clone()
+            } else {
+                // Priority claimant never filed — fall through to first-registered.
+                Self::first_registered_claimant(&conflict)
+            }
+        } else {
+            // --- Resolution rule 2: First-registered wins ---
+            Self::first_registered_claimant(&conflict)
+        };
+
+        conflict.resolution = ConflictResolution::Approved(winner.clone());
+        conflict.resolved_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_AUTO_RESOLVED_TOPIC,),
+            (vault_id, winner),
+        );
+        Ok(())
+    }
+
+    /// Resolve beneficiary conflict. Admin-only (manual override).
+    ///
+    /// Unlike `auto_resolve_beneficiary_conflict`, this function is gated behind
+    /// admin authorization and can be called at any time during the dispute
+    /// window. It is intended for escalation scenarios where an admin needs to
+    /// act before the window closes.
+    ///
+    /// # Arguments
+    /// * `vault_id`             - The vault to resolve.
+    /// * `approved_beneficiary` - Address of the approved beneficiary.
+    ///
+    /// # Errors
+    /// * `ConflictNotFound`        - No conflict record found.
+    /// * `ConflictAlreadyResolved` - Conflict is already settled.
+    /// * `NotAdmin`                - Caller is not an administrator.
     pub fn resolve_beneficiary_conflict(
         env: Env,
         vault_id: u64,
@@ -11984,24 +12315,24 @@ on_time_check_ins: 0,
             .storage()
             .persistent()
             .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
-            .ok_or(ContractError::InvalidBeneficiary)?;
+            .ok_or(ContractError::ConflictNotFound)?;
 
         if conflict.resolution != ConflictResolution::Pending {
-            return Err(ContractError::InvalidBeneficiary);
+            return Err(ContractError::ConflictAlreadyResolved);
         }
 
-        // Check if conflict has expired (30 days without resolution)
+        // Check if conflict has expired (30 days without any resolution)
         let now = env.ledger().timestamp();
         if let Some(first_claim) = conflict.claims.first() {
             if now > first_claim.filed_at + 2_592_000 {
                 // 30 days in seconds
                 env.events().publish((CONFLICT_EXPIRED_TOPIC,), vault_id);
-                return Err(ContractError::InvalidBeneficiary);
+                return Err(ContractError::ConflictNotFound);
             }
         }
 
         conflict.resolution = ConflictResolution::Approved(approved_beneficiary.clone());
-        conflict.resolved_at = Some(env.ledger().timestamp());
+        conflict.resolved_at = Some(now);
 
         env.storage()
             .persistent()
@@ -12019,6 +12350,20 @@ on_time_check_ins: 0,
         env.storage()
             .persistent()
             .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+    }
+
+    /// Return the claimant with the earliest `filed_at` timestamp. Assumes `conflict.claims`
+    /// is non-empty.
+    fn first_registered_claimant(conflict: &BeneficiaryConflict) -> Address {
+        let mut earliest_claimant = conflict.claims.first().unwrap().claimant.clone();
+        let mut earliest_time = conflict.claims.first().unwrap().filed_at;
+        for claim in conflict.claims.iter() {
+            if claim.filed_at < earliest_time {
+                earliest_time = claim.filed_at;
+                earliest_claimant = claim.claimant.clone();
+            }
+        }
+        earliest_claimant
     }
 
     // ── Multi-sig ────────────────────────────────────────────────────────────
