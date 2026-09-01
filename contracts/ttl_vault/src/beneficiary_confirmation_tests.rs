@@ -49,7 +49,7 @@ fn test_require_beneficiary_confirmation_flag() {
     client.deposit(&owner, &vault_id, &deposit_amount);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // require_beneficiary_confirmation flag should be settable
     let vault = client.get_vault(&vault_id);
@@ -67,7 +67,7 @@ fn test_claim_window_seconds_setting() {
     client.deposit(&owner, &vault_id, &deposit_amount);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // claim_window_seconds should be configurable (e.g., 30 days = 2,592,000 seconds)
     let vault = client.get_vault(&vault_id);
@@ -86,7 +86,7 @@ fn test_ttl_expiry_awaiting_claim_status() {
 
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Fast forward to TTL expiry
     now += interval;
@@ -110,7 +110,7 @@ fn test_claim_release_beneficiary_only() {
 
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     now += interval;
     env.ledger().set_timestamp(now);
@@ -132,7 +132,7 @@ fn test_claim_release_triggers_payout() {
 
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Move past expiry
     now += interval;
@@ -155,7 +155,7 @@ fn test_claim_window_expiry() {
 
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     now += interval;
     env.ledger().set_timestamp(now);
@@ -180,7 +180,7 @@ fn test_owner_reclaim_after_window_expiry() {
 
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     now += interval;
     env.ledger().set_timestamp(now);
@@ -205,7 +205,7 @@ fn test_confirmation_flow_full_cycle() {
 
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Vault created and active
     let vault = client.get_vault(&vault_id);
@@ -235,7 +235,7 @@ fn test_two_step_safety_for_high_value_vaults() {
     client.deposit(&owner, &vault_id, &deposit_amount);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Two-step confirmation adds safety check for high-value vaults
     let vault = client.get_vault(&vault_id);

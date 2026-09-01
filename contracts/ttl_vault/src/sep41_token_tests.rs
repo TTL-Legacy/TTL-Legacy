@@ -290,7 +290,7 @@ fn test_withdraw_usdc_before_expiry() {
 
     // Withdraw partial amount: 4 USDC
     let withdraw_amount = 4_000_000i128;
-    client.withdraw(&vault_id, &owner, &withdraw_amount).ok();
+    client.withdraw(&vault_id, &owner, &withdraw_amount, &None, &None, &None).ok();
 
     // Verify vault balance decreased
     assert_eq!(
@@ -319,7 +319,7 @@ fn test_withdraw_full_usdc_amount() {
     client.deposit(&vault_id, &owner, &deposit_amount);
 
     // Withdraw full amount
-    client.withdraw(&vault_id, &owner, &deposit_amount).ok();
+    client.withdraw(&vault_id, &owner, &deposit_amount, &None, &None, &None).ok();
 
     // Verify vault is empty
     assert_eq!(client.get_vault(&vault_id).balance, 0);
@@ -340,7 +340,7 @@ fn test_usdc_withdrawal_exceeds_balance_fails() {
     client.deposit(&vault_id, &owner, &5_000_000i128);
 
     // Attempt withdrawal of 10 USDC — should fail
-    let result = client.withdraw(&vault_id, &owner, &10_000_000i128);
+    let result = client.withdraw(&vault_id, &owner, &10_000_000i128, &None, &None, &None);
     assert!(result.is_err());
 }
 
@@ -368,7 +368,7 @@ fn test_usdc_vault_full_lifecycle() {
     // 2. Check-in to keep vault alive
     let passkey = BytesN::from_array(&env, &[1u8; 32]);
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner, &passkey, &0u64);
+    client.check_in(&vault_id, &owner, &passkey, &0u64, &None, &None);
 
     // 3. Advance time past interval → vault expires
     env.ledger().with_mut(|l| l.timestamp += interval + 1);
@@ -603,6 +603,6 @@ fn test_cannot_withdraw_from_released_usdc_vault() {
     client.trigger_release(&vault_id);
 
     // Attempt withdrawal from released vault should fail
-    let result = client.withdraw(&vault_id, &owner, &1_000_000i128);
+    let result = client.withdraw(&vault_id, &owner, &1_000_000i128, &None, &None, &None);
     assert!(result.is_err());
 }

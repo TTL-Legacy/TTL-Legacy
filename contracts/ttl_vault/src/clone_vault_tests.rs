@@ -481,7 +481,7 @@ fn test_clone_vault_new_vault_last_check_in_reset() {
 
     // Advance time and check in source vault
     env.ledger().with_mut(|l| l.timestamp += 50);
-    client.check_in(&source_vault_id, &owner);
+    client.check_in(&source_vault_id, &owner, &None, &None);
 
     let source_vault = client.get_vault(&source_vault_id);
     let source_last_check_in = source_vault.last_check_in;

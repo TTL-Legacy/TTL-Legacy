@@ -49,7 +49,7 @@ fn test_last_used_set_on_first_use() {
 
     let checkin_time = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(checkin_time);
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
 
     assert_eq!(
         client.get_passkey_last_used(&vault_id, &passkey_hash),
@@ -66,11 +66,11 @@ fn test_last_used_updates_on_subsequent_use() {
 
     let first_checkin = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(first_checkin);
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
 
     let second_checkin = first_checkin + MIN_CHECK_IN_INTERVAL;
     env.ledger().set_timestamp(second_checkin);
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
 
     assert_eq!(
         client.get_passkey_last_used(&vault_id, &passkey_hash),

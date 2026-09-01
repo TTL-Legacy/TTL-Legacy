@@ -130,7 +130,7 @@ fn test_check_in_emits_check_in_event() {
     env.ledger().with_mut(|l| l.timestamp += 10);
     let before_check_in = env.ledger().timestamp();
 
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     // CHECK_IN_RECORDED_TOPIC is the event that carries CheckInEvent data.
     let event: CheckInEvent = find_event_by_topic(&env, types::CHECK_IN_RECORDED_TOPIC)
@@ -153,7 +153,7 @@ fn test_check_in_emits_both_check_in_topic_and_check_in_event() {
     let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp += 10);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let has_check_in_topic = env.events().all().iter().any(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
@@ -186,7 +186,7 @@ fn test_check_in_event_new_ttl_advances_with_each_check_in() {
     // First check-in
     env.ledger().with_mut(|l| l.timestamp += 10);
     let ts1 = env.ledger().timestamp();
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let e1: CheckInEvent = find_event_by_topic(&env, types::CHECK_IN_RECORDED_TOPIC)
         .expect("first CheckInEvent missing");
@@ -195,7 +195,7 @@ fn test_check_in_event_new_ttl_advances_with_each_check_in() {
     // Second check-in
     env.ledger().with_mut(|l| l.timestamp += 100);
     let ts2 = env.ledger().timestamp();
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &1u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &1u64, &None, &None);
 
     // Find the last CHECK_IN_RECORDED_TOPIC event
     let last_event: Option<CheckInEvent> = env.events().all().iter().rev().find_map(|e| {
@@ -268,7 +268,7 @@ fn test_update_beneficiary_emits_beneficiary_updated_event() {
     let new_beneficiary = Address::generate(&env);
 
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64, &None);
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
 
     let event: BeneficiaryUpdatedEvent =
         find_event_by_topic(&env, types::BENEFICIARY_UPDATED_TOPIC)
@@ -289,7 +289,7 @@ fn test_update_beneficiary_event_captures_old_and_new_address() {
     let vault_id = client.create_vault(&owner, &original_beneficiary, &100u64, &None);
 
     // First update: original → first_new
-    client.update_beneficiary(&vault_id, &owner, &first_new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &first_new_beneficiary, &None, &None, &None);
 
     let first_event: BeneficiaryUpdatedEvent =
         find_event_by_topic(&env, types::BENEFICIARY_UPDATED_TOPIC)
@@ -303,7 +303,7 @@ fn test_update_beneficiary_event_captures_old_and_new_address() {
     client.apply_beneficiary_update(&vault_id, &owner);
 
     // Second update: first_new → second_new
-    client.update_beneficiary(&vault_id, &owner, &second_new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &second_new_beneficiary, &None, &None, &None);
 
     // Find the latest BENEFICIARY_UPDATED_TOPIC event
     let second_event: Option<BeneficiaryUpdatedEvent> =
@@ -330,7 +330,7 @@ fn test_update_beneficiary_event_topic_contains_vault_id() {
     let new_beneficiary = Address::generate(&env);
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64, &None);
 
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
 
     let found = env.events().all().iter().any(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);

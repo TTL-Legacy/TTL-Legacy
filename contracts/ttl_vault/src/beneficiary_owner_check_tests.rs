@@ -52,7 +52,7 @@ mod tests {
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
 
         // Try to set owner as the new beneficiary
-        let result = client.try_update_beneficiary(&vault_id, &owner, &owner);
+        let result = client.try_update_beneficiary(&vault_id, &owner, &owner, &None, &None, &None);
         assert!(
             result.is_err(),
             "update_beneficiary should reject owner as new beneficiary"
@@ -72,7 +72,7 @@ mod tests {
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
         let new_beneficiary = Address::generate(&env);
 
-        let result = client.try_update_beneficiary(&vault_id, &owner, &new_beneficiary);
+        let result = client.try_update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
         assert!(result.is_ok(), "update_beneficiary should accept non-owner beneficiary");
     }
 
@@ -87,12 +87,12 @@ mod tests {
         // First update succeeds with different beneficiary
         let new_ben1 = Address::generate(&env);
         assert!(
-            client.try_update_beneficiary(&vault_id, &owner, &new_ben1).is_ok(),
+            client.try_update_beneficiary(&vault_id, &owner, &new_ben1, &None, &None, &None).is_ok(),
             "First update with different beneficiary should succeed"
         );
 
         // Second update fails if trying to set owner as beneficiary
-        let result = client.try_update_beneficiary(&vault_id, &owner, &owner);
+        let result = client.try_update_beneficiary(&vault_id, &owner, &owner, &None, &None, &None);
         assert!(
             result.is_err(),
             "Update to set owner as beneficiary should fail"
@@ -105,7 +105,7 @@ mod tests {
         // Third update succeeds with different beneficiary again
         let new_ben2 = Address::generate(&env);
         assert!(
-            client.try_update_beneficiary(&vault_id, &owner, &new_ben2).is_ok(),
+            client.try_update_beneficiary(&vault_id, &owner, &new_ben2, &None, &None, &None).is_ok(),
             "Subsequent update with different beneficiary should succeed"
         );
     }
