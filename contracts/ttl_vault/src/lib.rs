@@ -111,6 +111,8 @@ pub use types::{
     VESTING_SCHEDULE_ADDED_TOPIC,
     // Issue #1338: vault export/import for disaster recovery
     VaultExportConfig, VAULT_EXPORTED_TOPIC, VAULT_IMPORTED_TOPIC,
+    // Issue #1293: withdrawal history ring buffer
+    WithdrawalEvent, MAX_WITHDRAWAL_HISTORY,
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
@@ -16563,9 +16565,25 @@ on_time_check_ins: 0,
         vault.withdrawal_limit_per_window.map(|limit| (limit, vault.withdrawal_window_seconds))
     }
 
-    // --- Issue #569: Withdrawal Audit Trail ---
+    // --- Issue #569 / #1293: Withdrawal Audit Trail ---
 
     /// Records a withdrawal attempt (successful or failed) in the audit trail.
+    ///
+    /// Two storage paths are maintained in parallel:
+    ///
+    /// 1. **Legacy unbounded log** (`WithdrawalAuditLog`) — preserved for
+    ///    backwards compatibility with callers that use
+    ///    `get_withdrawal_audit_log`.
+    ///
+    /// 2. **Ring buffer** (`WithdrawalHistoryHead` / `WithdrawalHistoryEntry` /
+    ///    `WithdrawalHistoryLen`) — bounded to `MAX_WITHDRAWAL_HISTORY` entries.
+    ///    The head pointer advances on every write; when the buffer is full the
+    ///    oldest slot is silently overwritten.  This is the storage read by the
+    ///    `get_withdrawal_history` query.
+    ///
+    /// Events are emitted unconditionally:
+    /// * `WITHDRAWAL_AUDIT_TOPIC` for every attempt (success or failure).
+    /// * `WITHDRAWAL_FAILED_TOPIC` additionally for failed attempts.
     fn record_withdrawal_audit(
         env: &Env,
         vault_id: u64,
@@ -16575,6 +16593,9 @@ on_time_check_ins: 0,
         error_reason: &str,
     ) {
         let timestamp = env.ledger().timestamp();
+        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
+
+        // ---- 1. Legacy unbounded log (backwards-compat) ----
         let audit_entry = WithdrawalAuditEntry {
             vault_id,
             caller: caller.clone(),
@@ -16583,20 +16604,65 @@ on_time_check_ins: 0,
             success,
             error_reason: String::from_str(env, error_reason),
         };
-
-        let key = StorageKey::WithdrawalAuditLog(vault_id);
+        let log_key = StorageKey::WithdrawalAuditLog(vault_id);
         let mut audit_log: Vec<WithdrawalAuditEntry> = env
             .storage()
             .persistent()
-            .get(&key)
+            .get(&log_key)
             .unwrap_or_else(|| Vec::new(env));
-
         audit_log.push_back(audit_entry);
+        env.storage().persistent().set(&log_key, &audit_log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&log_key, VAULT_TTL_THRESHOLD, ttl);
 
-        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
-        env.storage().persistent().set(&key, &audit_log);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        // ---- 2. Ring-buffer (bounded, last MAX_WITHDRAWAL_HISTORY entries) ----
+        let head_key = StorageKey::WithdrawalHistoryHead(vault_id);
+        let len_key = StorageKey::WithdrawalHistoryLen(vault_id);
 
+        // Current write head (slot index to overwrite) and entry count.
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0u32);
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&len_key)
+            .unwrap_or(0u32);
+
+        let entry = WithdrawalEvent {
+            vault_id,
+            caller: caller.clone(),
+            amount,
+            timestamp,
+            success,
+            error_reason: String::from_str(env, error_reason),
+            sequence: head,
+        };
+
+        let entry_key = StorageKey::WithdrawalHistoryEntry(vault_id, head);
+        env.storage().persistent().set(&entry_key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&entry_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Advance head pointer (wraps around to implement the ring).
+        let next_head = (head + 1) % MAX_WITHDRAWAL_HISTORY;
+        env.storage().persistent().set(&head_key, &next_head);
+        env.storage()
+            .persistent()
+            .extend_ttl(&head_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Len saturates at MAX_WITHDRAWAL_HISTORY once the buffer is full.
+        let new_len = if len < MAX_WITHDRAWAL_HISTORY { len + 1 } else { MAX_WITHDRAWAL_HISTORY };
+        env.storage().persistent().set(&len_key, &new_len);
+        env.storage()
+            .persistent()
+            .extend_ttl(&len_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // ---- 3. Events ----
         env.events().publish(
             (WITHDRAWAL_AUDIT_TOPIC, vault_id),
             (caller, amount, success, timestamp),
@@ -16610,13 +16676,77 @@ on_time_check_ins: 0,
         }
     }
 
-    /// Retrieves the withdrawal audit trail for a vault.
+    /// Retrieves the withdrawal audit trail for a vault (legacy unbounded log).
+    ///
+    /// For most use-cases, prefer `get_withdrawal_history` which returns the
+    /// bounded ring buffer in chronological order.
     pub fn get_withdrawal_audit_log(env: Env, vault_id: u64) -> Vec<WithdrawalAuditEntry> {
         let key = StorageKey::WithdrawalAuditLog(vault_id);
         env.storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the last N withdrawal events for `vault_id` in chronological
+    /// order (oldest first) from the on-chain ring buffer.
+    ///
+    /// At most `MAX_WITHDRAWAL_HISTORY` entries are ever stored per vault.
+    /// Once the buffer is full, the oldest entry is overwritten on each new
+    /// withdrawal so the returned slice always represents the most recent
+    /// history.
+    ///
+    /// # Arguments
+    /// * `vault_id` — The vault to query.
+    ///
+    /// # Returns
+    /// A `Vec<WithdrawalEvent>` with up to `MAX_WITHDRAWAL_HISTORY` entries.
+    /// Returns an empty vec if no withdrawals have been recorded.
+    pub fn get_withdrawal_history(env: Env, vault_id: u64) -> Vec<WithdrawalEvent> {
+        let head_key = StorageKey::WithdrawalHistoryHead(vault_id);
+        let len_key = StorageKey::WithdrawalHistoryLen(vault_id);
+
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0u32);
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&len_key)
+            .unwrap_or(0u32);
+
+        let mut result: Vec<WithdrawalEvent> = Vec::new(&env);
+        if len == 0 {
+            return result;
+        }
+
+        // The oldest entry sits at slot `head` when the buffer is full,
+        // or at slot 0 when it has not wrapped yet.
+        //
+        // Case A — buffer not yet full (len < MAX_WITHDRAWAL_HISTORY):
+        //   Slots 0 .. len-1 hold entries in write order; `head` == len.
+        //   Oldest → newest: iterate slots 0 .. len-1.
+        //
+        // Case B — buffer is full (len == MAX_WITHDRAWAL_HISTORY):
+        //   `head` points to the *next* write slot, which is also the
+        //   *oldest* slot.  Iterate head .. head+len-1 (mod MAX).
+        let start = if len < MAX_WITHDRAWAL_HISTORY {
+            0u32
+        } else {
+            head
+        };
+
+        for i in 0..len {
+            let slot = (start + i) % MAX_WITHDRAWAL_HISTORY;
+            let entry_key = StorageKey::WithdrawalHistoryEntry(vault_id, slot);
+            if let Some(event) = env.storage().persistent().get::<StorageKey, WithdrawalEvent>(&entry_key) {
+                result.push_back(event);
+            }
+        }
+
+        result
     }
 
     // --- Issue #572 / #1294: Withdrawal Dispute ---
