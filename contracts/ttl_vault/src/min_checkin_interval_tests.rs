@@ -28,13 +28,11 @@ mod tests {
     #[test]
     fn test_create_vault_with_exactly_minimum_interval() {
         let (env, owner, beneficiary, client) = setup();
-        let result = client.try_create_vault(
-            &owner,
-            &beneficiary,
-            &MIN_CHECK_IN_INTERVAL,
-            &None,
+        let result = client.try_create_vault(&owner, &beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
+        assert!(
+            result.is_ok(),
+            "Creating vault with exactly minimum interval should succeed"
         );
-        assert!(result.is_ok(), "Creating vault with exactly minimum interval should succeed");
     }
 
     /// Test creating vault with interval just below minimum (3599 seconds)
@@ -43,18 +41,13 @@ mod tests {
     fn test_create_vault_with_interval_below_minimum() {
         let (env, owner, beneficiary, client) = setup();
         let below_min = MIN_CHECK_IN_INTERVAL - 1;
-        let result = client.try_create_vault(
-            &owner,
-            &beneficiary,
-            &below_min,
-            &None,
-        );
+        let result = client.try_create_vault(&owner, &beneficiary, &below_min, &None);
         assert!(
             result.is_err(),
             "Creating vault with interval below minimum should fail"
         );
         match result.unwrap_err().unwrap() {
-            ContractError::CheckInIntervalTooShort => {},
+            ContractError::CheckInIntervalTooShort => {}
             e => panic!("Expected CheckInIntervalTooShort, got {:?}", e),
         }
     }
@@ -70,7 +63,7 @@ mod tests {
             "Creating vault with 1 second interval should fail"
         );
         match result.unwrap_err().unwrap() {
-            ContractError::CheckInIntervalTooShort => {},
+            ContractError::CheckInIntervalTooShort => {}
             e => panic!("Expected CheckInIntervalTooShort, got {:?}", e),
         }
     }
@@ -81,9 +74,12 @@ mod tests {
     fn test_create_vault_with_zero_interval() {
         let (env, owner, beneficiary, client) = setup();
         let result = client.try_create_vault(&owner, &beneficiary, &0, &None);
-        assert!(result.is_err(), "Creating vault with 0 interval should fail");
+        assert!(
+            result.is_err(),
+            "Creating vault with 0 interval should fail"
+        );
         match result.unwrap_err().unwrap() {
-            ContractError::InvalidInterval => {},
+            ContractError::InvalidInterval => {}
             e => panic!("Expected InvalidInterval, got {:?}", e),
         }
     }
@@ -94,12 +90,7 @@ mod tests {
     fn test_create_vault_with_well_above_minimum_interval() {
         let (env, owner, beneficiary, client) = setup();
         let thirty_days = 30u64 * 24u64 * 3600u64; // 2,592,000 seconds
-        let result = client.try_create_vault(
-            &owner,
-            &beneficiary,
-            &thirty_days,
-            &None,
-        );
+        let result = client.try_create_vault(&owner, &beneficiary, &thirty_days, &None);
         assert!(
             result.is_ok(),
             "Creating vault with 30-day interval should succeed"
@@ -134,10 +125,10 @@ mod tests {
     #[test]
     fn test_multiple_short_interval_attempts_all_fail() {
         let (env, owner, beneficiary, client) = setup();
-        
+
         // Try creating vaults with various short intervals
         let short_intervals = vec![1u64, 100, 500, 1000, 3599];
-        
+
         for interval in short_intervals {
             let gen_beneficiary = Address::generate(&env);
             let result = client.try_create_vault(&owner, &gen_beneficiary, &interval, &None);
@@ -156,8 +147,12 @@ mod tests {
         // First create a valid vault
         let vault_id = client.create_vault(&owner, &beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
         // Try to update to an interval below minimum
-        let result = client.try_update_check_in_interval(&vault_id, &owner, &(MIN_CHECK_IN_INTERVAL - 1));
-        assert!(result.is_err(), "update_check_in_interval should reject interval below minimum");
+        let result =
+            client.try_update_check_in_interval(&vault_id, &owner, &(MIN_CHECK_IN_INTERVAL - 1));
+        assert!(
+            result.is_err(),
+            "update_check_in_interval should reject interval below minimum"
+        );
     }
 
     /// Test that update_check_in_interval accepts intervals at or above minimum
@@ -167,6 +162,9 @@ mod tests {
         let vault_id = client.create_vault(&owner, &beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
         let two_days = 2u64 * 86400u64;
         let result = client.try_update_check_in_interval(&vault_id, &owner, &two_days);
-        assert!(result.is_ok(), "update_check_in_interval should accept 2-day interval");
+        assert!(
+            result.is_ok(),
+            "update_check_in_interval should accept 2-day interval"
+        );
     }
 }

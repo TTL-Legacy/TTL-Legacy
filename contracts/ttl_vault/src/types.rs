@@ -69,6 +69,17 @@ pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vf
 pub const BENEFICIARY_CONFLICT_FILED_TOPIC: Symbol = symbol_short!("ben_conf");
 pub const BENEFICIARY_CONFLICT_RESOLVED_TOPIC: Symbol = symbol_short!("ben_res");
 pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
+// Issue #1297: automated conflict resolution
+pub const CONFLICT_CLAIMED_TOPIC: Symbol = symbol_short!("conf_clm");
+pub const CONFLICT_AUTO_RESOLVED_TOPIC: Symbol = symbol_short!("conf_aut");
+pub const CONFLICT_PRIORITY_SET_TOPIC: Symbol = symbol_short!("conf_pri");
+pub const CONFLICT_DISPUTE_WINDOW_SET_TOPIC: Symbol = symbol_short!("conf_dw");
+/// Default dispute window before a conflict can be auto-resolved (72 hours)
+pub const DEFAULT_CONFLICT_DISPUTE_WINDOW: u64 = 72 * 60 * 60;
+/// Minimum dispute window (1 hour)
+pub const MIN_CONFLICT_DISPUTE_WINDOW: u64 = 60 * 60;
+/// Maximum dispute window (30 days)
+pub const MAX_CONFLICT_DISPUTE_WINDOW: u64 = 30 * 24 * 60 * 60;
 pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
 pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
 // Issue #934: emergency vault recovery code
@@ -493,6 +504,14 @@ pub enum StorageKey {
     EncryptedBackupCodes(u64),
     // Issue #569: Withdrawal Audit Trail
     WithdrawalAuditLog(u64),
+    // Issue #1293: withdrawal history ring buffer
+    /// Head pointer (0-based) into the per-vault ring buffer.
+    WithdrawalHistoryHead(u64),
+    /// Individual ring buffer slot: (vault_id, slot_index).
+    WithdrawalHistoryEntry(u64, u32),
+    /// Number of withdrawal events ever recorded (saturates at MAX_WITHDRAWAL_HISTORY
+    /// once the buffer is full, then stays there).
+    WithdrawalHistoryLen(u64),
     // Issue #572: Withdrawal Dispute
     WithdrawalDisputes(u64),
     // Issue #565: withdrawal scheduling validation
@@ -567,6 +586,11 @@ pub enum StorageKey {
     BeneficiaryClaimDelegation(u64),
     BeneficiaryConditionalAcceptance(u64),
     BeneficiaryConflict(u64),
+    // Issue #1297: automated conflict resolution
+    /// Duration in seconds of the dispute window before auto-resolution.
+    ConflictDisputeWindow(u64),
+    /// Owner-designated priority beneficiary address for conflict tie-breaking.
+    ConflictPriorityBeneficiary(u64),
     BeneficiaryVaultLimit,
     CompromisedPasskeys(u64),
     CountdownConfig(u64),
@@ -592,7 +616,6 @@ pub enum StorageKey {
     WithdrawalRateLimit(u64),
     WithdrawalRollback(u64),
 }
-
 
 /// Check-in history entry for TTL prediction - Issue #482
 #[contracttype]
@@ -743,6 +766,22 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
     /// Minimum amount in stroops. If calculated share < minimum_threshold, beneficiary gets 0.
     pub minimum_threshold: i128,
+}
+
+/// A percentage-based beneficiary split for use with `create_vault_with_splits`.
+///
+/// Each entry specifies an address and an integer percentage (0–100). The
+/// percentages across all entries in a splits list must sum to exactly 100.
+/// Internally the percentage is converted to basis points (BPS) by multiplying
+/// by 100 before being stored in `BeneficiaryEntry.bps`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeneficiarySplit {
+    /// The beneficiary's Stellar address.
+    pub address: Address,
+    /// Whole-number percentage share (1–100). Must be ≥ 1 and the sum of all
+    /// entries must equal exactly 100.
+    pub percentage: u32,
 }
 
 /// Privacy-preserving commitment for a vault beneficiary.
@@ -1163,7 +1202,7 @@ pub enum ConflictResolution {
     Rejected,
 }
 
-/// Beneficiary conflict entry - Issue #502
+/// Beneficiary conflict entry - Issue #502, #1297
 #[contracttype]
 #[derive(Clone)]
 pub struct BeneficiaryConflict {
@@ -1171,6 +1210,12 @@ pub struct BeneficiaryConflict {
     pub claims: Vec<BeneficiaryConflictClaim>,
     pub resolution: ConflictResolution,
     pub resolved_at: Option<u64>,
+    /// Unix timestamp after which auto-resolution may be triggered.
+    /// Set to `filed_at + dispute_window_seconds` when the first claim is filed.
+    pub dispute_window_ends_at: Option<u64>,
+    /// Owner-designated priority beneficiary. When set, this address wins over
+    /// first-registered claim order during auto-resolution.
+    pub priority_beneficiary: Option<Address>,
 }
 
 /// Activity log entry for forensic audit trail
@@ -1247,6 +1292,42 @@ pub struct WithdrawalAuditEntry {
     pub timestamp: u64,
     pub success: bool,
     pub error_reason: String,
+}
+
+/// Maximum number of withdrawal events kept in the per-vault ring buffer.
+///
+/// Older entries are silently evicted once this limit is reached, keeping
+/// on-chain storage bounded regardless of how many withdrawals a vault
+/// accumulates over its lifetime.
+pub const MAX_WITHDRAWAL_HISTORY: u32 = 50;
+
+/// On-chain withdrawal event record stored in the ring buffer - Issue #1293
+///
+/// This is the canonical representation emitted and stored for every
+/// withdrawal attempt, whether the attempt succeeded or failed.  Fields are
+/// intentionally a superset of `WithdrawalAuditEntry` so that callers of
+/// `get_withdrawal_history` receive richer context without having to
+/// cross-reference the legacy audit log.
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawalEvent {
+    /// Vault that was the target of the withdrawal attempt.
+    pub vault_id: u64,
+    /// Address that initiated the withdrawal (may differ from the vault owner
+    /// in multi-sig or delegated-withdrawal flows).
+    pub caller: Address,
+    /// Requested withdrawal amount in stroops.  Negative values are rejected
+    /// before reaching this point, but the raw value is stored for auditability.
+    pub amount: i128,
+    /// Ledger timestamp (Unix seconds) at which the attempt was recorded.
+    pub timestamp: u64,
+    /// `true` if the withdrawal completed successfully, `false` otherwise.
+    pub success: bool,
+    /// Human-readable failure reason.  Empty string for successful withdrawals.
+    pub error_reason: String,
+    /// Sequential index within this vault's ring buffer (wraps at
+    /// `MAX_WITHDRAWAL_HISTORY`).  Useful for pagination and de-duplication.
+    pub sequence: u32,
 }
 
 /// Withdrawal dispute entry - Issue #572
@@ -1340,7 +1421,7 @@ pub struct PendingMultiSigOp {
     pub nonce: u64,
     pub vault_id: u64,
     pub operation: MultiSigOperation,
-    pub signers: Vec<Address>,  // Addresses that have signed
+    pub signers: Vec<Address>, // Addresses that have signed
     pub payload: Bytes,
     pub address_payload: Option<Address>,
     pub created_at: u64,
@@ -1682,8 +1763,6 @@ pub struct VaultSnapshot {
     pub timestamp: u64,
     pub content_hash: BytesN<32>,
 }
-
-
 
 // ============================================================
 // Issue #951: Graduated Release Schedule

@@ -40,7 +40,10 @@ pub async fn security_headers_middleware(req: Request<Body>, next: Next) -> Resp
         "strict-transport-security",
         HeaderValue::from_static("max-age=63072000; includeSubDomains"),
     );
-    headers.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
 
@@ -134,7 +137,12 @@ mod tests {
             .layer(axum::middleware::from_fn(security_headers_middleware));
 
         let response = app
-            .oneshot(Request::builder().uri("/missing").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 

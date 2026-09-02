@@ -16,20 +16,12 @@ use crate::{
     db::{AppState, Db},
     error::AppError,
     handlers::{
-        claim_vesting_bonus_handler,
-        get_vesting_bonus_handler,
-        parse_scenario_types,
+        claim_vesting_bonus_handler, get_vesting_bonus_handler, parse_scenario_types,
         simulate_release_handler,
     },
     models::{
-        AuditLogEntry,
-        ClaimBonusRequest,
-        ReminderPreferences,
-        SetPreferencesRequest,
-        SetSubscriptionRequest,
-        SimulateReleaseQuery,
-        SimulateReleaseResponse,
-        Subscription,
+        AuditLogEntry, ClaimBonusRequest, ReminderPreferences, SetPreferencesRequest,
+        SetSubscriptionRequest, SimulateReleaseQuery, SimulateReleaseResponse, Subscription,
         VaultReleaseHistory,
     },
 };
@@ -173,7 +165,6 @@ pub async fn resolve_reminder_token(
     }
 }
 
-
 // ── Vault subscription endpoints ─────────────────────────────────────────────
 
 /// POST /api/vaults/:vault_id/subscriptions
@@ -229,22 +220,18 @@ pub async fn simulate_release(
 
     let missed_count = query.missed_count.unwrap_or(1);
 
-    let result = simulate_release_handler(
-        &db.vault_store,
-        &vault_id,
-        scenarios,
-        missed_count,
-    )
-    .map_err(|_| AppError::NotFound)?;
+    let result = simulate_release_handler(&db.vault_store, &vault_id, scenarios, missed_count)
+        .map_err(|_| AppError::NotFound)?;
 
     Ok(Json(result))
 }
 
-
 // ── Sponsored Release endpoints (#1122) ──────────────────────────────────────
 
 use crate::fee_sponsorship::{SponsoredReleaseRequest, SponsoredReleaseResponse};
-use crate::handlers::{sponsored_release_handler, get_sponsored_release_handler, list_sponsored_releases_handler};
+use crate::handlers::{
+    get_sponsored_release_handler, list_sponsored_releases_handler, sponsored_release_handler,
+};
 
 /// POST /api/vaults/:vault_id/sponsored-release
 /// Create a sponsored release transaction for a beneficiary.
@@ -253,13 +240,9 @@ pub async fn create_sponsored_release(
     Path(vault_id): Path<String>,
     Json(req): Json<SponsoredReleaseRequest>,
 ) -> Result<(StatusCode, Json<SponsoredReleaseResponse>), AppError> {
-    let result = sponsored_release_handler(
-        &state.db.vault_store,
-        Arc::clone(&state.db),
-        &vault_id,
-        req,
-    )
-    .map_err(|e| AppError::InvalidInput(e))?;
+    let result =
+        sponsored_release_handler(&state.db.vault_store, Arc::clone(&state.db), &vault_id, req)
+            .map_err(|e| AppError::InvalidInput(e))?;
 
     Ok((StatusCode::CREATED, Json(result)))
 }

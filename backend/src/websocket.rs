@@ -1,14 +1,14 @@
 use crate::models::{AuthClaims, VaultEvent, WebSocketMessage};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::time::{Duration, Instant, interval};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
-use tokio_tungstenite::WebSocketStream;
 use tokio::net::TcpStream;
+use tokio::sync::broadcast;
+use tokio::time::{interval, Duration, Instant};
+use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,7 +21,10 @@ struct MessageRateLimiter {
 
 impl MessageRateLimiter {
     fn new() -> Self {
-        Self { count: 0, window_start: Instant::now() }
+        Self {
+            count: 0,
+            window_start: Instant::now(),
+        }
     }
 
     /// Returns false when the per-second limit is exceeded.
@@ -211,10 +214,7 @@ pub async fn handle_vault_stream_with_heartbeat(
     }
 }
 
-pub async fn reconnect_with_backoff(
-    max_retries: u32,
-    initial_delay_ms: u64,
-) -> Result<(), String> {
+pub async fn reconnect_with_backoff(max_retries: u32, initial_delay_ms: u64) -> Result<(), String> {
     let mut retries = 0;
     let mut delay = initial_delay_ms;
 
@@ -230,7 +230,6 @@ pub async fn reconnect_with_backoff(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

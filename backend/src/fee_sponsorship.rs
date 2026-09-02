@@ -1,12 +1,11 @@
+use chrono::{DateTime, Utc};
 /// Fee sponsorship module for sponsored vault release transactions.
 ///
 /// Implements fee bump transaction construction and protocol fee handling
 /// to allow beneficiaries without XLM to claim released vaults.
 ///
 /// Issue #1122: Implement Fee Sponsorship for Beneficiary Release Transactions
-
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 use std::fmt;
 
 /// Protocol fee charged for sponsored release transactions (0.1% of released amount).
@@ -110,11 +109,7 @@ pub struct FeeBreakdown {
 
 impl FeeBreakdown {
     /// Create a new fee breakdown for a released amount.
-    pub fn new(
-        released_amount: i128,
-        stellar_base_fee: i128,
-        fee_bump_premium: i128,
-    ) -> Self {
+    pub fn new(released_amount: i128, stellar_base_fee: i128, fee_bump_premium: i128) -> Self {
         let protocol_fee = calculate_protocol_fee(released_amount);
         let total_sponsor_fee = stellar_base_fee + fee_bump_premium;
         let net_amount = released_amount - protocol_fee;
@@ -153,15 +148,17 @@ pub fn construct_fee_bump_transaction(
 ) -> Result<String, FeeSponsorsException> {
     // Validate accounts
     if beneficiary_account.is_empty() || !is_valid_stellar_account(beneficiary_account) {
-        return Err(FeeSponsorsException::InvalidAccount(
-            format!("Invalid beneficiary account: {}", beneficiary_account),
-        ));
+        return Err(FeeSponsorsException::InvalidAccount(format!(
+            "Invalid beneficiary account: {}",
+            beneficiary_account
+        )));
     }
 
     if sponsor_account.is_empty() || !is_valid_stellar_account(sponsor_account) {
-        return Err(FeeSponsorsException::InvalidAccount(
-            format!("Invalid sponsor account: {}", sponsor_account),
-        ));
+        return Err(FeeSponsorsException::InvalidAccount(format!(
+            "Invalid sponsor account: {}",
+            sponsor_account
+        )));
     }
 
     // Validate amount
@@ -205,7 +202,9 @@ fn is_valid_stellar_account(account: &str) -> bool {
     }
 
     // Check if all characters are valid base32
-    account[1..].chars().all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c))
+    account[1..]
+        .chars()
+        .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c))
 }
 
 /// Generate a mock transaction hash for testing.
@@ -308,8 +307,12 @@ mod tests {
 
     #[test]
     fn test_construct_fee_bump_transaction_invalid_beneficiary() {
-        let result =
-            construct_fee_bump_transaction("invalid", "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT", 1_000_000, None);
+        let result = construct_fee_bump_transaction(
+            "invalid",
+            "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT",
+            1_000_000,
+            None,
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             FeeSponsorsException::InvalidAccount(_) => (),

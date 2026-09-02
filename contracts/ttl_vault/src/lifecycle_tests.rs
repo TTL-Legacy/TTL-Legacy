@@ -24,7 +24,9 @@ fn setup_lifecycle() -> (
     let admin = Address::generate(&env);
 
     let token_admin = Address::generate(&env);
-    let token_address = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_address = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
     StellarAssetClient::new(&env, &token_address).mint(&owner, &10_000_000);
 
     let contract_address = env.register_contract(None, TtlVaultContract);
@@ -51,11 +53,26 @@ fn test_full_lifecycle_single_beneficiary() {
 
     // 3. Multiple check-ins keep vault alive
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
+    client.check_in(
+        &vault_id,
+        &owner,
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &0u64,
+    );
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
+    client.check_in(
+        &vault_id,
+        &owner,
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &0u64,
+    );
     env.ledger().with_mut(|l| l.timestamp += interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
+    client.check_in(
+        &vault_id,
+        &owner,
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &0u64,
+    );
     assert!(!client.is_expired(&vault_id));
 
     // 4. Miss a check-in → vault expires
@@ -89,8 +106,16 @@ fn test_full_lifecycle_multi_beneficiary_bps_split() {
         &owner,
         &vec![
             &env,
-            BeneficiaryEntry { address: b1.clone(), bps: 7_000, minimum_threshold: 0 },
-            BeneficiaryEntry { address: b2.clone(), bps: 3_000, minimum_threshold: 0 },
+            BeneficiaryEntry {
+                address: b1.clone(),
+                bps: 7_000,
+                minimum_threshold: 0,
+            },
+            BeneficiaryEntry {
+                address: b2.clone(),
+                bps: 3_000,
+                minimum_threshold: 0,
+            },
         ],
     );
 
@@ -103,7 +128,12 @@ fn test_full_lifecycle_multi_beneficiary_bps_split() {
 
     // 5. Check-in once, then expire
     env.ledger().with_mut(|l| l.timestamp = interval - 1);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
+    client.check_in(
+        &vault_id,
+        &owner,
+        &BytesN::from_array(&env, &[1u8; 32]),
+        &0u64,
+    );
     env.ledger().with_mut(|l| l.timestamp += interval + 1);
     assert!(client.is_expired(&vault_id));
 
@@ -118,8 +148,8 @@ fn test_full_lifecycle_multi_beneficiary_bps_split() {
     let b2_received = token_client.balance(&b2) - b2_before;
 
     assert_eq!(b1_received + b2_received, deposit_amount);
-    assert_eq!(b1_received, 7_000);  // 70% of 10_000
-    assert_eq!(b2_received, 3_000);  // 30% of 10_000
+    assert_eq!(b1_received, 7_000); // 70% of 10_000
+    assert_eq!(b2_received, 3_000); // 30% of 10_000
 }
 
 /// Full lifecycle with hibernation: vault survives interval during hibernation, expires after
@@ -135,17 +165,23 @@ fn test_full_lifecycle_with_hibernation() {
 
     // 2. Enter hibernation before interval expires
     env.ledger().with_mut(|l| l.timestamp = interval / 2);
-    client.enter_hibernation(&vault_id, &owner, &hibernation).unwrap();
+    client
+        .enter_hibernation(&vault_id, &owner, &hibernation)
+        .unwrap();
 
     // 3. Advance past normal interval — must NOT expire during hibernation
     env.ledger().with_mut(|l| l.timestamp += interval + 1);
-    assert!(!client.is_expired(&vault_id), "vault must not expire while hibernating");
+    assert!(
+        !client.is_expired(&vault_id),
+        "vault must not expire while hibernating"
+    );
 
     // 4. Exit hibernation
     client.exit_hibernation(&vault_id, &owner).unwrap();
 
     // 5. Advance well past all intervals → vault now expires
-    env.ledger().with_mut(|l| l.timestamp += hibernation + interval + 1);
+    env.ledger()
+        .with_mut(|l| l.timestamp += hibernation + interval + 1);
     assert!(client.is_expired(&vault_id));
 
     // 6. Release and verify beneficiary receives funds
@@ -166,11 +202,15 @@ fn test_partial_liquidate_within_limit_succeeds() {
     client.deposit(&vault_id, &owner, &1_000_000i128);
 
     // Liquidate 25% = 250_000
-    client.partial_liquidate(&vault_id, &250_000i128, &25u32).unwrap();
+    client
+        .partial_liquidate(&vault_id, &250_000i128, &25u32)
+        .unwrap();
     assert_eq!(client.get_vault(&vault_id).balance, 750_000);
 
     // Second liquidation at 10% bound against new balance: 75_000
-    client.partial_liquidate(&vault_id, &75_000i128, &10u32).unwrap();
+    client
+        .partial_liquidate(&vault_id, &75_000i128, &10u32)
+        .unwrap();
     assert_eq!(client.get_vault(&vault_id).balance, 675_000);
 }
 
@@ -208,7 +248,9 @@ fn test_partial_liquidate_preserves_ttl() {
     assert_eq!(ttl_before, interval - 8_000);
 
     // Liquidate well within the bounds (1%).
-    client.partial_liquidate(&vault_id, &5_000i128, &1u32).unwrap();
+    client
+        .partial_liquidate(&vault_id, &5_000i128, &1u32)
+        .unwrap();
 
     // TTL remaining must be identical after liquidation — last_check_in unchanged.
     let ttl_after = client.get_ttl_remaining(&vault_id).unwrap();
@@ -230,7 +272,9 @@ fn test_partial_liquidate_then_check_in_resets_ttl() {
     client.deposit(&vault_id, &owner, &1_000_000i128);
 
     env.ledger().with_mut(|l| l.timestamp = 9_000);
-    client.partial_liquidate(&vault_id, &50_000i128, &5u32).unwrap();
+    client
+        .partial_liquidate(&vault_id, &50_000i128, &5u32)
+        .unwrap();
 
     // Now check-in as normal and confirm TTL extends.
     let passkey = BytesN::from_array(&env, &[0u8; 32]);

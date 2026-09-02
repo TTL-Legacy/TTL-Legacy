@@ -7,7 +7,6 @@
 /// This module defines the version check logic and result structure. The actual
 /// contract interaction (RPC call to get_contract_version) is mocked in tests
 /// and implemented via the contract client in production.
-
 use std::fmt;
 
 /// Result of a contract version compatibility check.
@@ -107,11 +106,7 @@ mod tests {
         let min_required = 1u32;
         let contract_version = 2u32;
 
-        let result = check_contract_version(
-            || async { Ok(contract_version) },
-            min_required,
-        )
-        .await;
+        let result = check_contract_version(|| async { Ok(contract_version) }, min_required).await;
 
         assert!(result.compatible);
         assert_eq!(result.contract_version, Some(2));
@@ -125,11 +120,7 @@ mod tests {
         let min_required = 1u32;
         let contract_version = 1u32;
 
-        let result = check_contract_version(
-            || async { Ok(contract_version) },
-            min_required,
-        )
-        .await;
+        let result = check_contract_version(|| async { Ok(contract_version) }, min_required).await;
 
         assert!(result.compatible);
         assert_eq!(result.contract_version, Some(1));
@@ -143,11 +134,7 @@ mod tests {
         let min_required = 2u32;
         let contract_version = 1u32;
 
-        let result = check_contract_version(
-            || async { Ok(contract_version) },
-            min_required,
-        )
-        .await;
+        let result = check_contract_version(|| async { Ok(contract_version) }, min_required).await;
 
         assert!(!result.compatible);
         assert_eq!(result.contract_version, Some(1));
@@ -170,7 +157,11 @@ mod tests {
         assert!(result.contract_version.is_none());
         assert_eq!(result.min_required_version, 1);
         assert!(result.error.is_some());
-        assert!(result.error.as_ref().unwrap().contains("Unable to reach contract"));
+        assert!(result
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Unable to reach contract"));
     }
 
     // e) min_contract_version_parses_from_env

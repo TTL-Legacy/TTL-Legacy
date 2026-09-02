@@ -181,8 +181,24 @@ fn test_multiple_beneficiary_vesting_schedules() {
 
     let start_time = env.ledger().timestamp() + 100;
 
-    client.set_beneficiary_vesting(&vault_id, &owner, &ben_a, &start_time, &86_400u64, &4u32, &0u64);
-    client.set_beneficiary_vesting(&vault_id, &owner, &ben_b, &start_time, &86_400u64, &2u32, &0u64);
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &ben_a,
+        &start_time,
+        &86_400u64,
+        &4u32,
+        &0u64,
+    );
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &ben_b,
+        &start_time,
+        &86_400u64,
+        &2u32,
+        &0u64,
+    );
 
     let sched_a = client.get_beneficiary_vesting(&vault_id, &ben_a);
     let sched_b = client.get_beneficiary_vesting(&vault_id, &ben_b);
@@ -308,12 +324,8 @@ fn test_place_auction_bid() {
     let bid_amount = 500_000i128;
     let desired_allocation = 5_000u32; // 50%
 
-    let result = client.try_place_auction_bid(
-        &vault_id,
-        &bidder_a,
-        &bid_amount,
-        &desired_allocation,
-    );
+    let result =
+        client.try_place_auction_bid(&vault_id, &bidder_a, &bid_amount, &desired_allocation);
 
     assert!(result.is_ok());
 }
@@ -356,7 +368,14 @@ fn test_auction_bid_outside_window() {
     let start_time = env.ledger().timestamp() + 100;
     let end_time = start_time + 604_800u64;
 
-    client.create_beneficiary_auction(&vault_id, &owner, &start_time, &end_time, &10_000u32, &100_000i128);
+    client.create_beneficiary_auction(
+        &vault_id,
+        &owner,
+        &start_time,
+        &end_time,
+        &10_000u32,
+        &100_000i128,
+    );
 
     // Try to bid before auction starts
     let bidder = Address::generate(&env);
@@ -374,7 +393,14 @@ fn test_finalize_auction_selects_winner() {
     let start_time = env.ledger().timestamp() + 100;
     let end_time = start_time + 604_800u64;
 
-    client.create_beneficiary_auction(&vault_id, &owner, &start_time, &end_time, &10_000u32, &100_000i128);
+    client.create_beneficiary_auction(
+        &vault_id,
+        &owner,
+        &start_time,
+        &end_time,
+        &10_000u32,
+        &100_000i128,
+    );
 
     env.ledger().set_timestamp(start_time + 10);
 
@@ -408,7 +434,14 @@ fn test_auction_cannot_be_created_twice() {
     let start_time = env.ledger().timestamp() + 100;
     let end_time = start_time + 604_800u64;
 
-    client.create_beneficiary_auction(&vault_id, &owner, &start_time, &end_time, &10_000u32, &100_000i128);
+    client.create_beneficiary_auction(
+        &vault_id,
+        &owner,
+        &start_time,
+        &end_time,
+        &10_000u32,
+        &100_000i128,
+    );
 
     let result = client.try_create_beneficiary_auction(
         &vault_id,
@@ -431,7 +464,14 @@ fn test_multiple_bids_in_auction() {
     let start_time = env.ledger().timestamp() + 100;
     let end_time = start_time + 604_800u64;
 
-    client.create_beneficiary_auction(&vault_id, &owner, &start_time, &end_time, &10_000u32, &100_000i128);
+    client.create_beneficiary_auction(
+        &vault_id,
+        &owner,
+        &start_time,
+        &end_time,
+        &10_000u32,
+        &100_000i128,
+    );
 
     env.ledger().set_timestamp(start_time + 10);
 
@@ -455,7 +495,14 @@ fn test_get_auction_bids() {
     let start_time = env.ledger().timestamp() + 100;
     let end_time = start_time + 604_800u64;
 
-    client.create_beneficiary_auction(&vault_id, &owner, &start_time, &end_time, &10_000u32, &100_000i128);
+    client.create_beneficiary_auction(
+        &vault_id,
+        &owner,
+        &start_time,
+        &end_time,
+        &10_000u32,
+        &100_000i128,
+    );
 
     env.ledger().set_timestamp(start_time + 10);
 

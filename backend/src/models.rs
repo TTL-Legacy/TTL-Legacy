@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 // ── WebSocket authentication ────────────────────────────────────────────────
 
@@ -65,8 +65,6 @@ pub struct SetPreferencesRequest {
     pub hours_before_expiry: u32,
     pub frequency: Frequency,
 }
-
-
 
 /// Notification type sent to a device.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,8 +230,6 @@ pub struct ChannelDeliveryLog {
     pub error: Option<String>,
 }
 
-
-
 /// A scheduled notification (pending delivery).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledNotification {
@@ -344,7 +340,6 @@ pub struct PurchaseTtlInsuranceRequest {
 pub struct RecordOwnerActivityRequest {
     pub owner_id: u64,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultEvent {
@@ -663,7 +658,6 @@ pub struct SetSubscriptionRequest {
     pub frequency: SubscriptionFrequency,
 }
 
-
 // ── Idempotency Key support (#825) ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -955,8 +949,6 @@ pub struct TokenPairResponse {
     /// Access token lifetime in seconds, for client-side proactive refresh.
     pub expires_in: i64,
 }
-
-
 
 // ── Issue #1337: Beneficiary archival notification ───────────────────────────
 

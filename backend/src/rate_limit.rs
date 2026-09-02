@@ -76,11 +76,13 @@ pub async fn rate_limit_middleware(
 }
 
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
-    if let Some(val) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        return val.split(',').next().unwrap_or("unknown").trim().to_string();
+    if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        return val
+            .split(',')
+            .next()
+            .unwrap_or("unknown")
+            .trim()
+            .to_string();
     }
     if let Some(val) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         return val.to_string();
