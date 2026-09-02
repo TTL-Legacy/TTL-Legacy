@@ -190,17 +190,13 @@ mod tests {
 
         set_rank(&env, &admin, alice, 1);
 
-        assert!(env
-            .events()
-            .all()
-            .iter()
-            .any(|event| {
-                let topics: Vec<Val> = event.1.clone().into_val(&env);
-                topics
-                    .get(0)
-                    .and_then(|topic| topic.try_into_val(&env).ok())
-                    .map(|topic: soroban_sdk::Symbol| topic == RANKING_SET_TOPIC)
-                    .unwrap_or(false)
-            }));
+        assert!(env.events().all().iter().any(|event| {
+            let topics: Vec<Val> = event.1.clone().into_val(&env);
+            topics
+                .get(0)
+                .and_then(|topic| topic.try_into_val(&env).ok())
+                .map(|topic: soroban_sdk::Symbol| topic == RANKING_SET_TOPIC)
+                .unwrap_or(false)
+        }));
     }
 }

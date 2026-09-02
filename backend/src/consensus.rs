@@ -167,8 +167,7 @@ impl NodeCache {
     }
 
     pub fn from_env() -> Arc<Self> {
-        let node_id = std::env::var("NODE_ID")
-            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+        let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         let strategy = match std::env::var("CONSENSUS_STRATEGY")
             .unwrap_or_default()
             .to_ascii_lowercase()
@@ -178,15 +177,14 @@ impl NodeCache {
             _ => ConflictStrategy::LastWriteWins,
         };
 
-        let backend: Arc<dyn CacheBackend> =
-            if let Ok(redis_url) = std::env::var("REDIS_URL") {
-                Arc::new(
-                    RedisBackend::new(&redis_url)
-                        .unwrap_or_else(|e| panic!("failed to connect to Redis: {e}")),
-                )
-            } else {
-                Arc::new(InMemoryBackend::new())
-            };
+        let backend: Arc<dyn CacheBackend> = if let Ok(redis_url) = std::env::var("REDIS_URL") {
+            Arc::new(
+                RedisBackend::new(&redis_url)
+                    .unwrap_or_else(|e| panic!("failed to connect to Redis: {e}")),
+            )
+        } else {
+            Arc::new(InMemoryBackend::new())
+        };
 
         Arc::new(Self::new(node_id, backend, strategy))
     }
@@ -194,7 +192,10 @@ impl NodeCache {
     pub fn put(&self, key: &str, value: &str) -> Result<CacheEntry, String> {
         let entry = self.make_entry(key, value);
         self.backend.set_entry(&entry)?;
-        self.local.lock().unwrap().insert(key.to_string(), entry.clone());
+        self.local
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), entry.clone());
         Ok(entry)
     }
 
@@ -249,10 +250,7 @@ impl NodeCache {
 
             if let Some(resolved) = winner {
                 self.backend.set_entry(&resolved)?;
-                self.local
-                    .lock()
-                    .unwrap()
-                    .insert(key.clone(), resolved);
+                self.local.lock().unwrap().insert(key.clone(), resolved);
                 conflicts_resolved += 1;
             }
         }
@@ -281,10 +279,7 @@ impl NodeCache {
 
     #[cfg(test)]
     pub fn set_local_entry(&self, entry: CacheEntry) {
-        self.local
-            .lock()
-            .unwrap()
-            .insert(entry.key.clone(), entry);
+        self.local.lock().unwrap().insert(entry.key.clone(), entry);
     }
 }
 
@@ -355,12 +350,8 @@ mod tests {
     fn lww_prefers_latest_timestamp() {
         let older = sample_entry("k", "old", "node-a", 1_000);
         let newer = sample_entry("k", "new", "node-b", 2_000);
-        let winner = resolve_conflict(
-            Some(&older),
-            Some(&newer),
-            ConflictStrategy::LastWriteWins,
-        )
-        .unwrap();
+        let winner =
+            resolve_conflict(Some(&older), Some(&newer), ConflictStrategy::LastWriteWins).unwrap();
         assert_eq!(winner.value, "new");
     }
 
@@ -368,16 +359,23 @@ mod tests {
     fn voting_prefers_higher_version() {
         let low = sample_entry("k", "low", "node-a", 1_000);
         let high = sample_entry("k", "high", "node-b", 2_000);
-        let winner =
-            resolve_conflict(Some(&low), Some(&high), ConflictStrategy::Voting).unwrap();
+        let winner = resolve_conflict(Some(&low), Some(&high), ConflictStrategy::Voting).unwrap();
         assert_eq!(winner.value, "high");
     }
 
     #[test]
     fn multi_node_converges_after_consensus_check() {
         let backend: Arc<dyn CacheBackend> = shared_backend();
-        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
-        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
+        let node_a = NodeCache::new(
+            "node-a",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
+        let node_b = NodeCache::new(
+            "node-b",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
 
         node_a.put("vault:1", "prefs-a").unwrap();
         let remote = node_b.get("vault:1").unwrap().expect("remote entry");
@@ -395,8 +393,16 @@ mod tests {
     #[test]
     fn two_nodes_share_backend_state() {
         let backend: Arc<dyn CacheBackend> = shared_backend();
-        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
-        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
+        let node_a = NodeCache::new(
+            "node-a",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
+        let node_b = NodeCache::new(
+            "node-b",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
 
         node_a.put("vault:2", "shared").unwrap();
         node_b.sync_local_from_remote().unwrap();
@@ -419,9 +425,6 @@ mod tests {
 
         let report = node_b.check_and_resolve().unwrap();
         assert_eq!(report.conflicts_resolved, 1);
-        assert_eq!(
-            node_b.get("vault:3").unwrap().unwrap().value,
-            "winner"
-        );
+        assert_eq!(node_b.get("vault:3").unwrap().unwrap().value, "winner");
     }
 }

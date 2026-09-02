@@ -32,7 +32,13 @@ mod tests {
     /// Minimum valid check-in interval — mirrors the constant defined in lib.rs.
     const INTERVAL: u64 = MIN_CHECK_IN_INTERVAL; // 3 600 s
 
-    fn setup() -> (Env, Address, Address, Address, TtlVaultContractClient<'static>) {
+    fn setup() -> (
+        Env,
+        Address,
+        Address,
+        Address,
+        TtlVaultContractClient<'static>,
+    ) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -54,8 +60,7 @@ mod tests {
 
         // SAFETY: lifetime extension is the standard pattern used throughout this
         // test suite.  The client is never accessed after `env` is dropped.
-        let client: TtlVaultContractClient<'static> =
-            unsafe { core::mem::transmute(client) };
+        let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
 
         (env, owner, beneficiary, token_address, client)
     }

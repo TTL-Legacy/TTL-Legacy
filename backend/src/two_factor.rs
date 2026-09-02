@@ -211,12 +211,16 @@ pub async fn enable_2fa(
     match &body.method {
         TwoFactorMethod::Sms => {
             if body.phone.as_ref().map_or(true, |p| p.trim().is_empty()) {
-                return Err(AppError::InvalidInput("phone is required for SMS 2FA".into()));
+                return Err(AppError::InvalidInput(
+                    "phone is required for SMS 2FA".into(),
+                ));
             }
         }
         TwoFactorMethod::Email => {
             if body.email.as_ref().map_or(true, |e| e.trim().is_empty()) {
-                return Err(AppError::InvalidInput("email is required for Email 2FA".into()));
+                return Err(AppError::InvalidInput(
+                    "email is required for Email 2FA".into(),
+                ));
             }
         }
         TwoFactorMethod::Totp => {}
@@ -339,14 +343,13 @@ pub async fn verify_2fa(
 
     let valid = match &config.method {
         TwoFactorMethod::Totp => {
-            let secret = config.secret.as_ref().ok_or_else(|| {
-                AppError::InvalidInput("TOTP secret not found".into())
-            })?;
+            let secret = config
+                .secret
+                .as_ref()
+                .ok_or_else(|| AppError::InvalidInput("TOTP secret not found".into()))?;
             verify_totp_code(secret, &body.otp)
         }
-        TwoFactorMethod::Sms | TwoFactorMethod::Email => {
-            verify_pending_otp(&vault_id, &body.otp)
-        }
+        TwoFactorMethod::Sms | TwoFactorMethod::Email => verify_pending_otp(&vault_id, &body.otp),
     };
 
     if !valid {
@@ -413,9 +416,7 @@ pub async fn challenge_2fa(
 }
 
 /// POST /api/vaults/{vault_id}/2fa/session/clear
-pub async fn clear_2fa_session(
-    Path(vault_id): Path<String>,
-) -> Result<StatusCode, AppError> {
+pub async fn clear_2fa_session(Path(vault_id): Path<String>) -> Result<StatusCode, AppError> {
     SESSION_VERIFIED.lock().unwrap().remove(&vault_id);
     Ok(StatusCode::OK)
 }

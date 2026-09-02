@@ -7,8 +7,8 @@
 use crate::models::{
     ChannelDeliveryLog, DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken,
     IdempotencyRecord, NotificationChannel, NotificationPreferences, NotificationType,
-    RegisterTokenRequest, ReminderDeliveryLog, ReminderToken, ScheduledNotification, UnsubscribeToken,
-    UpdatePreferencesRequest, Vault,
+    RegisterTokenRequest, ReminderDeliveryLog, ReminderToken, ScheduledNotification,
+    UnsubscribeToken, UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -248,14 +248,18 @@ impl NotificationService {
     }
 
     pub fn get_tokens(&self, owner: &str) -> Vec<DeviceToken> {
-        self.tokens.lock().unwrap().get(owner).cloned().unwrap_or_default()
+        self.tokens
+            .lock()
+            .unwrap()
+            .get(owner)
+            .cloned()
+            .unwrap_or_default()
     }
 
     // ── Preferences ──────────────────────────────────────────────────────────
 
     // Preferences are stored per-owner.
     pub fn get_preferences(&self, owner: &str) -> NotificationPreferences {
-
         self.prefs
             .lock()
             .unwrap()
@@ -267,15 +271,15 @@ impl NotificationService {
             })
     }
 
-
-
     pub fn update_preferences(&self, req: UpdatePreferencesRequest) {
         let mut store = self.prefs.lock().unwrap();
         let owner = req.owner.clone();
-        let prefs = store.entry(owner.clone()).or_insert_with(|| NotificationPreferences {
-            owner,
-            ..Default::default()
-        });
+        let prefs = store
+            .entry(owner.clone())
+            .or_insert_with(|| NotificationPreferences {
+                owner,
+                ..Default::default()
+            });
 
         if let Some(v) = req.expiry_warning_enabled {
             prefs.expiry_warning_enabled = v;
@@ -294,7 +298,6 @@ impl NotificationService {
         }
     }
 
-
     // ── Scheduling ───────────────────────────────────────────────────────────
 
     /// Schedule an expiry-warning notification for a vault.
@@ -306,15 +309,15 @@ impl NotificationService {
             return;
         }
 
-        let Some(ttl) = vault.ttl_remaining else { return };
+        let Some(ttl) = vault.ttl_remaining else {
+            return;
+        };
         let warning_secs = prefs.warning_hours_before * 3600;
         if ttl <= warning_secs {
             return;
         } // already past warning threshold
 
-
         let fire_at = Utc::now() + chrono::Duration::seconds((ttl - warning_secs) as i64);
-
 
         // Avoid duplicate schedules for the same vault + type
         let mut store = self.schedule.lock().unwrap();
@@ -323,7 +326,9 @@ impl NotificationService {
                 && s.notification_type == NotificationType::ExpiryWarning
                 && s.status == DeliveryStatus::Pending
         });
-        if already { return; }
+        if already {
+            return;
+        }
 
         store.push(ScheduledNotification {
             id: Uuid::new_v4().to_string(),
@@ -345,12 +350,7 @@ impl NotificationService {
         owner: &str,
         notification_type: NotificationType,
     ) {
-        let prefs = self
-            .prefs
-            .lock()
-            .unwrap()
-            .get(vault_id)
-            .cloned();
+        let prefs = self.prefs.lock().unwrap().get(vault_id).cloned();
 
         // Legacy enablement rules based on stored boolean flags.
         let enabled = match (prefs, &notification_type) {
@@ -365,7 +365,6 @@ impl NotificationService {
             return;
         }
 
-
         self.schedule.lock().unwrap().push(ScheduledNotification {
             id: Uuid::new_v4().to_string(),
             vault_id: vault_id.to_string(),
@@ -377,7 +376,6 @@ impl NotificationService {
             sent_at: None,
         });
     }
-
 
     pub fn get_pending_notifications(&self) -> Vec<ScheduledNotification> {
         let now = Utc::now();
@@ -476,7 +474,9 @@ impl NotificationService {
             if self.is_duplicate(&notif) {
                 log::info!(
                     "Skipping duplicate notification: vault={} owner={} type={:?}",
-                    notif.vault_id, notif.owner, notif.notification_type
+                    notif.vault_id,
+                    notif.owner,
+                    notif.notification_type
                 );
                 self.mark_sent(&notif.id, DeliveryStatus::Sent);
                 continue;
@@ -495,8 +495,7 @@ impl NotificationService {
             .unwrap()
             .values()
             .filter(|l| {
-                l.status == DeliveryStatus::Retrying
-                    && l.next_retry_at.map_or(false, |t| t <= now)
+                l.status == DeliveryStatus::Retrying && l.next_retry_at.map_or(false, |t| t <= now)
             })
             .cloned()
             .collect();
@@ -508,7 +507,8 @@ impl NotificationService {
                 sched.iter().find(|n| n.id == log.notification_id).cloned()
             };
             if let Some(notif) = notif {
-                self.deliver_with_retry(&notif, log.attempts.len() as u32).await;
+                self.deliver_with_retry(&notif, log.attempts.len() as u32)
+                    .await;
             }
         }
     }
@@ -523,7 +523,12 @@ impl NotificationService {
         if tokens.is_empty() {
             self.record(notif, DeliveryStatus::Failed, "no_tokens_registered");
             self.mark_sent(&notif.id, DeliveryStatus::Failed);
-            self.update_retry_log(notif, attempt, DeliveryStatus::Failed, "no_tokens_registered");
+            self.update_retry_log(
+                notif,
+                attempt,
+                DeliveryStatus::Failed,
+                "no_tokens_registered",
+            );
             return;
         }
 
@@ -533,7 +538,11 @@ impl NotificationService {
         let mut last_err = String::new();
         let mut any_ok = false;
         for device in &tokens {
-            match self.fcm.send(&device.token, title, &body, data.clone()).await {
+            match self
+                .fcm
+                .send(&device.token, title, &body, data.clone())
+                .await
+            {
                 Ok(msg_id) => {
                     self.record(notif, DeliveryStatus::Sent, &msg_id);
                     any_ok = true;
@@ -555,7 +564,13 @@ impl NotificationService {
                 let next_at = Utc::now() + chrono::Duration::seconds(delay as i64);
                 self.record(notif, DeliveryStatus::Retrying, &last_err);
                 self.mark_sent(&notif.id, DeliveryStatus::Retrying);
-                self.update_retry_log_with_next(notif, attempt, DeliveryStatus::Retrying, &last_err, Some(next_at));
+                self.update_retry_log_with_next(
+                    notif,
+                    attempt,
+                    DeliveryStatus::Retrying,
+                    &last_err,
+                    Some(next_at),
+                );
             } else {
                 self.record(notif, DeliveryStatus::Failed, &last_err);
                 self.mark_sent(&notif.id, DeliveryStatus::Failed);
@@ -572,7 +587,13 @@ impl NotificationService {
         }
     }
 
-    fn update_retry_log(&self, notif: &ScheduledNotification, attempt: u32, status: DeliveryStatus, error: &str) {
+    fn update_retry_log(
+        &self,
+        notif: &ScheduledNotification,
+        attempt: u32,
+        status: DeliveryStatus,
+        error: &str,
+    ) {
         self.update_retry_log_with_next(notif, attempt, status, error, None);
     }
 
@@ -585,14 +606,16 @@ impl NotificationService {
         next_retry_at: Option<chrono::DateTime<Utc>>,
     ) {
         let mut store = self.retry_log.lock().unwrap();
-        let entry = store.entry(notif.id.clone()).or_insert_with(|| ReminderDeliveryLog {
-            notification_id: notif.id.clone(),
-            vault_id: notif.vault_id.clone(),
-            owner: notif.owner.clone(),
-            status: DeliveryStatus::Pending,
-            attempts: Vec::new(),
-            next_retry_at: None,
-        });
+        let entry = store
+            .entry(notif.id.clone())
+            .or_insert_with(|| ReminderDeliveryLog {
+                notification_id: notif.id.clone(),
+                vault_id: notif.vault_id.clone(),
+                owner: notif.owner.clone(),
+                status: DeliveryStatus::Pending,
+                attempts: Vec::new(),
+                next_retry_at: None,
+            });
         entry.attempts.push(DeliveryAttempt {
             attempt,
             attempted_at: Utc::now(),
@@ -673,12 +696,13 @@ impl NotificationService {
             .ok_or_else(|| "invalid or expired unsubscribe token".to_string())?;
 
         let mut prefs_store = self.prefs.lock().unwrap();
-        let prefs = prefs_store
-            .entry(unsub.owner.clone())
-            .or_insert_with(|| NotificationPreferences {
-                owner: unsub.owner.clone(),
-                ..Default::default()
-            });
+        let prefs =
+            prefs_store
+                .entry(unsub.owner.clone())
+                .or_insert_with(|| NotificationPreferences {
+                    owner: unsub.owner.clone(),
+                    ..Default::default()
+                });
         prefs.unsubscribed = true;
 
         Ok(unsub.owner)
@@ -784,13 +808,16 @@ impl NotificationService {
         status: DeliveryStatus,
         error: Option<String>,
     ) {
-        self.channel_delivery_log.lock().unwrap().push(ChannelDeliveryLog {
-            notification_id: notification_id.to_string(),
-            channel: channel.clone(),
-            status,
-            attempted_at: Utc::now(),
-            error,
-        });
+        self.channel_delivery_log
+            .lock()
+            .unwrap()
+            .push(ChannelDeliveryLog {
+                notification_id: notification_id.to_string(),
+                channel: channel.clone(),
+                status,
+                attempted_at: Utc::now(),
+                error,
+            });
     }
 
     /// Get the channel delivery log for a notification.
@@ -820,8 +847,16 @@ impl NotificationService {
             self.log_channel_delivery(
                 &notif.id,
                 ch,
-                if ok { DeliveryStatus::Sent } else { DeliveryStatus::Failed },
-                if ok { None } else { Some("primary channel failed".into()) },
+                if ok {
+                    DeliveryStatus::Sent
+                } else {
+                    DeliveryStatus::Failed
+                },
+                if ok {
+                    None
+                } else {
+                    Some("primary channel failed".into())
+                },
             );
             ok
         } else {
@@ -841,8 +876,16 @@ impl NotificationService {
             self.log_channel_delivery(
                 &notif.id,
                 fb_channel,
-                if fb_ok { DeliveryStatus::Sent } else { DeliveryStatus::Failed },
-                if fb_ok { None } else { Some("fallback channel failed".into()) },
+                if fb_ok {
+                    DeliveryStatus::Sent
+                } else {
+                    DeliveryStatus::Failed
+                },
+                if fb_ok {
+                    None
+                } else {
+                    Some("fallback channel failed".into())
+                },
             );
             return (false, Some(fb_ok));
         }
@@ -865,7 +908,12 @@ impl NotificationService {
                 let (title, body, data) =
                     notification_content(&notif.notification_type, &notif.vault_id, None);
                 for device in &tokens {
-                    if self.fcm.send(&device.token, title, &body, data.clone()).await.is_ok() {
+                    if self
+                        .fcm
+                        .send(&device.token, title, &body, data.clone())
+                        .await
+                        .is_ok()
+                    {
                         return true;
                     }
                 }
@@ -1021,9 +1069,6 @@ mod tests {
         assert!(prefs.vault_released_enabled);
     }
 
-
-
-
     // Scheduling
 
     #[test]
@@ -1044,7 +1089,6 @@ mod tests {
                 fallback_channel: None,
                 unsubscribed: false,
             },
-
         );
 
         svc.schedule_expiry_warning(&vault);
@@ -1114,7 +1158,10 @@ mod tests {
 
         let pending = svc.get_pending_notifications();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].notification_type, NotificationType::VaultReleased);
+        assert_eq!(
+            pending[0].notification_type,
+            NotificationType::VaultReleased
+        );
     }
 
     #[test]
@@ -1243,7 +1290,11 @@ mod tests {
     fn retry_delays_are_ascending() {
         let delays = RETRY_DELAYS_SECS;
         for i in 1..delays.len() {
-            assert!(delays[i] > delays[i - 1], "delay[{i}] should be > delay[{}]", i - 1);
+            assert!(
+                delays[i] > delays[i - 1],
+                "delay[{i}] should be > delay[{}]",
+                i - 1
+            );
         }
         assert_eq!(delays.len(), 5);
     }

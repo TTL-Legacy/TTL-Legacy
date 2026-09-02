@@ -10,7 +10,6 @@
 ///
 /// After all retries are exhausted, status → DeliveryFailed and the vault
 /// owner is notified via email (stub; replace with real email integration).
-
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -19,8 +18,7 @@ use uuid::Uuid;
 use crate::{
     db::Db,
     models::{
-        TimelineEvent, TimelineEventKind, WebhookAttempt, WebhookDelivery,
-        WebhookDeliveryStatus,
+        TimelineEvent, TimelineEventKind, WebhookAttempt, WebhookDelivery, WebhookDeliveryStatus,
     },
 };
 
@@ -84,10 +82,7 @@ pub async fn flush(db: &Arc<Db>) {
 }
 
 /// Get webhook delivery log for a vault.
-pub fn get_delivery_log(
-    db: &Arc<Db>,
-    vault_id: &str,
-) -> Result<Vec<WebhookDelivery>, String> {
+pub fn get_delivery_log(db: &Arc<Db>, vault_id: &str) -> Result<Vec<WebhookDelivery>, String> {
     db.get_webhook_deliveries_for_vault(vault_id)
         .map_err(|e| e.to_string())
 }
@@ -137,8 +132,7 @@ async fn attempt_delivery(db: &Arc<Db>, mut delivery: WebhookDelivery) {
             // Schedule a retry.
             let delay = RETRY_DELAYS_SECS[retry_index];
             delivery.status = WebhookDeliveryStatus::Retrying;
-            delivery.next_retry_at =
-                Some(now + chrono::Duration::seconds(delay as i64));
+            delivery.next_retry_at = Some(now + chrono::Duration::seconds(delay as i64));
             tracing::warn!(
                 delivery_id = %delivery.id,
                 vault_id = %delivery.vault_id,
@@ -264,8 +258,14 @@ mod tests {
     fn test_enqueue_creates_pending_delivery() {
         let db = test_db();
         let payload = serde_json::json!({"event": "vault_released", "vault_id": "v1"});
-        let delivery = enqueue(&db, "v1", "vault_released", payload, "https://example.com/hook")
-            .expect("enqueue should succeed");
+        let delivery = enqueue(
+            &db,
+            "v1",
+            "vault_released",
+            payload,
+            "https://example.com/hook",
+        )
+        .expect("enqueue should succeed");
 
         assert_eq!(delivery.vault_id, "v1");
         assert_eq!(delivery.event_type, "vault_released");
@@ -329,8 +329,8 @@ mod tests {
 
         // Simulate a delivery that "succeeded" by manually updating it.
         let payload = serde_json::json!({"ok": true});
-        let mut delivery = enqueue(&db, "v2", "check_in", payload, "https://example.com/ok")
-            .expect("enqueue");
+        let mut delivery =
+            enqueue(&db, "v2", "check_in", payload, "https://example.com/ok").expect("enqueue");
 
         // Manually drive it to Delivered state (as the send_webhook mock would).
         delivery.status = WebhookDeliveryStatus::Delivered;

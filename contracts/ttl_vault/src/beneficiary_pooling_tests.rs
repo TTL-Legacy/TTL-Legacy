@@ -50,8 +50,16 @@ fn test_create_pool_success() {
 
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 6000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b2.clone(), bps: 4000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 6000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b2.clone(),
+            bps: 4000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
@@ -75,8 +83,16 @@ fn test_create_pool_partial_members() {
 
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 6000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b2.clone(), bps: 4000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 6000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b2.clone(),
+            bps: 4000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
@@ -99,7 +115,11 @@ fn test_create_pool_rejects_unregistered_member() {
 
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 10_000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
@@ -120,7 +140,11 @@ fn test_create_pool_rejects_non_owner() {
 
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 10_000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 

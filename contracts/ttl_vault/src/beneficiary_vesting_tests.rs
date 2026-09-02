@@ -9,13 +9,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-fn setup_vesting() -> (
-    Env,
-    Address,
-    Address,
-    u64,
-    TtlVaultContractClient<'static>,
-) {
+fn setup_vesting() -> (Env, Address, Address, u64, TtlVaultContractClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -54,21 +48,14 @@ fn test_vesting_with_multiple_beneficiaries_different_schedules() {
     let start = env.ledger().timestamp() + 100;
 
     // Different vesting schedules for different beneficiaries
-    let result_a = client.try_set_beneficiary_vesting(
-        &vault_id,
-        &owner,
-        &ben_a,
-        &start,
-        &86_400u64,
-        &4u32,
-        &0u64,
-    );
+    let result_a = client
+        .try_set_beneficiary_vesting(&vault_id, &owner, &ben_a, &start, &86_400u64, &4u32, &0u64);
     let result_b = client.try_set_beneficiary_vesting(
         &vault_id,
         &owner,
         &ben_b,
         &(start + 172_800u64), // 2 days later
-        &172_800u64,            // 2-day interval
+        &172_800u64,           // 2-day interval
         &2u32,
         &0u64,
     );
@@ -92,15 +79,35 @@ fn test_vesting_schedule_can_be_updated() {
     let start = env.ledger().timestamp() + 100;
 
     // Set initial schedule
-    client.set_beneficiary_vesting(&vault_id, &owner, &beneficiary, &start, &86_400u64, &4u32, &0u64);
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &beneficiary,
+        &start,
+        &86_400u64,
+        &4u32,
+        &0u64,
+    );
 
-    let initial = client.get_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let initial = client
+        .get_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
     assert_eq!(initial.num_installments, 4u32);
 
     // Update to new schedule
-    client.set_beneficiary_vesting(&vault_id, &owner, &beneficiary, &start, &86_400u64, &6u32, &0u64);
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &beneficiary,
+        &start,
+        &86_400u64,
+        &6u32,
+        &0u64,
+    );
 
-    let updated = client.get_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let updated = client
+        .get_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
     assert_eq!(updated.num_installments, 6u32);
     assert_eq!(updated.claimed_installments, 0u32); // Reset on update
 }
@@ -114,7 +121,15 @@ fn test_vesting_cliff_prevents_early_claim() {
 
     let cliff = 31_536_000u64; // 1 year
 
-    client.set_beneficiary_vesting(&vault_id, &owner, &beneficiary, &start, &86_400u64, &4u32, &cliff);
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &beneficiary,
+        &start,
+        &86_400u64,
+        &4u32,
+        &cliff,
+    );
 
     client.trigger_release(&vault_id);
 
@@ -146,15 +161,21 @@ fn test_vesting_with_uneven_amounts() {
 
     // First claim
     env.ledger().set_timestamp(start + 2);
-    let amount_1 = client.claim_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let amount_1 = client
+        .claim_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
 
     // Last installment should include remainder
     env.ledger().set_timestamp(start + 4);
-    let amount_2 = client.claim_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let amount_2 = client
+        .claim_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
 
     // Last installment (claimed_installments = 3)
     env.ledger().set_timestamp(start + 6);
-    let amount_3 = client.claim_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let amount_3 = client
+        .claim_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
 
     let total = amount_1 + amount_2 + amount_3;
     assert_eq!(total, amount);
@@ -165,7 +186,15 @@ fn test_vesting_requires_vault_released() {
     let (env, owner, beneficiary, vault_id, client) = setup_vesting();
 
     let start = env.ledger().timestamp() + 100;
-    client.set_beneficiary_vesting(&vault_id, &owner, &beneficiary, &start, &86_400u64, &4u32, &0u64);
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &beneficiary,
+        &start,
+        &86_400u64,
+        &4u32,
+        &0u64,
+    );
 
     // Try to claim before vault is released
     env.ledger().set_timestamp(start + 86_400 + 10);
@@ -200,16 +229,22 @@ fn test_vesting_claim_sequence() {
 
     // Claim 1: at timestamp start + 1
     env.ledger().set_timestamp(start + 1);
-    let claim_1 = client.claim_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let claim_1 = client
+        .claim_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
     assert_eq!(claim_1, per_install);
 
     // Claim 2: at timestamp start + 2
     env.ledger().set_timestamp(start + 2);
-    let claim_2 = client.claim_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let claim_2 = client
+        .claim_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
     assert_eq!(claim_2, per_install);
 
     // Verify claimed_installments advanced
-    let schedule = client.get_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let schedule = client
+        .get_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
     assert_eq!(schedule.claimed_installments, 2u32);
 }
 
@@ -248,13 +283,23 @@ fn test_vesting_large_amounts() {
     let start = 100u64;
     env.ledger().set_timestamp(start);
 
-    client.set_beneficiary_vesting(&vault_id, &owner, &beneficiary, &start, &86_400u64, &100u32, &0u64);
+    client.set_beneficiary_vesting(
+        &vault_id,
+        &owner,
+        &beneficiary,
+        &start,
+        &86_400u64,
+        &100u32,
+        &0u64,
+    );
     client.trigger_release(&vault_id);
 
     let per_install = large_amount / 100;
 
     env.ledger().set_timestamp(start + 86_400);
-    let claimed = client.claim_beneficiary_vesting(&vault_id, &beneficiary).unwrap();
+    let claimed = client
+        .claim_beneficiary_vesting(&vault_id, &beneficiary)
+        .unwrap();
 
     assert_eq!(claimed, per_install);
 }

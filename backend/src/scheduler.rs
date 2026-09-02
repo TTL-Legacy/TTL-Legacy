@@ -5,7 +5,6 @@ use chrono::Utc;
 
 use crate::{db::Db, models::Frequency};
 
-
 /// Polls preferences every minute and fires reminders for vaults whose TTL
 /// is within the user-configured window.
 ///
@@ -29,15 +28,25 @@ pub async fn run(db: Arc<Db>) {
                     use crate::models::SubscriptionFrequency;
                     let should_notify = if let Some(ref sub) = subscription {
                         match sub.frequency {
-                            SubscriptionFrequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
-                            SubscriptionFrequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
-                            SubscriptionFrequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
+                            SubscriptionFrequency::Once => {
+                                ttl_hours <= window && ttl_hours > window.saturating_sub(1)
+                            }
+                            SubscriptionFrequency::Daily => {
+                                ttl_hours <= window && ttl_hours % 24 == 0
+                            }
+                            SubscriptionFrequency::Weekly => {
+                                ttl_hours <= window && ttl_hours % (24 * 7) == 0
+                            }
                             SubscriptionFrequency::Hourly => ttl_hours <= window,
-                            SubscriptionFrequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
+                            SubscriptionFrequency::Monthly => {
+                                ttl_hours <= window && ttl_hours % (24 * 30) == 0
+                            }
                         }
                     } else {
                         match prefs.frequency {
-                            Frequency::Once => ttl_hours <= window && ttl_hours > window.saturating_sub(1),
+                            Frequency::Once => {
+                                ttl_hours <= window && ttl_hours > window.saturating_sub(1)
+                            }
                             Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
                             Frequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
                             Frequency::Hourly => ttl_hours <= window,
@@ -50,8 +59,12 @@ pub async fn run(db: Arc<Db>) {
                             let deliver_on_channel = if let Some(ref sub) = subscription {
                                 use crate::models::SubscriptionChannel;
                                 match channel {
-                                    crate::models::Channel::Email => sub.channels.contains(&SubscriptionChannel::Email),
-                                    crate::models::Channel::Sms => sub.channels.contains(&SubscriptionChannel::Sms),
+                                    crate::models::Channel::Email => {
+                                        sub.channels.contains(&SubscriptionChannel::Email)
+                                    }
+                                    crate::models::Channel::Sms => {
+                                        sub.channels.contains(&SubscriptionChannel::Sms)
+                                    }
                                     crate::models::Channel::Push => false,
                                 }
                             } else {
@@ -144,7 +157,6 @@ async fn extend_ttl_for_inactive_owners(db: &Arc<Db>) {
     }
 }
 
-
 /// Stub: returns hours remaining until vault TTL expiry.
 /// Replace with a Stellar RPC call to `get_ttl_remaining`.
 async fn fetch_ttl_remaining(_vault_id: u64) -> u32 {
@@ -153,12 +165,7 @@ async fn fetch_ttl_remaining(_vault_id: u64) -> u32 {
 
 /// Stub: dispatches a reminder via the given channel.
 async fn send_reminder(vault_id: u64, channel: &crate::models::Channel, hours_left: u32) {
-    tracing::info!(
-        vault_id,
-        ?channel,
-        hours_left,
-        "sending reminder"
-    );
+    tracing::info!(vault_id, ?channel, hours_left, "sending reminder");
 }
 
 // ── Issue #1337: Beneficiary archival notification ────────────────────────────
@@ -186,9 +193,7 @@ async fn notify_beneficiaries_on_ttl_expiry(db: &Arc<Db>) {
                 // expired (ttl_remaining == 0) OR has already been Released.
                 match v.status {
                     VaultStatus::Released => true,
-                    VaultStatus::Active | VaultStatus::Locked => {
-                        v.ttl_remaining == Some(0)
-                    }
+                    VaultStatus::Active | VaultStatus::Locked => v.ttl_remaining == Some(0),
                     _ => false,
                 }
             })
@@ -219,12 +224,9 @@ async fn notify_beneficiaries_on_ttl_expiry(db: &Arc<Db>) {
         for contact in contacts {
             // Dispatch via email if configured.
             if let Some(ref email) = contact.email {
-                let result = send_beneficiary_archival_email(
-                    &vault.id,
-                    &contact.beneficiary_address,
-                    email,
-                )
-                .await;
+                let result =
+                    send_beneficiary_archival_email(&vault.id, &contact.beneficiary_address, email)
+                        .await;
 
                 let notif = BeneficiaryArchivalNotification {
                     id: Uuid::new_v4().to_string(),
@@ -251,12 +253,9 @@ async fn notify_beneficiaries_on_ttl_expiry(db: &Arc<Db>) {
 
             // Dispatch via SMS if configured.
             if let Some(ref phone) = contact.phone {
-                let result = send_beneficiary_archival_sms(
-                    &vault.id,
-                    &contact.beneficiary_address,
-                    phone,
-                )
-                .await;
+                let result =
+                    send_beneficiary_archival_sms(&vault.id, &contact.beneficiary_address, phone)
+                        .await;
 
                 let notif = BeneficiaryArchivalNotification {
                     id: Uuid::new_v4().to_string(),

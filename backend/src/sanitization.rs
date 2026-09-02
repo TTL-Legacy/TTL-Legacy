@@ -240,7 +240,8 @@ mod tests {
     #[tokio::test]
     async fn test_valid_request_passes_through() {
         let app = test_app();
-        let body = json!({ "channels": ["email"], "hours_before_expiry": 24, "frequency": "daily" });
+        let body =
+            json!({ "channels": ["email"], "hours_before_expiry": 24, "frequency": "daily" });
         let res = post_json(app, body.to_string()).await;
         assert_eq!(res.status(), StatusCode::OK);
     }
@@ -269,7 +270,9 @@ mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
         // Confirm the error payload contains a meaningful code.
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed["code"], "field_too_long");
     }
@@ -282,7 +285,9 @@ mod tests {
         let res = post_json(app, body.to_string()).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed["code"], "unexpected_field");
     }

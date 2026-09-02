@@ -614,7 +614,6 @@ pub enum StorageKey {
     WithdrawalRollback(u64),
 }
 
-
 /// Check-in history entry for TTL prediction - Issue #482
 #[contracttype]
 #[derive(Clone)]
@@ -764,6 +763,22 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
     /// Minimum amount in stroops. If calculated share < minimum_threshold, beneficiary gets 0.
     pub minimum_threshold: i128,
+}
+
+/// A percentage-based beneficiary split for use with `create_vault_with_splits`.
+///
+/// Each entry specifies an address and an integer percentage (0–100). The
+/// percentages across all entries in a splits list must sum to exactly 100.
+/// Internally the percentage is converted to basis points (BPS) by multiplying
+/// by 100 before being stored in `BeneficiaryEntry.bps`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeneficiarySplit {
+    /// The beneficiary's Stellar address.
+    pub address: Address,
+    /// Whole-number percentage share (1–100). Must be ≥ 1 and the sum of all
+    /// entries must equal exactly 100.
+    pub percentage: u32,
 }
 
 /// Privacy-preserving commitment for a vault beneficiary.
@@ -1403,7 +1418,7 @@ pub struct PendingMultiSigOp {
     pub nonce: u64,
     pub vault_id: u64,
     pub operation: MultiSigOperation,
-    pub signers: Vec<Address>,  // Addresses that have signed
+    pub signers: Vec<Address>, // Addresses that have signed
     pub payload: Bytes,
     pub address_payload: Option<Address>,
     pub created_at: u64,
@@ -1745,8 +1760,6 @@ pub struct VaultSnapshot {
     pub timestamp: u64,
     pub content_hash: BytesN<32>,
 }
-
-
 
 // ============================================================
 // Issue #951: Graduated Release Schedule

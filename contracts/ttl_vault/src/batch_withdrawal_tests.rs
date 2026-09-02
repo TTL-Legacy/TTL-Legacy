@@ -4,7 +4,10 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{storage::{Instance as _, Persistent as _}, Address as _, Events, Ledger},
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Events, Ledger,
+    },
     token::{self, StellarAssetClient},
     vec, Address, Env, IntoVal, TryIntoVal,
 };
