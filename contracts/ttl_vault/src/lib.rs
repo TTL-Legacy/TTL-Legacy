@@ -5,160 +5,402 @@ use soroban_sdk::{
     Address, Bytes, BytesN, Env, Map, String, Vec,
 };
 
-pub mod ranking;
 pub mod oracle;
+pub mod ranking;
 mod types;
 pub use oracle::{OracleClient, OracleInterface};
 // The contract's `#[contracttype]` types are re-exported publicly so that
 // client crates (integration tests, fuzz targets) can reference them.
 pub use types::{
-    ArchivedVaultInfo, AuditEntry, BackupCode, BeneficiaryClaimDelegation, BeneficiaryCommitment,
-    BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
-    CheckInHistoryEntry, CheckInStreak, ConditionalAcceptanceEntry, StorageKey, DisputeStatus,
-    GeoCheckInEntry, HibernationEntry, IntegrityReport, MetadataVersionEntry,
-    MilestoneEntry, MilestoneVestingSchedule, MultiSigConfig, MultiSigOperation, MultiSigProposal,
-    OwnershipProof, OwnershipTransferRequest, PasskeyAnalytics, PasskeyHash, PasskeyUsageEntry,
-    PendingBeneficiaryUpdate, PendingMultiSigOp, ProofOfLifeEntry, ProposalStatus,
-    ReleaseCondition, ReleaseEvent, ReleaseVoteEntry, StateTransitionEntry,
-    TokenCollateral, TokenConversion, TokenHedge, TokenLending, TokenRebalanceConfig, TokenStaking,
-    TokenWeight, TtlBorrowRecord, UpgradeProposal, VaultStatusSummary, VestingBonusConfig,
-    VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
-    WhitelistEntry, WithdrawalAuditEntry, WithdrawalDispute, WithdrawalLimit, WithdrawalReversal,
-    WithdrawalScheduleEntry, WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
-    CountdownConfig, RecurringWithdrawal, VaultCreatedEvent, CheckInEvent, BeneficiaryUpdatedEvent,
-    AUCTION_BID_TOPIC, AUCTION_CREATED_TOPIC, AUCTION_FINALIZED_TOPIC,
-    BENEFICIARY_CONFLICT_FILED_TOPIC, BENEFICIARY_CONFLICT_RESOLVED_TOPIC,
-    BIND_PASSKEY_BIOMETRIC_TOPIC, BIO_CHECKIN_TOPIC, BURN_EVENT_TOPIC,
-    BatchWithdrawal, BeneficiaryAuction, BeneficiaryAuctionBid, BeneficiaryConflict,
-    BeneficiaryConflictClaim, BeneficiaryEntry, BeneficiaryRebalancedEvent,
-    BeneficiaryTierSetEvent, BeneficiaryTriggerSetEvent, BeneficiaryVestingSchedule,
-    BeneficiaryWaterfallEvent, CHECKIN_SCORE_UPDATED_TOPIC, CHECK_IN_RECORDED_TOPIC,
-    CLAIM_BENEFICIARY_VESTING_TOPIC, CLAWBACK_UNVESTED_TOPIC, COUNTDOWN_NOTIF_TOPIC,
-    ConflictResolution, CustomMetadataEntry, EMERGENCY_RECOVERY_GENERATED_TOPIC,
-    EMERGENCY_RECOVERY_USED_TOPIC, MAX_VESTING_SCHEDULES, MILESTONE_ADJUST_TOPIC,
-    MILESTONE_CLAIM_TOPIC, MILESTONE_EMERGENCY_TOPIC, MILESTONE_PAUSE_TOPIC,
-    MILESTONE_PROGRESS_TOPIC, MILESTONE_RESUME_TOPIC, MILESTONE_VEST_TOPIC,
-    PASSKEY_COMPROMISED_TOPIC, PASSKEY_EXPIRED_TOPIC, PROTOCOL_CONFIG_APPLIED_TOPIC,
-    PROTOCOL_CONFIG_PROPOSED_TOPIC, PROXY_CLAIM_TOPIC, ProtocolConfig, ReleaseSchedule,
-    ReleaseStatus, ReleaseTrigger, SET_BENEFICIARY_VESTING_TOPIC, SET_BURN_PERCENTAGE_TOPIC,
-    SET_COUNTDOWN_TOPIC, TwoFactorConfigData, UNBIND_PASSKEY_BIOMETRIC_TOPIC,
-    VESTING_ACCELERATED_TOPIC, VESTING_FINALIZED_TOPIC, VESTING_FORFEITURE_TOPIC,
-    VESTING_PENALTY_TOPIC, VESTING_REVERSED_TOPIC, VESTING_ROLLOVER_TOPIC,
-    VESTING_STAGGER_TOPIC, Vault, VaultSnapshot, WITHDRAWAL_ESCROW_CREATED_TOPIC,
-    WITHDRAWAL_ESCROW_VERIFIED_TOPIC, WITHDRAWAL_PROOF_TOPIC, WITHDRAWAL_RATE_LIMITED_TOPIC,
-    WITHDRAWAL_ROLLBACK_TOPIC, WithdrawalEscrow, WithdrawalProof, WithdrawalRateLimit,
-    WithdrawalRollback, ADMIN_TRANSFER_TIMELOCK, DEFAULT_MIN_CHECKIN_COOLDOWN,
-    LOAN_ENABLED_TOPIC, LOAN_REPAID_TOPIC, MAX_ACCELERATE_SECONDS, MILESTONE_ADDED_TOPIC,
-    MILESTONE_ATTESTED_TOPIC, PENDING_MULTISIG_OP_EXPIRY, PROTOCOL_CONFIG_TIMELOCK,
-    PasskeyLockout, PasskeyRecoveryRequest, PasskeyRotationPolicy, PauseRecord,
-    TWO_FACTOR_DISABLED_TOPIC, TWO_FACTOR_ENABLED_TOPIC, TWO_FACTOR_VERIFIED_TOPIC,
-    VestingAccelerationConfig, VestingForfeitureConfig, VestingMilestone,
-    VestingRolloverConfig, VestingStaggerEntry, WithdrawalApprovalRequest,
-    BeneficiaryConditionalAcceptance, BeneficiaryConditionalDecline,
-    ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
-    ADMIN_TRANSFER_COMPLETED_TOPIC,
-    ADMIN_TRANSFER_PROPOSED_TOPIC, BACKUP_CODES_ENCRYPTED_TOPIC, BACKUP_CODES_GENERATED_TOPIC,
-    BACKUP_CODE_USED_TOPIC, BATCH_CHECKIN_TOPIC, BATCH_STATUS_TOPIC, BENEFICIARY_ACCEPTED_TOPIC,
-    BENEFICIARY_CAP_TOPIC, BENEFICIARY_CONDITION_ACCEPTED_TOPIC, BENEFICIARY_DECLINED_TOPIC,
-    BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC, BENEFICIARY_IDENTITY_VERIFIED_TOPIC,
-    BENEFICIARY_REBALANCED_TOPIC, BENEFICIARY_TIER_SET_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC,
-    BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_WATERFALL_TOPIC, BEN_CLAIM_DELEG_TOPIC,
-    BEN_COMMITTED_TOPIC, BEN_REVEALED_TOPIC, BEN_ROTATION_TOPIC, CANCEL_TOPIC,
-    CHECKIN_GEO_TOPIC, CHECKIN_POW_TOPIC, CHECKIN_RATE_LIMITED_TOPIC, CHECK_IN_TOPIC,
-    CLAIM_VEST_TOPIC, CLIFF_REACHED_TOPIC, CONDITIONS_ACCEPTED_TOPIC, CONFLICT_EXPIRED_TOPIC,
-    DELEGATE_BENEFICIARY_TOPIC, DELEGATE_CHECKIN_TOPIC, DEPOSIT_TOPIC, DISPUTE_FILED_TOPIC,
-    DISPUTE_RESOLVED_TOPIC, DUPLICATE_VAULT_TOPIC, EXPIRY_WARNING_THRESHOLD,
-    HIBERNATION_ENTERED_TOPIC, HIBERNATION_EXITED_TOPIC, INACTIVITY_PENALTY_TOPIC,
-    INHERITANCE_TOPIC, INTEGRITY_TOPIC, MAX_CUSTOM_METADATA_LEN, MAX_DESCRIPTION_LEN,
-    MAX_METADATA_LEN, MAX_NAME_LEN, MAX_NOTES_LEN, MAX_RELEASE_MEMO_LEN, META_REVERT_TOPIC,
-    META_VERSION_TOPIC,
-    MIN_THRESHOLD_REDISTRIBUTE_TOPIC, MIN_THRESHOLD_SET_TOPIC, MIN_THRESHOLD_SKIP_TOPIC,
-    MULTISIG_APPROVED_TOPIC, MULTISIG_CONFIG_TOPIC, MULTISIG_EXECUTED_TOPIC,
-    MULTISIG_PROPOSAL_EXPIRY, MULTISIG_PROPOSED_TOPIC, MULTISIG_REJECTED_TOPIC,
-    MULTISIG_SIGNER_REMOVED_TOPIC, MULTISIG_VETOED_TOPIC, OWNERSHIP_ACCEPTED_TOPIC,
-    OWNERSHIP_CANCELLED_TOPIC, OWNERSHIP_INITIATED_TOPIC, OWNERSHIP_PROOF_TOPIC, OWNERSHIP_TOPIC,
-    OWNERSHIP_TRANSFER_EXPIRED_TOPIC, PASSKEY_ANALYTICS_TOPIC, PASSKEY_EXPIRY_EXTENDED_TOPIC,
-    PASSKEY_LOCKOUT_TOPIC, PASSKEY_RECOVERED_TOPIC, PASSKEY_RECOVERY_INITIATED_TOPIC,
-    PASSKEY_ROTATION_ENFORCED_TOPIC, PASSKEY_ROTATION_REQUIRED_TOPIC, PASSKEY_UNLOCKED_TOPIC,
-    PASSKEY_USAGE_TOPIC, PAUSE_TOPIC, PAUSE_VAULT_TOPIC, PENDING_MULTISIG_OP_COSIGNED_TOPIC,
-    PENDING_MULTISIG_OP_CREATED_TOPIC, PENDING_MULTISIG_OP_EXECUTED_TOPIC,
-    PENDING_MULTISIG_OP_EXPIRED_TOPIC, PING_EXPIRY_TOPIC, POOL_CREATED_TOPIC,
-    PROOF_OF_LIFE_TOPIC, RECOVERY_EXTEND_TOPIC, RELEASE_TOPIC, RELEASE_VOTE_PASSED_TOPIC,
-    RELEASE_VOTE_TOPIC, REMOVE_PASSKEY_TOPIC, RESTORE_VAULT_TOPIC, RESUME_VAULT_TOPIC,
-    REVERSAL_GRACE_EXPIRED_TOPIC, REVOKE_DELEGATE_TOPIC, ROTATE_PASSKEY_TOPIC,
-    SET_BENEFICIARIES_TOPIC, SET_DECAY_RATE_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MAX_TTL_TOPIC,
-    SET_METADATA_TOPIC, SET_MIN_INTERVAL_TOPIC, SET_RECOVERY_TOPIC, SET_SPENDING_LIMIT_TOPIC,
-    SET_VESTING_TOPIC, STATE_TRANSITION_TOPIC, SYNC_TTL_TOPIC, TOKEN_COLLATERAL_TOPIC,
-    TOKEN_COLLAT_RLSD_TOPIC, TOKEN_CONVERSION_TOPIC, TOKEN_HEDGE_CLOSE_TOPIC, TOKEN_HEDGE_TOPIC,
-    TOKEN_LENDING_TOPIC, TOKEN_LEND_REPAY_TOPIC, TOKEN_REBALANCED_TOPIC, TOKEN_REBALANCE_TOPIC,
-    TOKEN_STAKING_TOPIC, TOKEN_UNSTAKING_TOPIC, TOKEN_WHITELIST_VALIDATED_TOPIC,
-    TTL_ACCELERATE_TOPIC, TTL_BORROW_TOPIC, TTL_DECAY_TOPIC, TTL_PREDICTED_TOPIC, TTL_REPAY_TOPIC,
-    UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC, ADAPTIVE_INTERVAL_TOPIC, VAULT_ARCHIVED_TOPIC,
-    VAULT_CAP_TOPIC, VAULT_CLONED_OVERRIDE_TOPIC, VAULT_CLONED_TOPIC, VAULT_CREATED_TOPIC,
-    VAULT_MERGED_TOPIC, VESTING_BONUS_CLAIMED_TOPIC, VESTING_BONUS_SET_TOPIC,
-    VESTING_CANCELLED_TOPIC, VESTING_CATCHUP_CLAIMED_TOPIC, VESTING_CATCHUP_SET_TOPIC,
-    WHITELIST_ADDED_TOPIC, WHITELIST_REMOVED_TOPIC, WHITELIST_VIOLATION_TOPIC,
-    WITHDRAWAL_APPROVAL_DENIED_TOPIC, WITHDRAWAL_APPROVAL_GRANTED_TOPIC,
-    WITHDRAWAL_APPROVAL_REQUESTED_TOPIC, WITHDRAWAL_AUDIT_TOPIC, WITHDRAWAL_DISPUTE_FILED_TOPIC,
-    WITHDRAWAL_DISPUTE_RESOLVED_TOPIC, WITHDRAWAL_EXECUTED_TOPIC, WITHDRAWAL_FAILED_TOPIC,
-    WITHDRAWAL_LIMIT_EXCEEDED_TOPIC, WITHDRAWAL_LIMIT_SET_TOPIC, WITHDRAWAL_NOTIF_TOPIC,
-    WITHDRAWAL_REVERSED_TOPIC, WITHDRAWAL_CANCELLED_TOPIC, WITHDRAWAL_SCHEDULED_TOPIC, WITHDRAWAL_VALIDATION_TOPIC,
-    WITHDRAW_TOPIC, WRAPPED_TOKEN_REGISTERED_TOPIC, WRAPPED_TOKEN_UNREGISTERED_TOPIC,
-    YIELD_DISTRIBUTED_TOPIC, YIELD_REINVESTED_TOPIC, FREEZE_VAULT_TOPIC, UNFREEZE_VAULT_TOPIC,
-    UPGRADE_PROPOSED_TOPIC, UPGRADE_EXECUTED_TOPIC, UPGRADE_CANCELLED_TOPIC,
-    TOKEN_ALLOWLIST_ADDED_TOPIC, TOKEN_ALLOWLIST_REMOVED_TOPIC,
-    VAULT_LOCK_TOPIC, VAULT_UNLOCK_TOPIC, LOW_TTL_WARNING_TOPIC,
-    VESTING_SCHEDULE_ADDED_TOPIC,
+    ArchivedVaultInfo,
+    AuditEntry,
+    BackupCode,
+    BatchWithdrawal,
+    BeneficiaryAuction,
+    BeneficiaryAuctionBid,
+    BeneficiaryClaimDelegation,
+    BeneficiaryCommitment,
+    BeneficiaryConditionalAcceptance,
+    BeneficiaryConditionalDecline,
+    BeneficiaryConflict,
+    BeneficiaryConflictClaim,
+    BeneficiaryEntry,
+    BeneficiaryPool,
+    BeneficiaryRebalancedEvent,
+    BeneficiaryRotationEntry,
+    BeneficiarySplit,
+    BeneficiaryStatus,
+    BeneficiaryTierSetEvent,
+    BeneficiaryTriggerSetEvent,
+    BeneficiaryUpdatedEvent,
+    BeneficiaryVestingSchedule,
+    BeneficiaryWaterfallEvent,
+    BridgeConfig,
+    CheckInEvent,
+    CheckInHistoryEntry,
+    CheckInStreak,
+    ConditionalAcceptanceEntry,
+    ConflictResolution,
+    CountdownConfig,
+    CustomMetadataEntry,
+    DisputeStatus,
+    GeoCheckInEntry,
+    HibernationEntry,
+    IntegrityReport,
+    MetadataVersionEntry,
+    MilestoneEntry,
+    MilestoneVestingSchedule,
+    MultiSigConfig,
+    MultiSigOperation,
+    MultiSigProposal,
+    OwnershipProof,
+    OwnershipTransferRequest,
+    PasskeyAnalytics,
+    PasskeyHash,
+    PasskeyLockout,
+    PasskeyRecoveryRequest,
+    PasskeyRotationPolicy,
+    PasskeyUsageEntry,
+    PauseRecord,
+    PendingBeneficiaryUpdate,
+    PendingMultiSigOp,
+    ProofOfLifeEntry,
+    ProposalStatus,
+    ProtocolConfig,
+    RecurringWithdrawal,
+    ReleaseCondition,
+    ReleaseEvent,
+    ReleaseSchedule,
+    ReleaseStatus,
+    ReleaseTrigger,
+    ReleaseVoteEntry,
+    StateTransitionEntry,
+    StorageKey,
+    TokenCollateral,
+    TokenConversion,
+    TokenHedge,
+    TokenLending,
+    TokenRebalanceConfig,
+    TokenStaking,
+    TokenWeight,
+    TtlBorrowRecord,
+    TwoFactorConfigData,
+    UpgradeProposal,
+    Vault,
+    VaultCreatedEvent,
     // Issue #1338: vault export/import for disaster recovery
-    VaultExportConfig, VAULT_EXPORTED_TOPIC, VAULT_IMPORTED_TOPIC,
+    VaultExportConfig,
+    VaultSnapshot,
+    VaultStatusSummary,
+    VestingAccelerationConfig,
+    VestingBonusConfig,
+    VestingCatchUpConfig,
+    VestingForfeitureConfig,
+    VestingMilestone,
+    VestingPenaltyConfig,
+    VestingPendingClaim,
+    VestingRolloverConfig,
+    VestingSchedule,
+    VestingStaggerEntry,
+    WhitelistEntry,
+    WithdrawalApprovalRequest,
+    WithdrawalAuditEntry,
+    WithdrawalDispute,
+    WithdrawalEscrow,
+    WithdrawalLimit,
+    WithdrawalProof,
+    WithdrawalRateLimit,
+    WithdrawalReversal,
+    WithdrawalRollback,
+    WithdrawalScheduleEntry,
+    WithdrawalTracker,
+    YieldDistributionConfig,
+    YieldDistributionMode,
+    ACCEPTANCE_CONDITIONS_SET_TOPIC,
+    ACCEPTANCE_DEADLINE_EXPIRED_TOPIC,
+    ADAPTIVE_INTERVAL_TOPIC,
+    ADD_PASSKEY_TOPIC,
+    ADMIN_TRANSFER_COMPLETED_TOPIC,
+    ADMIN_TRANSFER_PROPOSED_TOPIC,
+    ADMIN_TRANSFER_TIMELOCK,
+    AUCTION_BID_TOPIC,
+    AUCTION_CREATED_TOPIC,
+    AUCTION_FINALIZED_TOPIC,
+    BACKUP_CODES_ENCRYPTED_TOPIC,
+    BACKUP_CODES_GENERATED_TOPIC,
+    BACKUP_CODE_USED_TOPIC,
+    BATCH_CHECKIN_TOPIC,
+    BATCH_STATUS_TOPIC,
+    BENEFICIARY_ACCEPTED_TOPIC,
+    BENEFICIARY_CAP_TOPIC,
+    BENEFICIARY_CONDITION_ACCEPTED_TOPIC,
+    BENEFICIARY_CONFLICT_FILED_TOPIC,
+    BENEFICIARY_CONFLICT_RESOLVED_TOPIC,
+    BENEFICIARY_DECLINED_TOPIC,
+    BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC,
+    BENEFICIARY_IDENTITY_VERIFIED_TOPIC,
+    BENEFICIARY_REBALANCED_TOPIC,
+    BENEFICIARY_TIER_SET_TOPIC,
+    BENEFICIARY_TRIGGER_SET_TOPIC,
+    BENEFICIARY_UPDATED_TOPIC,
+    BENEFICIARY_WATERFALL_TOPIC,
+    BEN_CLAIM_DELEG_TOPIC,
+    BEN_COMMITTED_TOPIC,
+    BEN_REVEALED_TOPIC,
+    BEN_ROTATION_TOPIC,
+    BIND_PASSKEY_BIOMETRIC_TOPIC,
+    BIO_CHECKIN_TOPIC,
+    BURN_EVENT_TOPIC,
+    CANCEL_TOPIC,
+    CHECKIN_GEO_TOPIC,
+    CHECKIN_POW_TOPIC,
+    CHECKIN_RATE_LIMITED_TOPIC,
+    CHECKIN_SCORE_UPDATED_TOPIC,
+    CHECK_IN_RECORDED_TOPIC,
+    CHECK_IN_TOPIC,
+    CLAIM_BENEFICIARY_VESTING_TOPIC,
+    CLAIM_VEST_TOPIC,
+    CLAWBACK_UNVESTED_TOPIC,
+    CLIFF_REACHED_TOPIC,
+    CONDITIONS_ACCEPTED_TOPIC,
+    CONFLICT_EXPIRED_TOPIC,
+    COUNTDOWN_NOTIF_TOPIC,
+    DEFAULT_MIN_CHECKIN_COOLDOWN,
+    DELEGATE_BENEFICIARY_TOPIC,
+    DELEGATE_CHECKIN_TOPIC,
+    DEPOSIT_TOPIC,
+    DISPUTE_FILED_TOPIC,
+    DISPUTE_RESOLVED_TOPIC,
+    DUPLICATE_VAULT_TOPIC,
+    EMERGENCY_RECOVERY_GENERATED_TOPIC,
+    EMERGENCY_RECOVERY_USED_TOPIC,
+    EXPIRY_WARNING_THRESHOLD,
+    FREEZE_VAULT_TOPIC,
+    HIBERNATION_ENTERED_TOPIC,
+    HIBERNATION_EXITED_TOPIC,
+    INACTIVITY_PENALTY_TOPIC,
+    INHERITANCE_TOPIC,
+    INTEGRITY_TOPIC,
+    LOAN_ENABLED_TOPIC,
+    LOAN_REPAID_TOPIC,
+    LOW_TTL_WARNING_TOPIC,
+    MAX_ACCELERATE_SECONDS,
+    MAX_CUSTOM_METADATA_LEN,
+    MAX_DESCRIPTION_LEN,
+    MAX_METADATA_LEN,
+    MAX_NAME_LEN,
+    MAX_NOTES_LEN,
+    MAX_RELEASE_MEMO_LEN,
+    MAX_VESTING_SCHEDULES,
+    META_REVERT_TOPIC,
+    META_VERSION_TOPIC,
+    MILESTONE_ADDED_TOPIC,
+    MILESTONE_ADJUST_TOPIC,
+    MILESTONE_ATTESTED_TOPIC,
+    MILESTONE_CLAIM_TOPIC,
+    MILESTONE_EMERGENCY_TOPIC,
+    MILESTONE_PAUSE_TOPIC,
+    MILESTONE_PROGRESS_TOPIC,
+    MILESTONE_RESUME_TOPIC,
+    MILESTONE_VEST_TOPIC,
+    MIN_THRESHOLD_REDISTRIBUTE_TOPIC,
+    MIN_THRESHOLD_SET_TOPIC,
+    MIN_THRESHOLD_SKIP_TOPIC,
+    MULTISIG_APPROVED_TOPIC,
+    MULTISIG_CONFIG_TOPIC,
+    MULTISIG_EXECUTED_TOPIC,
+    MULTISIG_PROPOSAL_EXPIRY,
+    MULTISIG_PROPOSED_TOPIC,
+    MULTISIG_REJECTED_TOPIC,
+    MULTISIG_SIGNER_REMOVED_TOPIC,
+    MULTISIG_VETOED_TOPIC,
+    OWNERSHIP_ACCEPTED_TOPIC,
+    OWNERSHIP_CANCELLED_TOPIC,
+    OWNERSHIP_INITIATED_TOPIC,
+    OWNERSHIP_PROOF_TOPIC,
+    OWNERSHIP_TOPIC,
+    OWNERSHIP_TRANSFER_EXPIRED_TOPIC,
+    PASSKEY_ANALYTICS_TOPIC,
+    PASSKEY_COMPROMISED_TOPIC,
+    PASSKEY_EXPIRED_TOPIC,
+    PASSKEY_EXPIRY_EXTENDED_TOPIC,
+    PASSKEY_LOCKOUT_TOPIC,
+    PASSKEY_RECOVERED_TOPIC,
+    PASSKEY_RECOVERY_INITIATED_TOPIC,
+    PASSKEY_ROTATION_ENFORCED_TOPIC,
+    PASSKEY_ROTATION_REQUIRED_TOPIC,
+    PASSKEY_UNLOCKED_TOPIC,
+    PASSKEY_USAGE_TOPIC,
+    PAUSE_TOPIC,
+    PAUSE_VAULT_TOPIC,
+    PENDING_MULTISIG_OP_COSIGNED_TOPIC,
+    PENDING_MULTISIG_OP_CREATED_TOPIC,
+    PENDING_MULTISIG_OP_EXECUTED_TOPIC,
+    PENDING_MULTISIG_OP_EXPIRED_TOPIC,
+    PENDING_MULTISIG_OP_EXPIRY,
+    PING_EXPIRY_TOPIC,
+    POOL_CREATED_TOPIC,
+    PROOF_OF_LIFE_TOPIC,
+    PROTOCOL_CONFIG_APPLIED_TOPIC,
+    PROTOCOL_CONFIG_PROPOSED_TOPIC,
+    PROTOCOL_CONFIG_TIMELOCK,
+    PROXY_CLAIM_TOPIC,
+    RECOVERY_EXTEND_TOPIC,
+    RELEASE_TOPIC,
+    RELEASE_VOTE_PASSED_TOPIC,
+    RELEASE_VOTE_TOPIC,
+    REMOVE_PASSKEY_TOPIC,
+    RESTORE_VAULT_TOPIC,
+    RESUME_VAULT_TOPIC,
+    REVERSAL_GRACE_EXPIRED_TOPIC,
+    REVOKE_DELEGATE_TOPIC,
+    ROTATE_PASSKEY_TOPIC,
+    SET_BENEFICIARIES_TOPIC,
+    SET_BENEFICIARY_VESTING_TOPIC,
+    SET_BURN_PERCENTAGE_TOPIC,
+    SET_COUNTDOWN_TOPIC,
+    SET_DECAY_RATE_TOPIC,
+    SET_MAX_INTERVAL_TOPIC,
+    SET_MAX_TTL_TOPIC,
+    SET_METADATA_TOPIC,
+    SET_MIN_INTERVAL_TOPIC,
+    SET_RECOVERY_TOPIC,
+    SET_SPENDING_LIMIT_TOPIC,
+    SET_VESTING_TOPIC,
+    STATE_TRANSITION_TOPIC,
+    SYNC_TTL_TOPIC,
+    TOKEN_ALLOWLIST_ADDED_TOPIC,
+    TOKEN_ALLOWLIST_REMOVED_TOPIC,
+    TOKEN_COLLATERAL_TOPIC,
+    TOKEN_COLLAT_RLSD_TOPIC,
+    TOKEN_CONVERSION_TOPIC,
+    TOKEN_HEDGE_CLOSE_TOPIC,
+    TOKEN_HEDGE_TOPIC,
+    TOKEN_LENDING_TOPIC,
+    TOKEN_LEND_REPAY_TOPIC,
+    TOKEN_REBALANCED_TOPIC,
+    TOKEN_REBALANCE_TOPIC,
+    TOKEN_STAKING_TOPIC,
+    TOKEN_UNSTAKING_TOPIC,
+    TOKEN_WHITELIST_VALIDATED_TOPIC,
+    TTL_ACCELERATE_TOPIC,
+    TTL_BORROW_TOPIC,
+    TTL_DECAY_TOPIC,
+    TTL_PREDICTED_TOPIC,
+    TTL_REPAY_TOPIC,
+    TWO_FACTOR_DISABLED_TOPIC,
+    TWO_FACTOR_ENABLED_TOPIC,
+    TWO_FACTOR_VERIFIED_TOPIC,
+    UNBIND_PASSKEY_BIOMETRIC_TOPIC,
+    UNFREEZE_VAULT_TOPIC,
+    UNPAUSE_TOPIC,
+    UPDATE_INTERVAL_TOPIC,
+    UPDATE_METADATA_TOPIC,
+    UPGRADE_CANCELLED_TOPIC,
+    UPGRADE_EXECUTED_TOPIC,
+    UPGRADE_PROPOSED_TOPIC,
+    VAULT_ARCHIVED_TOPIC,
+    VAULT_CAP_TOPIC,
+    VAULT_CLONED_OVERRIDE_TOPIC,
+    VAULT_CLONED_TOPIC,
+    VAULT_CREATED_TOPIC,
+    VAULT_EXPORTED_TOPIC,
+    VAULT_IMPORTED_TOPIC,
+    VAULT_LOCK_TOPIC,
+    VAULT_MERGED_TOPIC,
+    VAULT_UNLOCK_TOPIC,
+    VESTING_ACCELERATED_TOPIC,
+    VESTING_BONUS_CLAIMED_TOPIC,
+    VESTING_BONUS_SET_TOPIC,
+    VESTING_CANCELLED_TOPIC,
+    VESTING_CATCHUP_CLAIMED_TOPIC,
+    VESTING_CATCHUP_SET_TOPIC,
+    VESTING_FINALIZED_TOPIC,
+    VESTING_FORFEITURE_TOPIC,
+    VESTING_PENALTY_TOPIC,
+    VESTING_REVERSED_TOPIC,
+    VESTING_ROLLOVER_TOPIC,
+    VESTING_SCHEDULE_ADDED_TOPIC,
+    VESTING_STAGGER_TOPIC,
+    WHITELIST_ADDED_TOPIC,
+    WHITELIST_REMOVED_TOPIC,
+    WHITELIST_VIOLATION_TOPIC,
+    WITHDRAWAL_APPROVAL_DENIED_TOPIC,
+    WITHDRAWAL_APPROVAL_GRANTED_TOPIC,
+    WITHDRAWAL_APPROVAL_REQUESTED_TOPIC,
+    WITHDRAWAL_AUDIT_TOPIC,
+    WITHDRAWAL_CANCELLED_TOPIC,
+    WITHDRAWAL_DISPUTE_FILED_TOPIC,
+    WITHDRAWAL_DISPUTE_RESOLVED_TOPIC,
+    WITHDRAWAL_ESCROW_CREATED_TOPIC,
+    WITHDRAWAL_ESCROW_VERIFIED_TOPIC,
+    WITHDRAWAL_EXECUTED_TOPIC,
+    WITHDRAWAL_FAILED_TOPIC,
+    WITHDRAWAL_LIMIT_EXCEEDED_TOPIC,
+    WITHDRAWAL_LIMIT_SET_TOPIC,
+    WITHDRAWAL_NOTIF_TOPIC,
+    WITHDRAWAL_PROOF_TOPIC,
+    WITHDRAWAL_RATE_LIMITED_TOPIC,
+    WITHDRAWAL_REVERSED_TOPIC,
+    WITHDRAWAL_ROLLBACK_TOPIC,
+    WITHDRAWAL_SCHEDULED_TOPIC,
+    WITHDRAWAL_VALIDATION_TOPIC,
+    WITHDRAW_TOPIC,
+    WRAPPED_TOKEN_REGISTERED_TOPIC,
+    WRAPPED_TOKEN_UNREGISTERED_TOPIC,
+    YIELD_DISTRIBUTED_TOPIC,
+    YIELD_REINVESTED_TOPIC,
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
 // Issues #1323, #1324, #1325, #1326: structured event emission tests
 #[cfg(test)]
-mod event_emission_tests;
+mod beneficiary_pooling_tests;
 #[cfg(test)]
-mod beneficiary_pooling_tests;#[cfg(test)]
 mod beneficiary_vesting_auction_tests;
 #[cfg(test)]
 mod beneficiary_vesting_tests;
 #[cfg(test)]
 mod bps_invariant_tests;
 #[cfg(test)]
+mod event_emission_tests;
+// Issue #1288: multi-beneficiary vault with percentage-based splits
+#[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod multi_beneficiary_split_tests;
 // Issue #1338: vault export/import roundtrip tests
 #[cfg(test)]
-mod vault_export_import_tests;
-#[cfg(test)]
-mod regression_tests;
-#[cfg(test)]
-mod passkey_last_used_tests;
-#[cfg(test)]
-mod beneficiary_waitlist_tests;
-#[cfg(test)]
-mod beneficiary_notification_tests;
-#[cfg(test)]
 mod beneficiary_archival_notification_tests;
+#[cfg(test)]
+mod beneficiary_confirmation_tests;
 #[cfg(test)]
 mod beneficiary_identity_verification_tests;
 #[cfg(test)]
 mod beneficiary_memo_tests;
 #[cfg(test)]
-mod vault_notes_tests;
+mod beneficiary_notification_tests;
 #[cfg(test)]
-mod vault_expiry_tests;
-#[cfg(test)]
-mod vault_pause_tests;
-#[cfg(test)]
-mod passkey_device_type_tests;
-#[cfg(test)]
-mod milestone_vesting_tests;
+mod beneficiary_waitlist_tests;
 mod checkin_email_token_tests;
 #[cfg(test)]
 mod checkin_streak_bonus_tests;
 #[cfg(test)]
-mod beneficiary_confirmation_tests;
-
+mod milestone_vesting_tests;
+#[cfg(test)]
+mod passkey_device_type_tests;
+#[cfg(test)]
+mod passkey_last_used_tests;
+#[cfg(test)]
+mod regression_tests;
+#[cfg(test)]
+mod vault_expiry_tests;
+#[cfg(test)]
+mod vault_export_import_tests;
+#[cfg(test)]
+mod vault_notes_tests;
+#[cfg(test)]
+mod vault_pause_tests;
 
 #[cfg(test)]
 mod min_checkin_interval_tests;
@@ -176,9 +418,9 @@ mod beneficiary_owner_check_tests;
 mod storage_key_collision_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
-mod checkin_nonexistent_vault_tests;
-#[cfg(test)]
 mod batch_withdrawal_tests;
+#[cfg(test)]
+mod checkin_nonexistent_vault_tests;
 
 // Issue #1294: withdrawal dispute window
 #[cfg(test)]
@@ -369,14 +611,14 @@ pub enum ContractError {
     ChallengeNotFound = 86,
     ChallengeExpired = 87,
     DuplicateSignature = 88,
-    CheckInIntervalTooShort = 89,  // Issue #1121: Enforce minimum check-in interval
-    SnapshotNotFound = 90,         // Issue #1123: Vault archiving
-    AlreadyOwner = 91,             // Issue #1119: Two-step ownership transfer
-    NoPendingUpgrade = 92,         // Issue #1120: Contract upgrade mechanism
-    UpgradeTimelocked = 93,        // Issue #1120: Upgrade not yet executable
-    UpgradeInvalidWasm = 94,       // Issue #1120: Invalid WASM hash
-    TokenNotAllowed = 95,          // Issue #1118: Token not in allowlist
-    VaultPaused = 96,              // Issue #790: vault-level pause blocks trigger_release
+    CheckInIntervalTooShort = 89, // Issue #1121: Enforce minimum check-in interval
+    SnapshotNotFound = 90,        // Issue #1123: Vault archiving
+    AlreadyOwner = 91,            // Issue #1119: Two-step ownership transfer
+    NoPendingUpgrade = 92,        // Issue #1120: Contract upgrade mechanism
+    UpgradeTimelocked = 93,       // Issue #1120: Upgrade not yet executable
+    UpgradeInvalidWasm = 94,      // Issue #1120: Invalid WASM hash
+    TokenNotAllowed = 95,         // Issue #1118: Token not in allowlist
+    VaultPaused = 96,             // Issue #790: vault-level pause blocks trigger_release
     CommitmentAlreadySet = 97,
     CommitmentNotFound = 98,
     BeneficiaryAlreadyRevealed = 99,
@@ -426,6 +668,9 @@ pub enum ContractError {
     VestingReversalNotFound = 141,
     VestingStaggerNotFound = 142,
     WithdrawalRateLimitExceeded = 143,
+    /// Percentages in a `BeneficiarySplit` list do not sum to 100, contain a
+    /// zero value, or exceed 100 individually. Issue #1288.
+    InvalidPercentage = 144,
 }
 
 #[contract]
@@ -486,7 +731,9 @@ impl TtlVaultContract {
             paused_at: env.ledger().timestamp(),
         };
         env.storage().instance().set(&StorageKey::Paused, &true);
-        env.storage().instance().set(&StorageKey::PauseRecord, &record);
+        env.storage()
+            .instance()
+            .set(&StorageKey::PauseRecord, &record);
         env.events()
             .publish((PAUSE_TOPIC,), (true, paused_by, reason));
         env.storage()
@@ -594,7 +841,9 @@ impl TtlVaultContract {
     /// # Returns
     /// `Some(seconds)` with the minimum interval, or `None` if not set
     pub fn get_min_check_in_interval(env: Env) -> Option<u64> {
-        env.storage().instance().get(&StorageKey::MinCheckInInterval)
+        env.storage()
+            .instance()
+            .get(&StorageKey::MinCheckInInterval)
     }
 
     /// Returns the maximum check-in interval if set.
@@ -605,7 +854,9 @@ impl TtlVaultContract {
     /// # Returns
     /// `Some(seconds)` with the maximum interval, or `None` if not set
     pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
-        env.storage().instance().get(&StorageKey::MaxCheckInInterval)
+        env.storage()
+            .instance()
+            .get(&StorageKey::MaxCheckInInterval)
     }
 
     /// Sets the maximum TTL (time-to-live) for vaults in seconds.
@@ -1157,7 +1408,11 @@ impl TtlVaultContract {
         let yield_amount = (staking.staked_amount as i128)
             .checked_mul(staking.annual_yield_bps as i128)
             .and_then(|v| v.checked_mul(time_elapsed as i128))
-            .and_then(|v| v.checked_div(BASIS_POINTS_100_PERCENT * DAYS_PER_YEAR as i128 * SECONDS_PER_DAY as i128))
+            .and_then(|v| {
+                v.checked_div(
+                    BASIS_POINTS_100_PERCENT * DAYS_PER_YEAR as i128 * SECONDS_PER_DAY as i128,
+                )
+            })
             .unwrap_or(0);
 
         if yield_amount <= 0 {
@@ -1273,8 +1528,14 @@ impl TtlVaultContract {
     /// Returns the current protocol-level configuration as a typed struct — Issue #810.
     pub fn get_protocol_config(env: Env) -> ProtocolConfig {
         ProtocolConfig {
-            min_check_in_interval: env.storage().instance().get(&StorageKey::MinCheckInInterval),
-            max_check_in_interval: env.storage().instance().get(&StorageKey::MaxCheckInInterval),
+            min_check_in_interval: env
+                .storage()
+                .instance()
+                .get(&StorageKey::MinCheckInInterval),
+            max_check_in_interval: env
+                .storage()
+                .instance()
+                .get(&StorageKey::MaxCheckInInterval),
             max_ttl_seconds: env
                 .storage()
                 .instance()
@@ -1516,7 +1777,7 @@ impl TtlVaultContract {
         if check_in_interval == 0 {
             panic_with_error!(&env, ContractError::InvalidInterval);
         }
-        
+
         // Issue #1121: Enforce minimum check-in interval (1 hour)
         if check_in_interval < MIN_CHECK_IN_INTERVAL {
             panic_with_error!(&env, ContractError::CheckInIntervalTooShort);
@@ -1609,14 +1870,14 @@ impl TtlVaultContract {
             multisig_required_ops: Vec::new(&env),
             check_in_score: 10000,
             total_check_ins: 0,
-on_time_check_ins: 0,
-             min_balance_guard: None,
-             recurring_withdrawal: None,
-             withdrawal_limit_per_window: None,
-             withdrawal_window_seconds: 0,
-             withdrawn_in_window: 0,
-             window_start: 0,
-             adaptive_interval_enabled: false,
+            on_time_check_ins: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
+            adaptive_interval_enabled: false,
         };
         Self::save_vault(&env, vault_id, &vault);
         Self::add_owner_vault_id(&env, &owner, vault_id, check_in_interval);
@@ -1669,7 +1930,104 @@ on_time_check_ins: 0,
         vault_id
     }
 
-    /// Records a check-in to reset the vault's expiry timer.
+    /// Creates a new vault with percentage-based multi-beneficiary splits.
+    ///
+    /// This is a convenience wrapper around `create_vault` that accepts a list of
+    /// `BeneficiarySplit` entries (each with a whole-number percentage 1–100) and
+    /// automatically populates `vault.beneficiaries` by converting each percentage
+    /// to basis points (percentage × 100).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `owner` - The vault owner (must authorise the call)
+    /// * `splits` - Non-empty list of `BeneficiarySplit` entries whose percentages
+    ///              must sum to exactly 100
+    /// * `check_in_interval` - Check-in interval in seconds
+    /// * `token_address` - Optional token contract address (defaults to XLM)
+    ///
+    /// # Returns
+    /// The newly created vault ID
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidPercentage` - Percentages do not sum to 100, any
+    ///   entry has a zero percentage, or any individual percentage exceeds 100
+    /// * `ContractError::InvalidBeneficiary` - A split address equals the owner
+    /// * All errors that `create_vault` can return
+    ///
+    /// # Example
+    /// ```ignore
+    /// // 50% to alice, 30% to bob, 20% to carol
+    /// let splits = vec![
+    ///     BeneficiarySplit { address: alice, percentage: 50 },
+    ///     BeneficiarySplit { address: bob,   percentage: 30 },
+    ///     BeneficiarySplit { address: carol, percentage: 20 },
+    /// ];
+    /// let vault_id = contract.create_vault_with_splits(&owner, &splits, &interval, &None);
+    /// ```
+    pub fn create_vault_with_splits(
+        env: Env,
+        owner: Address,
+        splits: Vec<BeneficiarySplit>,
+        check_in_interval: u64,
+        token_address: Option<Address>,
+    ) -> u64 {
+        owner.require_auth();
+
+        // ── Validate splits ──────────────────────────────────────────────────
+        if splits.is_empty() {
+            panic_with_error!(&env, ContractError::InvalidPercentage);
+        }
+        if splits.len() as u32 > MAX_BENEFICIARIES {
+            panic_with_error!(&env, ContractError::InvalidPercentage);
+        }
+
+        let mut total_pct: u32 = 0;
+        for split in splits.iter() {
+            if split.percentage == 0 || split.percentage > 100 {
+                panic_with_error!(&env, ContractError::InvalidPercentage);
+            }
+            if split.address == owner {
+                panic_with_error!(&env, ContractError::InvalidBeneficiary);
+            }
+            total_pct = total_pct.saturating_add(split.percentage);
+        }
+        if total_pct != 100 {
+            panic_with_error!(&env, ContractError::InvalidPercentage);
+        }
+
+        // ── Create vault with the first split's address as primary beneficiary ─
+        // The primary beneficiary field is kept for backwards-compat reads;
+        // the real distribution uses vault.beneficiaries populated below.
+        let primary = splits.get(0).unwrap().address.clone();
+        let vault_id = Self::create_vault(
+            env.clone(),
+            owner.clone(),
+            primary,
+            check_in_interval,
+            token_address,
+        );
+
+        // ── Populate vault.beneficiaries from splits ─────────────────────────
+        let mut vault = Self::load_vault(&env, vault_id);
+        let mut beneficiaries: Vec<BeneficiaryEntry> = Vec::new(&env);
+        for split in splits.iter() {
+            // 1 % == 100 BPS
+            let bps = split.percentage * 100;
+            beneficiaries.push_back(BeneficiaryEntry {
+                address: split.address.clone(),
+                bps,
+                minimum_threshold: 0,
+            });
+        }
+        vault.beneficiaries = beneficiaries;
+        Self::save_vault(&env, vault_id, &vault);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        vault_id
+    }
     ///
     /// The caller must be the vault owner. This function resets the `last_check_in`
     /// timestamp, extending the vault's TTL.
@@ -1687,7 +2045,13 @@ on_time_check_ins: 0,
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::VaultExpired` - If the vault's TTL has already elapsed
-    pub fn check_in(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>, nonce: u64) -> Result<(), ContractError> {
+    pub fn check_in(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+        nonce: u64,
+    ) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
@@ -1708,7 +2072,8 @@ on_time_check_ins: 0,
         {
             return Err(ContractError::VaultOwnerLocked);
         }
-        let is_delegate = caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
+        let is_delegate =
+            caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
         if caller != vault.owner && !is_delegate {
             return Err(ContractError::NotOwner);
         }
@@ -1721,7 +2086,9 @@ on_time_check_ins: 0,
             }
             env.storage().persistent().set(&nonce_key, &(expected + 1));
             let ttl = vault_ttl_ledgers(vault.check_in_interval);
-            env.storage().persistent().extend_ttl(&nonce_key, VAULT_TTL_THRESHOLD, ttl);
+            env.storage()
+                .persistent()
+                .extend_ttl(&nonce_key, VAULT_TTL_THRESHOLD, ttl);
         }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
@@ -1836,7 +2203,8 @@ on_time_check_ins: 0,
             if is_on_time {
                 vault.on_time_check_ins = vault.on_time_check_ins.saturating_add(1);
             }
-            vault.check_in_score = Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
+            vault.check_in_score =
+                Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
         }
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
@@ -1984,11 +2352,13 @@ on_time_check_ins: 0,
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        
+
         // Emit comprehensive FundsDeposited event with all required fields
         // Includes: depositor, amount, new_balance, and timestamp for indexer detection
-        env.events()
-            .publish((DEPOSIT_TOPIC, vault_id), (&from, amount, vault.balance, now));
+        env.events().publish(
+            (DEPOSIT_TOPIC, vault_id),
+            (&from, amount, vault.balance, now),
+        );
     }
 
     /// Deposits funds into multiple vaults in a single transfer.
@@ -2071,7 +2441,7 @@ on_time_check_ins: 0,
                 (TOKEN_WHITELIST_VALIDATED_TOPIC, vault_id),
                 (&vault.token_address, amount),
             );
-            
+
             // Emit comprehensive FundsDeposited event for each vault deposit
             env.events().publish(
                 (DEPOSIT_TOPIC, vault_id),
@@ -2143,7 +2513,14 @@ on_time_check_ins: 0,
             return Err(ContractError::Paused);
         }
         if Self::is_hibernating(env.clone(), vault_id) {
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault hibernating");
+            Self::record_withdrawal_audit(
+                &env,
+                vault_id,
+                &caller,
+                amount,
+                false,
+                "Vault hibernating",
+            );
             return Err(ContractError::AlreadyHibernating);
         }
         if caller != vault.owner {
@@ -2167,7 +2544,14 @@ on_time_check_ins: 0,
             return Err(ContractError::VaultFrozen);
         }
         if Self::check_vault_frozen(&env, vault_id) {
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault admin-frozen");
+            Self::record_withdrawal_audit(
+                &env,
+                vault_id,
+                &caller,
+                amount,
+                false,
+                "Vault admin-frozen",
+            );
             return Err(ContractError::VaultFrozen);
         }
         // Issue 2: reject if owner has locked the vault
@@ -2177,7 +2561,14 @@ on_time_check_ins: 0,
             .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false)
         {
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault owner-locked");
+            Self::record_withdrawal_audit(
+                &env,
+                vault_id,
+                &caller,
+                amount,
+                false,
+                "Vault owner-locked",
+            );
             return Err(ContractError::VaultOwnerLocked);
         }
         if vault.status != ReleaseStatus::Locked {
@@ -2383,7 +2774,8 @@ on_time_check_ins: 0,
                 );
                 return Err(ContractError::InvalidAmount);
             }
-            let vault = Self::try_load_vault(&env, w.vault_id).ok_or(ContractError::VaultNotFound)?;
+            let vault =
+                Self::try_load_vault(&env, w.vault_id).ok_or(ContractError::VaultNotFound)?;
             if caller != vault.owner {
                 Self::record_withdrawal_audit(
                     &env,
@@ -2899,23 +3291,14 @@ on_time_check_ins: 0,
     /// # Errors
     /// * `ContractError::UnauthorizedOwner` - Caller is not the vault owner
     /// * `ContractError::VaultNotFound` - Vault doesn't exist
-    pub fn add_vesting_milestone(
-        env: Env,
-        vault_id: u64,
-        description: String,
-        attestor: Address,
-    ) {
+    pub fn add_vesting_milestone(env: Env, vault_id: u64, description: String, attestor: Address) {
         Self::assert_not_paused(&env);
         let vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
 
         // Get current milestone count
         let count_key = StorageKey::VestingMilestoneCount(vault_id);
-        let count: u64 = env
-            .storage()
-            .persistent()
-            .get(&count_key)
-            .unwrap_or(0);
+        let count: u64 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
         let milestone_id = count;
         let new_milestone = VestingMilestone {
@@ -2937,9 +3320,7 @@ on_time_check_ins: 0,
 
         // Save updated milestones and increment count
         env.storage().persistent().set(&milestones_key, &milestones);
-        env.storage()
-            .persistent()
-            .set(&count_key, &(count + 1));
+        env.storage().persistent().set(&count_key, &(count + 1));
 
         // Extend TTL for both keys
         env.storage().persistent().extend_ttl(
@@ -3131,11 +3512,19 @@ on_time_check_ins: 0,
         if ttl_expiry_met {
             let now = env.ledger().timestamp();
             let mut hibernated = 0u64;
-            if let Some(h) = env.storage().persistent().get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id)) {
+            if let Some(h) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+            {
                 hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
             }
             let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
-            let grace_period = env.storage().instance().get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds).unwrap_or(0);
+            let grace_period = env
+                .storage()
+                .instance()
+                .get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds)
+                .unwrap_or(0);
             if now < expiry_time + grace_period {
                 panic_with_error!(&env, ContractError::GracePeriodActive);
             }
@@ -3211,7 +3600,9 @@ on_time_check_ins: 0,
         if let Some(entry) = env
             .storage()
             .persistent()
-            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(vault_id))
+            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(
+                vault_id,
+            ))
         {
             if let Some(deadline) = entry.acceptance_deadline {
                 if now > deadline && !entry.approved_by_owner {
@@ -3292,7 +3683,7 @@ on_time_check_ins: 0,
             .storage()
             .persistent()
             .has(&StorageKey::VestingMilestones(vault_id));
-        
+
         if has_vesting_milestones {
             // Load milestones and verify all are unlocked
             let milestones: Vec<VestingMilestone> = env
@@ -3300,7 +3691,7 @@ on_time_check_ins: 0,
                 .persistent()
                 .get(&StorageKey::VestingMilestones(vault_id))
                 .unwrap_or_else(|| Vec::new(&env));
-            
+
             for milestone in milestones.iter() {
                 if !milestone.unlocked {
                     panic_with_error!(&env, ContractError::MilestoneNotFound);
@@ -3393,11 +3784,13 @@ on_time_check_ins: 0,
             let token_client = token::Client::new(&env, &vault.token_address);
 
             // Calculate burn amount based on vault's burn_percentage (basis points)
-            let burn_amount: i128 = (release_amount * vault.burn_percentage as i128) / BASIS_POINTS_100_PERCENT;
+            let burn_amount: i128 =
+                (release_amount * vault.burn_percentage as i128) / BASIS_POINTS_100_PERCENT;
             let net_amount: i128 = release_amount - burn_amount;
             if burn_amount > 0 {
                 // Emit burn event; funds are effectively removed from circulation
-                env.events().publish((BURN_EVENT_TOPIC, vault_id), burn_amount);
+                env.events()
+                    .publish((BURN_EVENT_TOPIC, vault_id), burn_amount);
             }
             if vault.beneficiaries.is_empty() {
                 // Issue #1281: use `try_transfer` instead of the panicking
@@ -3532,7 +3925,8 @@ on_time_check_ins: 0,
         };
 
         // Apply decay: new_ttl = remaining * (1 - decay_rate / 10000)
-        let decayed_ttl = remaining * (BASIS_POINTS_100_PERCENT as u64 - decay_rate as u64) / BASIS_POINTS_100_PERCENT as u64;
+        let decayed_ttl = remaining * (BASIS_POINTS_100_PERCENT as u64 - decay_rate as u64)
+            / BASIS_POINTS_100_PERCENT as u64;
         let new_deadline = now + decayed_ttl;
 
         // Update last_check_in to reflect the decay application
@@ -4586,7 +4980,10 @@ on_time_check_ins: 0,
         let amount = if unlocked >= schedule.num_installments {
             // Final batch: drain whatever remains in the vault attributed to this schedule
             let claimed_so_far = per_installment * schedule.claimed_installments as i128;
-            schedule.total_amount.saturating_sub(claimed_so_far).min(vault.balance)
+            schedule
+                .total_amount
+                .saturating_sub(claimed_so_far)
+                .min(vault.balance)
         } else {
             per_installment * claimable as i128
         };
@@ -5024,7 +5421,9 @@ on_time_check_ins: 0,
         let accelerated = env
             .storage()
             .persistent()
-            .get::<StorageKey, VestingAccelerationConfig>(&StorageKey::VestingAcceleration(vault_id))
+            .get::<StorageKey, VestingAccelerationConfig>(&StorageKey::VestingAcceleration(
+                vault_id,
+            ))
             .map(|c| c.accelerated)
             .unwrap_or(false);
 
@@ -5097,7 +5496,8 @@ on_time_check_ins: 0,
                 let on_time_count = claimable.saturating_sub(late_count);
                 let on_time_amount = per_installment * on_time_count as i128;
                 let late_amount = per_installment * late_count as i128;
-                let penalty = late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
+                let penalty =
+                    late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
                 let penalized = on_time_amount + late_amount - penalty;
                 // For the final batch keep vault.balance as ceiling to avoid dust mismatch.
                 if unlocked >= schedule.num_installments {
@@ -5733,8 +6133,9 @@ on_time_check_ins: 0,
                 // For simplicity here, we assume the BPS applies to the current balance + what was already claimed.
                 // But since we don't track original balance, we'll just use BPS * (current_balance / remaining_bps).
                 // Better: assume vault.balance is the total pool for staggered vesting if no other vesting is set.
-                let per_installment =
-                    (vault.balance * entry.bps as i128 / BASIS_POINTS_100_PERCENT) / entry.num_installments as i128;
+                let per_installment = (vault.balance * entry.bps as i128
+                    / BASIS_POINTS_100_PERCENT)
+                    / entry.num_installments as i128;
                 let amount = if unlocked >= entry.num_installments {
                     // Last installment takes the remaining share for this beneficiary
                     (vault.balance * entry.bps as i128 / BASIS_POINTS_100_PERCENT)
@@ -6224,7 +6625,6 @@ on_time_check_ins: 0,
         Ok(vault)
     }
 
-
     /// Retrieve an archived vault from persistent storage.
     /// Returns the vault data along with archival timestamp.
     ///
@@ -6249,9 +6649,11 @@ on_time_check_ins: 0,
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotReleased));
 
         // Extend TTL for archived vault on read
-        env.storage()
-            .persistent()
-            .extend_ttl(&StorageKey::ArchivedVault(vault_id), 6_048_000, 6_048_000);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ArchivedVault(vault_id),
+            6_048_000,
+            6_048_000,
+        );
 
         archived_info.0
     }
@@ -6261,7 +6663,9 @@ on_time_check_ins: 0,
     ///
     /// Issue #1123: Implement Vault Archiving for Released and Cancelled Vaults
     pub fn vault_is_archived(env: Env, vault_id: u64) -> bool {
-        env.storage().persistent().has(&StorageKey::ArchivedVault(vault_id))
+        env.storage()
+            .persistent()
+            .has(&StorageKey::ArchivedVault(vault_id))
     }
 
     /// Captures the state of a vault at a specific point in time.
@@ -6278,7 +6682,9 @@ on_time_check_ins: 0,
             content_hash: content_hash.clone().into(),
         };
 
-        env.storage().persistent().set(&StorageKey::VaultSnapshot(vault_id, timestamp), &snapshot);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::VaultSnapshot(vault_id, timestamp), &snapshot);
 
         // Update the list of snapshot timestamps for this vault
         let mut timestamps: Vec<u64> = env
@@ -6292,12 +6698,16 @@ on_time_check_ins: 0,
         // Limit snapshots to the last 1000 per vault
         if timestamps.len() > MAX_SNAPSHOTS_PER_VAULT {
             if let Some(oldest_timestamp) = timestamps.first() {
-                env.storage().persistent().remove(&StorageKey::VaultSnapshot(vault_id, oldest_timestamp));
+                env.storage()
+                    .persistent()
+                    .remove(&StorageKey::VaultSnapshot(vault_id, oldest_timestamp));
                 timestamps.remove(0);
             }
         }
 
-        env.storage().persistent().set(&StorageKey::VaultSnapshotTimestamps(vault_id), &timestamps);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::VaultSnapshotTimestamps(vault_id), &timestamps);
 
         content_hash.into()
     }
@@ -6372,7 +6782,6 @@ on_time_check_ins: 0,
             .map(|vault| vault.balance)
             .ok_or(ContractError::VaultNotFound)
     }
-
 
     /// Returns the creation timestamp of a vault.
     ///
@@ -6473,8 +6882,11 @@ on_time_check_ins: 0,
         }
         vault.burn_percentage = percentage;
         Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((SET_BURN_PERCENTAGE_TOPIC, vault_id), percentage);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((SET_BURN_PERCENTAGE_TOPIC, vault_id), percentage);
     }
 
     /// Checks if a vault exists.
@@ -6673,12 +7085,7 @@ on_time_check_ins: 0,
     /// performing both steps back-to-back here removes that window.
     fn next_vault_id(env: &Env) -> u64 {
         let key = StorageKey::VaultCount;
-        let next_id: u64 = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(0u64)
-            + 1;
+        let next_id: u64 = env.storage().persistent().get(&key).unwrap_or(0u64) + 1;
         env.storage().persistent().set(&key, &next_id);
         env.storage()
             .persistent()
@@ -6762,9 +7169,10 @@ on_time_check_ins: 0,
         if Self::is_expired(env.clone(), vault_id) {
             return Err(ContractError::NotExpired);
         }
-        env.storage()
-            .persistent()
-            .set(&StorageKey::BeneficiaryReleaseConditionVeto(vault_id), &true);
+        env.storage().persistent().set(
+            &StorageKey::BeneficiaryReleaseConditionVeto(vault_id),
+            &true,
+        );
         // keep storage alive at least as long as the vault
         env.storage().persistent().extend_ttl(
             &StorageKey::BeneficiaryReleaseConditionVeto(vault_id),
@@ -7101,7 +7509,10 @@ on_time_check_ins: 0,
     ) -> Option<BeneficiaryVestingSchedule> {
         env.storage()
             .persistent()
-            .get(&StorageKey::BeneficiaryVestingSchedule(vault_id, beneficiary))
+            .get(&StorageKey::BeneficiaryVestingSchedule(
+                vault_id,
+                beneficiary,
+            ))
     }
 
     /// Claim available vesting installments for a specific beneficiary - Issue #525
@@ -7494,7 +7905,9 @@ on_time_check_ins: 0,
         let pending = env
             .storage()
             .persistent()
-            .get::<StorageKey, PendingBeneficiaryUpdate>(&StorageKey::PendingBeneficiaryUpdate(vault_id))
+            .get::<StorageKey, PendingBeneficiaryUpdate>(&StorageKey::PendingBeneficiaryUpdate(
+                vault_id,
+            ))
             .ok_or(ContractError::NoPendingAdmin)?; // Or a more appropriate error
 
         let now = env.ledger().timestamp();
@@ -8195,8 +8608,7 @@ on_time_check_ins: 0,
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((FREEZE_VAULT_TOPIC, vault_id), true);
+        env.events().publish((FREEZE_VAULT_TOPIC, vault_id), true);
         Ok(())
     }
 
@@ -8284,7 +8696,7 @@ on_time_check_ins: 0,
         vault.release_condition
     }
 
-        /// Sets multiple release conditions for a vault.
+    /// Sets multiple release conditions for a vault.
     /// Replaces any existing conditions.
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -8315,7 +8727,9 @@ on_time_check_ins: 0,
             VAULT_TTL_THRESHOLD,
             VAULT_TTL_LEDGERS,
         );
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
@@ -8429,12 +8843,12 @@ on_time_check_ins: 0,
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
-    min_balance_guard: None,
-    recurring_withdrawal: None,
-    withdrawal_limit_per_window: None,
-    withdrawal_window_seconds: 0,
-    withdrawn_in_window: 0,
-    window_start: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
 
@@ -9382,7 +9796,6 @@ on_time_check_ins: 0,
         env.storage().persistent().set(&key, &log);
     }
 
-
     fn assert_not_paused(env: &Env) {
         if Self::load_paused(env) {
             panic_with_error!(env, ContractError::Paused);
@@ -9864,7 +10277,11 @@ on_time_check_ins: 0,
     fn log_passkey_usage(env: &Env, vault_id: u64, passkey_hash: &BytesN<32>, timestamp: u64) {
         // Issue #937: update usage_count and last_used_timestamp on PasskeyHash entry
         let pk_key = StorageKey::VaultPasskeys(vault_id);
-        if let Some(mut passkeys) = env.storage().persistent().get::<StorageKey, Vec<PasskeyHash>>(&pk_key) {
+        if let Some(mut passkeys) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vec<PasskeyHash>>(&pk_key)
+        {
             for i in 0..passkeys.len() {
                 if let Some(mut pk) = passkeys.get(i) {
                     if &pk.hash == passkey_hash {
@@ -10077,12 +10494,12 @@ on_time_check_ins: 0,
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
-    min_balance_guard: None,
-    recurring_withdrawal: None,
-    withdrawal_limit_per_window: None,
-    withdrawal_window_seconds: 0,
-    withdrawn_in_window: 0,
-    window_start: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
         Self::save_vault(&env, new_vault_id, &cloned_vault);
@@ -10225,12 +10642,12 @@ on_time_check_ins: 0,
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
-    min_balance_guard: None,
-    recurring_withdrawal: None,
-    withdrawal_limit_per_window: None,
-    withdrawal_window_seconds: 0,
-    withdrawn_in_window: 0,
-    window_start: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
         Self::save_vault(&env, new_vault_id, &cloned_vault);
@@ -10453,7 +10870,7 @@ on_time_check_ins: 0,
             let code = env.prng().gen::<u64>();
             let code_bytes = code.to_be_bytes();
             let bytes = Bytes::from_array(&env, &code_bytes);
-        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
+            let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
 
             codes.push_back(BackupCode {
                 hash: hash.into(),
@@ -10530,14 +10947,24 @@ on_time_check_ins: 0,
 
         // Extend TTL by 30 days
         vault.last_check_in = env.ledger().timestamp();
-        
-        env.storage().persistent().set(&StorageKey::Vault(vault_id), &vault);
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Vault(vault_id), &vault);
         env.storage().persistent().set(&key, &codes);
-        
+
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().extend_ttl(&StorageKey::Vault(vault_id), VAULT_TTL_THRESHOLD, ttl);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::Vault(vault_id),
+            VAULT_TTL_THRESHOLD,
+            ttl,
+        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
         env.events()
             .publish((BACKUP_CODE_USED_TOPIC, vault_id), hash);
@@ -10962,11 +11389,7 @@ on_time_check_ins: 0,
 
     /// Returns the last-used timestamp for a specific passkey, or `None` if
     /// the passkey is not registered on the vault or has never been used.
-    pub fn get_passkey_last_used(
-        env: Env,
-        vault_id: u64,
-        passkey_hash: BytesN<32>,
-    ) -> Option<u64> {
+    pub fn get_passkey_last_used(env: Env, vault_id: u64, passkey_hash: BytesN<32>) -> Option<u64> {
         let key = StorageKey::VaultPasskeys(vault_id);
         let passkeys: Vec<PasskeyHash> = env
             .storage()
@@ -11095,7 +11518,11 @@ on_time_check_ins: 0,
             return Err(ContractError::InvalidAmount);
         }
 
-        let threshold = if vault.multi_sig_threshold == 0 { 1 } else { vault.multi_sig_threshold };
+        let threshold = if vault.multi_sig_threshold == 0 {
+            1
+        } else {
+            vault.multi_sig_threshold
+        };
 
         let mut valid_count = 0u32;
         let mut seen = Vec::new(&env);
@@ -11190,10 +11617,15 @@ on_time_check_ins: 0,
         let key = StorageKey::RecoveryCodeHash(vault_id);
         env.storage().persistent().set(&key, &code_hash);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
-        env.events().publish((EMERGENCY_RECOVERY_GENERATED_TOPIC, vault_id), code_hash);
+        env.events()
+            .publish((EMERGENCY_RECOVERY_GENERATED_TOPIC, vault_id), code_hash);
         Ok(code)
     }
 
@@ -11272,10 +11704,15 @@ on_time_check_ins: 0,
         env.storage().persistent().remove(&key);
 
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().extend_ttl(&pk_key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pk_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
-        env.events().publish((EMERGENCY_RECOVERY_USED_TOPIC, vault_id), new_passkey_proof);
+        env.events()
+            .publish((EMERGENCY_RECOVERY_USED_TOPIC, vault_id), new_passkey_proof);
         Ok(())
     }
 
@@ -11370,9 +11807,10 @@ on_time_check_ins: 0,
             expiry,
         };
 
-        env.storage()
-            .persistent()
-            .set(&StorageKey::BeneficiaryClaimDelegation(vault_id), &delegation);
+        env.storage().persistent().set(
+            &StorageKey::BeneficiaryClaimDelegation(vault_id),
+            &delegation,
+        );
 
         env.events().publish(
             (BEN_CLAIM_DELEG_TOPIC,),
@@ -11437,7 +11875,6 @@ on_time_check_ins: 0,
             .persistent()
             .get(&StorageKey::BeneficiaryClaimDelegation(vault_id))
     }
-
 
     // --- Issue #402: Withdrawal Scheduling ---
 
@@ -11594,7 +12031,9 @@ on_time_check_ins: 0,
     ) -> Option<ConditionalAcceptanceEntry> {
         env.storage()
             .persistent()
-            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(vault_id))
+            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(
+                vault_id,
+            ))
     }
 
     /// Sets an acceptance deadline on the conditional acceptance entry. Owner-only.
@@ -11724,10 +12163,9 @@ on_time_check_ins: 0,
             reason,
         };
 
-        env.storage().persistent().set(
-            &StorageKey::ConditionalDecline(vault_id),
-            &decline,
-        );
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ConditionalDecline(vault_id), &decline);
 
         env.events().publish(
             (BENEFICIARY_DECLINED_TOPIC,),
@@ -11750,9 +12188,9 @@ on_time_check_ins: 0,
     ) -> Option<BeneficiaryConditionalDecline> {
         env.storage()
             .persistent()
-            .get::<StorageKey, BeneficiaryConditionalDecline>(
-                &StorageKey::ConditionalDecline(vault_id),
-            )
+            .get::<StorageKey, BeneficiaryConditionalDecline>(&StorageKey::ConditionalDecline(
+                vault_id,
+            ))
     }
 
     /// Checks if beneficiary conditional acceptance conditions are met.
@@ -11899,9 +12337,10 @@ on_time_check_ins: 0,
             return Err(ContractError::InvalidBeneficiary);
         }
 
-        env.storage()
-            .persistent()
-            .set(&StorageKey::DisputeStatus(vault_id), &DisputeStatus::Resolved);
+        env.storage().persistent().set(
+            &StorageKey::DisputeStatus(vault_id),
+            &DisputeStatus::Resolved,
+        );
 
         env.events()
             .publish((DISPUTE_RESOLVED_TOPIC,), (vault_id, resolution));
@@ -12620,7 +13059,10 @@ on_time_check_ins: 0,
     ) -> Option<MultiSigProposal> {
         env.storage()
             .persistent()
-            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(vault_id, proposal_id))
+            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(
+                vault_id,
+                proposal_id,
+            ))
     }
 
     /// Returns just the status of a proposal, without deserializing the full
@@ -12633,7 +13075,10 @@ on_time_check_ins: 0,
     ) -> Result<ProposalStatus, ContractError> {
         env.storage()
             .persistent()
-            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(vault_id, proposal_id))
+            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(
+                vault_id,
+                proposal_id,
+            ))
             .map(|proposal| proposal.status)
             .ok_or(ContractError::ProposalNotFound)
     }
@@ -12657,7 +13102,7 @@ on_time_check_ins: 0,
     // ── Issue #1117: Pending Multi-Signature Operations ─────────────────────
 
     /// Creates a pending multi-sig operation requiring cosignatures from registered passkeys.
-    /// 
+    ///
     /// On first call, initializes a pending operation with the owner's signature and
     /// awaits co-signatures from other registered passkeys. The operation expires after
     /// 15 minutes if not executed.
@@ -12987,7 +13432,11 @@ on_time_check_ins: 0,
         let refund_amount = vault.balance;
         if refund_amount > 0 {
             let token_client = token::Client::new(env, &vault.token_address);
-            token_client.transfer(&env.current_contract_address(), &vault.owner, &refund_amount);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &vault.owner,
+                &refund_amount,
+            );
         }
 
         vault.balance = 0;
@@ -13011,7 +13460,8 @@ on_time_check_ins: 0,
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((CANCEL_TOPIC, vault_id), (&vault.owner, refund_amount));
+        env.events()
+            .publish((CANCEL_TOPIC, vault_id), (&vault.owner, refund_amount));
         Ok(())
     }
 
@@ -13210,7 +13660,6 @@ on_time_check_ins: 0,
             .publish((INTEGRITY_TOPIC, vault_id), report.is_valid);
         Ok(report)
     }
-
 
     // ── Internal withdraw helper (shared by withdraw + multisig execute) ─────
 
@@ -13526,8 +13975,16 @@ on_time_check_ins: 0,
                 .unwrap_or(0);
 
             let first_logical = len - n;
-            let first_phys = if len < 50 { first_logical } else { (head + first_logical) % 50 };
-            let last_phys = if len < 50 { len - 1 } else { (head + len - 1) % 50 };
+            let first_phys = if len < 50 {
+                first_logical
+            } else {
+                (head + first_logical) % 50
+            };
+            let last_phys = if len < 50 {
+                len - 1
+            } else {
+                (head + len - 1) % 50
+            };
 
             let first_entry: CheckInHistoryEntry = env
                 .storage()
@@ -13597,9 +14054,11 @@ on_time_check_ins: 0,
             // so slot i == i. Once full (len == 50) head points at the oldest
             // entry and we map logical index i to physical slot (head+i)%50.
             let phys = if len < 50 { i } else { (head + i) % 50 };
-            if let Some(entry) = env.storage().persistent().get::<StorageKey, CheckInHistoryEntry>(
-                &StorageKey::CheckInEntry(vault_id, phys),
-            ) {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, CheckInHistoryEntry>(&StorageKey::CheckInEntry(vault_id, phys))
+            {
                 result.push_back(entry);
             }
         }
@@ -13665,9 +14124,11 @@ on_time_check_ins: 0,
         let mut result: Vec<CheckInHistoryEntry> = Vec::new(&env);
         for i in 0..len {
             let phys = if len < 50 { i } else { (head + i) % 50 };
-            if let Some(entry) = env.storage().persistent().get::<StorageKey, CheckInHistoryEntry>(
-                &StorageKey::CheckInEntry(vault_id, phys),
-            ) {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, CheckInHistoryEntry>(&StorageKey::CheckInEntry(vault_id, phys))
+            {
                 result.push_back(entry);
             }
         }
@@ -13931,8 +14392,10 @@ on_time_check_ins: 0,
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((DELEGATE_CHECKIN_TOPIC, vault_id), (delegate_address, expiry));
+        env.events().publish(
+            (DELEGATE_CHECKIN_TOPIC, vault_id),
+            (delegate_address, expiry),
+        );
         Ok(())
     }
 
@@ -14045,7 +14508,8 @@ on_time_check_ins: 0,
         if is_on_time {
             vault.on_time_check_ins = vault.on_time_check_ins.saturating_add(1);
         }
-        vault.check_in_score = Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
+        vault.check_in_score =
+            Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
 
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
@@ -14075,8 +14539,10 @@ on_time_check_ins: 0,
 
         env.events()
             .publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
-        env.events()
-            .publish((CHECKIN_SCORE_UPDATED_TOPIC, vault_id), vault.check_in_score);
+        env.events().publish(
+            (CHECKIN_SCORE_UPDATED_TOPIC, vault_id),
+            vault.check_in_score,
+        );
         Ok(())
     }
 
@@ -14179,17 +14645,13 @@ on_time_check_ins: 0,
 
         // Persist updated metadata
         env.storage().persistent().set(&len_key, &len);
-        env.storage().persistent().extend_ttl(
-            &len_key,
-            VAULT_TTL_THRESHOLD,
-            VAULT_TTL_LEDGERS,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&len_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
         env.storage().persistent().set(&head_key, &head);
-        env.storage().persistent().extend_ttl(
-            &head_key,
-            VAULT_TTL_THRESHOLD,
-            VAULT_TTL_LEDGERS,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&head_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
     }
 
     fn update_check_in_streak(env: &Env, vault_id: u64, vault: &Vault, now: u64) {
@@ -14579,7 +15041,7 @@ on_time_check_ins: 0,
         vault.last_check_in = vault.last_check_in.saturating_add(elapsed);
         env.storage().persistent().remove(&hib_key);
         Self::save_vault(&env, vault_id, &vault);
-        
+
         // Calculate the new TTL remaining after exiting hibernation
         let deadline = vault.last_check_in + vault.check_in_interval;
         let new_ttl_remaining = if now >= deadline {
@@ -14587,12 +15049,14 @@ on_time_check_ins: 0,
         } else {
             deadline - now
         };
-        
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((HIBERNATION_EXITED_TOPIC, vault_id), (now, new_ttl_remaining));
+        env.events().publish(
+            (HIBERNATION_EXITED_TOPIC, vault_id),
+            (now, new_ttl_remaining),
+        );
         Ok(())
     }
 
@@ -14917,7 +15381,9 @@ on_time_check_ins: 0,
         {
             for schedule in schedules.iter() {
                 // Check for overlapping withdrawals (within 1 hour window)
-                if (new_timestamp as i128 - schedule.timestamp as i128).abs() < SECONDS_PER_HOUR as i128 {
+                if (new_timestamp as i128 - schedule.timestamp as i128).abs()
+                    < SECONDS_PER_HOUR as i128
+                {
                     return false;
                 }
             }
@@ -15296,7 +15762,12 @@ on_time_check_ins: 0,
         );
         env.events().publish(
             (WITHDRAWAL_CANCELLED_TOPIC, vault_id),
-            (withdrawal_id, caller.clone(), env.ledger().timestamp(), reversal.amount),
+            (
+                withdrawal_id,
+                caller.clone(),
+                env.ledger().timestamp(),
+                reversal.amount,
+            ),
         );
         Ok(())
     }
@@ -15739,9 +16210,6 @@ on_time_check_ins: 0,
         Ok(total_amount)
     }
 
-
-
-
     // --- Issue #586: Token Collateral ---
 
     /// Configures vault tokens as collateral for a loan.
@@ -16002,7 +16470,7 @@ on_time_check_ins: 0,
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        
+
         // TODO: Implement token rebalance logic
         Ok(())
     }
@@ -16053,7 +16521,11 @@ on_time_check_ins: 0,
             return Err(ContractError::InvalidDeadline);
         }
         let key = StorageKey::Lending(vault_id);
-        if let Some(existing) = env.storage().persistent().get::<StorageKey, TokenLending>(&key) {
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, TokenLending>(&key)
+        {
             if !existing.repaid {
                 return Err(ContractError::LoanAlreadyExists);
             }
@@ -16061,7 +16533,8 @@ on_time_check_ins: 0,
 
         let xlm = token::Client::new(&env, &Self::load_token(&env));
         xlm.transfer(&lender, &env.current_contract_address(), &amount);
-        vault.balance = vault.balance
+        vault.balance = vault
+            .balance
             .checked_add(amount)
             .ok_or(ContractError::BalanceOverflow)?;
         Self::save_vault(&env, vault_id, &vault);
@@ -16074,8 +16547,12 @@ on_time_check_ins: 0,
             repaid: false,
         };
         env.storage().persistent().set(&key, &lending);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (LOAN_ENABLED_TOPIC, vault_id),
             (lender, amount, repayment_deadline, late_penalty_bps),
@@ -16133,8 +16610,12 @@ on_time_check_ins: 0,
 
         lending.repaid = true;
         env.storage().persistent().set(&key, &lending);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (LOAN_REPAID_TOPIC, vault_id),
             (lending.amount, penalty, now),
@@ -16144,7 +16625,9 @@ on_time_check_ins: 0,
 
     /// Returns the current loan record for a vault, if one exists.
     pub fn get_token_lending(env: Env, vault_id: u64) -> Option<TokenLending> {
-        env.storage().persistent().get(&StorageKey::Lending(vault_id))
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Lending(vault_id))
     }
 
     // --- batch status ---
@@ -16203,8 +16686,6 @@ on_time_check_ins: 0,
         }
         Self::paginate(&env, due, page, page_size)
     }
-
-
 
     // --- helpers ---
 
@@ -16356,36 +16837,40 @@ on_time_check_ins: 0,
             enabled: true,
             method,
         };
-        env.storage().persistent().set(&StorageKey::TwoFactorConfig(vault_id), &config);
-        env.storage().persistent().extend_ttl(&StorageKey::TwoFactorConfig(vault_id), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.events().publish((TWO_FACTOR_ENABLED_TOPIC, vault_id), (method,));
+        env.storage()
+            .persistent()
+            .set(&StorageKey::TwoFactorConfig(vault_id), &config);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::TwoFactorConfig(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        env.events()
+            .publish((TWO_FACTOR_ENABLED_TOPIC, vault_id), (method,));
         Ok(())
     }
 
     /// Disable 2FA for a vault.
-    pub fn disable_2fa(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn disable_2fa(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        env.storage().persistent().remove(&StorageKey::TwoFactorConfig(vault_id));
-        env.storage().persistent().remove(&StorageKey::TwoFactorVerified(vault_id));
-        env.events().publish((TWO_FACTOR_DISABLED_TOPIC, vault_id), ());
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::TwoFactorConfig(vault_id));
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::TwoFactorVerified(vault_id));
+        env.events()
+            .publish((TWO_FACTOR_DISABLED_TOPIC, vault_id), ());
         Ok(())
     }
 
     /// Mark 2FA as verified for this vault (called by backend after OTP validation).
     /// Requires owner auth. The verification expires after 1 hour.
-    pub fn confirm_2fa(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn confirm_2fa(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
@@ -16395,9 +16880,16 @@ on_time_check_ins: 0,
             return Err(ContractError::TwoFactorNotEnabled);
         }
         let now = env.ledger().timestamp();
-        env.storage().persistent().set(&StorageKey::TwoFactorVerified(vault_id), &now);
-        env.storage().persistent().extend_ttl(&StorageKey::TwoFactorVerified(vault_id), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.events().publish((TWO_FACTOR_VERIFIED_TOPIC, vault_id), (now,));
+        env.storage()
+            .persistent()
+            .set(&StorageKey::TwoFactorVerified(vault_id), &now);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::TwoFactorVerified(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        env.events()
+            .publish((TWO_FACTOR_VERIFIED_TOPIC, vault_id), (now,));
         Ok(())
     }
 
@@ -16412,7 +16904,8 @@ on_time_check_ins: 0,
 
     /// Check if 2FA has been verified within the last hour (public view function).
     pub fn is_2fa_verified(env: &Env, vault_id: u64) -> bool {
-        let verified_at = env.storage()
+        let verified_at = env
+            .storage()
             .persistent()
             .get::<StorageKey, u64>(&StorageKey::TwoFactorVerified(vault_id));
         match verified_at {
@@ -16427,11 +16920,7 @@ on_time_check_ins: 0,
 
     // --- Issue #1088: Enforce Minimum Balance Guard to Prevent Vault Drainage ---
 
-    pub fn set_min_balance_guard(
-        env: Env,
-        vault_id: u64,
-        min: i128,
-    ) -> Result<(), ContractError> {
+    pub fn set_min_balance_guard(env: Env, vault_id: u64, min: i128) -> Result<(), ContractError> {
         let mut vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
         vault.min_balance_guard = Some(min);
@@ -16463,8 +16952,10 @@ on_time_check_ins: 0,
 
         Self::withdraw(env.clone(), vault_id, caller.clone(), amount)?;
 
-        env.events()
-            .publish((symbol_short!("wd_rsn"), vault_id), (&caller, amount, reason));
+        env.events().publish(
+            (symbol_short!("wd_rsn"), vault_id),
+            (&caller, amount, reason),
+        );
 
         Ok(())
     }
@@ -16496,8 +16987,10 @@ on_time_check_ins: 0,
         vault.recurring_withdrawal = Some(recurring);
         Self::save_vault(&env, vault_id, &vault);
 
-        env.events()
-            .publish((symbol_short!("rec_wd"), vault_id), (amount, interval_seconds, &destination));
+        env.events().publish(
+            (symbol_short!("rec_wd"), vault_id),
+            (amount, interval_seconds, &destination),
+        );
 
         Ok(())
     }
@@ -16520,7 +17013,11 @@ on_time_check_ins: 0,
         }
 
         let token_client = token::Client::new(&env, &vault.token_address);
-        token_client.transfer(&env.current_contract_address(), &recurring.destination, &recurring.amount);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recurring.destination,
+            &recurring.amount,
+        );
         vault.balance -= recurring.amount;
 
         if let Some(ref mut rec) = vault.recurring_withdrawal {
@@ -16529,8 +17026,10 @@ on_time_check_ins: 0,
 
         Self::save_vault(&env, vault_id, &vault);
 
-        env.events()
-            .publish((symbol_short!("exec_rw"), vault_id), (recurring.amount, now));
+        env.events().publish(
+            (symbol_short!("exec_rw"), vault_id),
+            (recurring.amount, now),
+        );
 
         Ok(())
     }
@@ -16553,10 +17052,11 @@ on_time_check_ins: 0,
         vault.recurring_withdrawal
     }
 
-
     pub fn get_withdrawal_rate_limit(env: Env, vault_id: u64) -> Option<(i128, u64)> {
         let vault = Self::load_vault(&env, vault_id);
-        vault.withdrawal_limit_per_window.map(|limit| (limit, vault.withdrawal_window_seconds))
+        vault
+            .withdrawal_limit_per_window
+            .map(|limit| (limit, vault.withdrawal_window_seconds))
     }
 
     // --- Issue #569: Withdrawal Audit Trail ---
@@ -16591,7 +17091,9 @@ on_time_check_ins: 0,
 
         let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
         env.storage().persistent().set(&key, &audit_log);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
 
         env.events().publish(
             (WITHDRAWAL_AUDIT_TOPIC, vault_id),
@@ -16690,9 +17192,7 @@ on_time_check_ins: 0,
 
         for i in 0..disputes.len() {
             let d = disputes.get(i).unwrap();
-            if d.withdrawal_timestamp == entry.timestamp
-                && d.status == DisputeStatus::Filed
-            {
+            if d.withdrawal_timestamp == entry.timestamp && d.status == DisputeStatus::Filed {
                 return Err(ContractError::DisputeFiled);
             }
         }
@@ -16858,7 +17358,7 @@ on_time_check_ins: 0,
             return Err(ContractError::Paused);
         }
         Self::require_admin(&env);
-        
+
         if new_wasm_hash.is_empty() {
             return Err(ContractError::UpgradeInvalidWasm);
         }
@@ -16874,7 +17374,9 @@ on_time_check_ins: 0,
             executable_at,
         };
 
-        env.storage().instance().set(&StorageKey::PendingUpgrade, &proposal);
+        env.storage()
+            .instance()
+            .set(&StorageKey::PendingUpgrade, &proposal);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -16934,10 +17436,8 @@ on_time_check_ins: 0,
 
         let admin = Self::load_admin(&env);
         Self::log_audit_entry(&env, 0, "execute_upgrade", &admin, "");
-        env.events().publish(
-            (UPGRADE_EXECUTED_TOPIC,),
-            (admin, proposal.new_wasm_hash),
-        );
+        env.events()
+            .publish((UPGRADE_EXECUTED_TOPIC,), (admin, proposal.new_wasm_hash));
 
         Ok(())
     }
@@ -16976,10 +17476,8 @@ on_time_check_ins: 0,
 
         let admin = Self::load_admin(&env);
         Self::log_audit_entry(&env, 0, "cancel_upgrade", &admin, "");
-        env.events().publish(
-            (UPGRADE_CANCELLED_TOPIC,),
-            (admin, proposal.new_wasm_hash),
-        );
+        env.events()
+            .publish((UPGRADE_CANCELLED_TOPIC,), (admin, proposal.new_wasm_hash));
 
         Ok(())
     }
@@ -17048,10 +17546,8 @@ on_time_check_ins: 0,
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish(
-            (TOKEN_ALLOWLIST_ADDED_TOPIC,),
-            (admin, token),
-        );
+        env.events()
+            .publish((TOKEN_ALLOWLIST_ADDED_TOPIC,), (admin, token));
 
         Ok(())
     }
@@ -17108,10 +17604,8 @@ on_time_check_ins: 0,
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-            env.events().publish(
-                (TOKEN_ALLOWLIST_REMOVED_TOPIC,),
-                (admin, token),
-            );
+            env.events()
+                .publish((TOKEN_ALLOWLIST_REMOVED_TOPIC,), (admin, token));
         }
 
         Ok(())
@@ -17203,7 +17697,11 @@ on_time_check_ins: 0,
     /// # Errors
     /// * `ContractError::NotOwner`      - Caller is not the vault owner
     /// * `ContractError::VaultOwnerLocked` - Vault is not currently owner-locked
-    pub fn owner_unlock_vault(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+    pub fn owner_unlock_vault(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
         // Require fresh authentication — acts as the new passkey verification step
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
@@ -17224,7 +17722,8 @@ on_time_check_ins: 0,
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((VAULT_UNLOCK_TOPIC, vault_id), &caller);
+        env.events()
+            .publish((VAULT_UNLOCK_TOPIC, vault_id), &caller);
         Ok(())
     }
 
@@ -17380,7 +17879,9 @@ on_time_check_ins: 0,
 
             // Determine effective extension: custom amount (capped to interval) or full interval
             let extension = if use_custom {
-                let custom = extension_amounts.get(idx as u32).unwrap_or(vault.check_in_interval);
+                let custom = extension_amounts
+                    .get(idx as u32)
+                    .unwrap_or(vault.check_in_interval);
                 // Cap to full interval so owners cannot set an arbitrarily large extension
                 if custom > vault.check_in_interval {
                     vault.check_in_interval
@@ -17433,7 +17934,10 @@ on_time_check_ins: 0,
             new_ttls.push_back(new_deadline);
 
             Self::save_vault(&env, vault_id, &vault);
-            env.events().publish((BATCH_CHECKIN_TOPIC, vault_id), (now, extension, new_deadline));
+            env.events().publish(
+                (BATCH_CHECKIN_TOPIC, vault_id),
+                (now, extension, new_deadline),
+            );
         }
 
         env.storage()
@@ -17611,12 +18115,12 @@ on_time_check_ins: 0,
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
-    min_balance_guard: None,
-    recurring_withdrawal: None,
-    withdrawal_limit_per_window: None,
-    withdrawal_window_seconds: 0,
-    withdrawn_in_window: 0,
-    window_start: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             multisig_required_ops: Vec::new(&env),
             adaptive_interval_enabled: false,
         };
