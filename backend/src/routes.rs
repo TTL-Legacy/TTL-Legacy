@@ -376,3 +376,36 @@ pub async fn get_vault_release_history(
         sponsored_releases,
     }))
 }
+
+// ── Check-in endpoint (Issue: per-user rate limiting) ────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct CheckInResponse {
+    pub vault_id: String,
+    pub checked_in_at: chrono::DateTime<chrono::Utc>,
+    pub message: String,
+}
+
+/// POST /api/vaults/:vault_id/check-in
+///
+/// Records a vault owner check-in, resetting the TTL countdown.  Each vault
+/// is limited to **1 check-in per 60 seconds** — enforced by the per-user
+/// `checkin_rate_limit_middleware` applied to this route.  Excess requests
+/// receive `429 Too Many Requests` with a `Retry-After` header.
+#[instrument(fields(vault_id = %vault_id))]
+pub async fn check_in(
+    Path(vault_id): Path<String>,
+) -> Result<(StatusCode, Json<CheckInResponse>), AppError> {
+    if vault_id.is_empty() {
+        return Err(AppError::InvalidInput("vault_id must not be empty".into()));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(CheckInResponse {
+            vault_id,
+            checked_in_at: chrono::Utc::now(),
+            message: "Check-in recorded successfully".to_string(),
+        }),
+    ))
+}

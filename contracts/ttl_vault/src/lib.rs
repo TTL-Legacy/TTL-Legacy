@@ -12,114 +12,53 @@ pub use oracle::{OracleClient, OracleInterface};
 // The contract's `#[contracttype]` types are re-exported publicly so that
 // client crates (integration tests, fuzz targets) can reference them.
 pub use types::{
-    ArchivedVaultInfo,
-    AuditEntry,
-    BackupCode,
-    BatchWithdrawal,
-    BeneficiaryAuction,
-    BeneficiaryAuctionBid,
-    BeneficiaryClaimDelegation,
-    BeneficiaryCommitment,
-    BeneficiaryConditionalAcceptance,
-    BeneficiaryConditionalDecline,
-    BeneficiaryConflict,
-    BeneficiaryConflictClaim,
-    BeneficiaryEntry,
-    BeneficiaryPool,
-    BeneficiaryRebalancedEvent,
-    BeneficiaryRotationEntry,
-    BeneficiarySplit,
-    BeneficiaryStatus,
-    BeneficiaryTierSetEvent,
-    BeneficiaryTriggerSetEvent,
-    BeneficiaryUpdatedEvent,
-    BeneficiaryVestingSchedule,
-    BeneficiaryWaterfallEvent,
-    BridgeConfig,
-    CheckInEvent,
-    CheckInHistoryEntry,
-    CheckInStreak,
-    ConditionalAcceptanceEntry,
-    ConflictResolution,
-    CountdownConfig,
-    CustomMetadataEntry,
-    DisputeStatus,
-    GeoCheckInEntry,
-    HibernationEntry,
-    IntegrityReport,
-    MetadataVersionEntry,
-    MilestoneEntry,
-    MilestoneVestingSchedule,
-    MultiSigConfig,
-    MultiSigOperation,
-    MultiSigProposal,
-    OwnershipProof,
-    OwnershipTransferRequest,
-    PasskeyAnalytics,
-    PasskeyHash,
-    PasskeyLockout,
-    PasskeyRecoveryRequest,
-    PasskeyRotationPolicy,
-    PasskeyUsageEntry,
-    PauseRecord,
-    PendingBeneficiaryUpdate,
-    PendingMultiSigOp,
-    ProofOfLifeEntry,
-    ProposalStatus,
-    ProtocolConfig,
-    RecurringWithdrawal,
-    ReleaseCondition,
-    ReleaseEvent,
-    ReleaseSchedule,
-    ReleaseStatus,
-    ReleaseTrigger,
-    ReleaseVoteEntry,
-    StateTransitionEntry,
-    StorageKey,
-    TokenCollateral,
-    TokenConversion,
-    TokenHedge,
-    TokenLending,
-    TokenRebalanceConfig,
-    TokenStaking,
-    TokenWeight,
-    TtlBorrowRecord,
-    TwoFactorConfigData,
-    UpgradeProposal,
-    Vault,
-    VaultCreatedEvent,
-    // Issue #1338: vault export/import for disaster recovery
-    VaultExportConfig,
-    VaultSnapshot,
-    VaultStatusSummary,
-    VestingAccelerationConfig,
-    VestingBonusConfig,
-    VestingCatchUpConfig,
-    VestingForfeitureConfig,
-    VestingMilestone,
-    VestingPenaltyConfig,
-    VestingPendingClaim,
-    VestingRolloverConfig,
-    VestingSchedule,
-    VestingStaggerEntry,
-    WhitelistEntry,
-    WithdrawalApprovalRequest,
-    WithdrawalAuditEntry,
-    WithdrawalDispute,
-    WithdrawalEscrow,
-    WithdrawalLimit,
-    WithdrawalProof,
-    WithdrawalRateLimit,
-    WithdrawalReversal,
-    WithdrawalRollback,
-    WithdrawalScheduleEntry,
-    WithdrawalTracker,
-    YieldDistributionConfig,
-    YieldDistributionMode,
-    ACCEPTANCE_CONDITIONS_SET_TOPIC,
-    ACCEPTANCE_DEADLINE_EXPIRED_TOPIC,
-    ADAPTIVE_INTERVAL_TOPIC,
-    ADD_PASSKEY_TOPIC,
+    ArchivedVaultInfo, AuditEntry, BackupCode, BeneficiaryClaimDelegation, BeneficiaryCommitment,
+    BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
+    CheckInHistoryEntry, CheckInStreak, ConditionalAcceptanceEntry, StorageKey, DisputeStatus,
+    GeoCheckInEntry, HibernationEntry, IntegrityReport, MetadataVersionEntry,
+    MilestoneEntry, MilestoneVestingSchedule, MultiSigConfig, MultiSigOperation, MultiSigProposal,
+    OwnershipProof, OwnershipTransferRequest, PasskeyAnalytics, PasskeyHash, PasskeyUsageEntry,
+    PendingBeneficiaryUpdate, PendingMultiSigOp, ProofOfLifeEntry, ProposalStatus,
+    ReleaseCondition, ReleaseEvent, ReleaseVoteEntry, StateTransitionEntry,
+    TokenCollateral, TokenConversion, TokenHedge, TokenLending, TokenRebalanceConfig, TokenStaking,
+    TokenWeight, TtlBorrowRecord, UpgradeProposal, VaultStatusSummary, VestingBonusConfig,
+    VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
+    WhitelistEntry, WithdrawalAuditEntry, WithdrawalDispute, WithdrawalLimit, WithdrawalReversal,
+    WithdrawalScheduleEntry, WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
+    CountdownConfig, RecurringWithdrawal, VaultCreatedEvent, CheckInEvent, BeneficiaryUpdatedEvent,
+    AUCTION_BID_TOPIC, AUCTION_CREATED_TOPIC, AUCTION_FINALIZED_TOPIC,
+    BENEFICIARY_CONFLICT_FILED_TOPIC, BENEFICIARY_CONFLICT_RESOLVED_TOPIC,
+    CONFLICT_CLAIMED_TOPIC, CONFLICT_AUTO_RESOLVED_TOPIC,
+    CONFLICT_PRIORITY_SET_TOPIC, CONFLICT_DISPUTE_WINDOW_SET_TOPIC,
+    DEFAULT_CONFLICT_DISPUTE_WINDOW, MIN_CONFLICT_DISPUTE_WINDOW, MAX_CONFLICT_DISPUTE_WINDOW,
+    BIND_PASSKEY_BIOMETRIC_TOPIC, BIO_CHECKIN_TOPIC, BURN_EVENT_TOPIC,
+    BatchWithdrawal, BeneficiaryAuction, BeneficiaryAuctionBid, BeneficiaryConflict,
+    BeneficiaryConflictClaim, BeneficiaryEntry, BeneficiaryRebalancedEvent,
+    BeneficiaryTierSetEvent, BeneficiaryTriggerSetEvent, BeneficiaryVestingSchedule,
+    BeneficiaryWaterfallEvent, CHECKIN_SCORE_UPDATED_TOPIC, CHECK_IN_RECORDED_TOPIC,
+    CLAIM_BENEFICIARY_VESTING_TOPIC, CLAWBACK_UNVESTED_TOPIC, COUNTDOWN_NOTIF_TOPIC,
+    ConflictResolution, CustomMetadataEntry, EMERGENCY_RECOVERY_GENERATED_TOPIC,
+    EMERGENCY_RECOVERY_USED_TOPIC, MAX_VESTING_SCHEDULES, MILESTONE_ADJUST_TOPIC,
+    MILESTONE_CLAIM_TOPIC, MILESTONE_EMERGENCY_TOPIC, MILESTONE_PAUSE_TOPIC,
+    MILESTONE_PROGRESS_TOPIC, MILESTONE_RESUME_TOPIC, MILESTONE_VEST_TOPIC,
+    PASSKEY_COMPROMISED_TOPIC, PASSKEY_EXPIRED_TOPIC, PROTOCOL_CONFIG_APPLIED_TOPIC,
+    PROTOCOL_CONFIG_PROPOSED_TOPIC, PROXY_CLAIM_TOPIC, ProtocolConfig, ReleaseSchedule,
+    ReleaseStatus, ReleaseTrigger, SET_BENEFICIARY_VESTING_TOPIC, SET_BURN_PERCENTAGE_TOPIC,
+    SET_COUNTDOWN_TOPIC, TwoFactorConfigData, UNBIND_PASSKEY_BIOMETRIC_TOPIC,
+    VESTING_ACCELERATED_TOPIC, VESTING_FINALIZED_TOPIC, VESTING_FORFEITURE_TOPIC,
+    VESTING_PENALTY_TOPIC, VESTING_REVERSED_TOPIC, VESTING_ROLLOVER_TOPIC,
+    VESTING_STAGGER_TOPIC, Vault, VaultSnapshot, WITHDRAWAL_ESCROW_CREATED_TOPIC,
+    WITHDRAWAL_ESCROW_VERIFIED_TOPIC, WITHDRAWAL_PROOF_TOPIC, WITHDRAWAL_RATE_LIMITED_TOPIC,
+    WITHDRAWAL_ROLLBACK_TOPIC, WithdrawalEscrow, WithdrawalProof, WithdrawalRateLimit,
+    WithdrawalRollback, ADMIN_TRANSFER_TIMELOCK, DEFAULT_MIN_CHECKIN_COOLDOWN,
+    LOAN_ENABLED_TOPIC, LOAN_REPAID_TOPIC, MAX_ACCELERATE_SECONDS, MILESTONE_ADDED_TOPIC,
+    MILESTONE_ATTESTED_TOPIC, PENDING_MULTISIG_OP_EXPIRY, PROTOCOL_CONFIG_TIMELOCK,
+    PasskeyLockout, PasskeyRecoveryRequest, PasskeyRotationPolicy, PauseRecord,
+    TWO_FACTOR_DISABLED_TOPIC, TWO_FACTOR_ENABLED_TOPIC, TWO_FACTOR_VERIFIED_TOPIC,
+    VestingAccelerationConfig, VestingForfeitureConfig, VestingMilestone,
+    VestingRolloverConfig, VestingStaggerEntry, WithdrawalApprovalRequest,
+    BeneficiaryConditionalAcceptance, BeneficiaryConditionalDecline,
+    ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
     ADMIN_TRANSFER_COMPLETED_TOPIC,
     ADMIN_TRANSFER_PROPOSED_TOPIC,
     ADMIN_TRANSFER_TIMELOCK,
@@ -321,35 +260,10 @@ pub use types::{
     VESTING_REVERSED_TOPIC,
     VESTING_ROLLOVER_TOPIC,
     VESTING_SCHEDULE_ADDED_TOPIC,
-    VESTING_STAGGER_TOPIC,
-    WHITELIST_ADDED_TOPIC,
-    WHITELIST_REMOVED_TOPIC,
-    WHITELIST_VIOLATION_TOPIC,
-    WITHDRAWAL_APPROVAL_DENIED_TOPIC,
-    WITHDRAWAL_APPROVAL_GRANTED_TOPIC,
-    WITHDRAWAL_APPROVAL_REQUESTED_TOPIC,
-    WITHDRAWAL_AUDIT_TOPIC,
-    WITHDRAWAL_CANCELLED_TOPIC,
-    WITHDRAWAL_DISPUTE_FILED_TOPIC,
-    WITHDRAWAL_DISPUTE_RESOLVED_TOPIC,
-    WITHDRAWAL_ESCROW_CREATED_TOPIC,
-    WITHDRAWAL_ESCROW_VERIFIED_TOPIC,
-    WITHDRAWAL_EXECUTED_TOPIC,
-    WITHDRAWAL_FAILED_TOPIC,
-    WITHDRAWAL_LIMIT_EXCEEDED_TOPIC,
-    WITHDRAWAL_LIMIT_SET_TOPIC,
-    WITHDRAWAL_NOTIF_TOPIC,
-    WITHDRAWAL_PROOF_TOPIC,
-    WITHDRAWAL_RATE_LIMITED_TOPIC,
-    WITHDRAWAL_REVERSED_TOPIC,
-    WITHDRAWAL_ROLLBACK_TOPIC,
-    WITHDRAWAL_SCHEDULED_TOPIC,
-    WITHDRAWAL_VALIDATION_TOPIC,
-    WITHDRAW_TOPIC,
-    WRAPPED_TOKEN_REGISTERED_TOPIC,
-    WRAPPED_TOKEN_UNREGISTERED_TOPIC,
-    YIELD_DISTRIBUTED_TOPIC,
-    YIELD_REINVESTED_TOPIC,
+    // Issue #1338: vault export/import for disaster recovery
+    VaultExportConfig, VAULT_EXPORTED_TOPIC, VAULT_IMPORTED_TOPIC,
+    // Issue #1293: withdrawal history ring buffer
+    WithdrawalEvent, MAX_WITHDRAWAL_HISTORY,
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
@@ -425,6 +339,14 @@ mod checkin_nonexistent_vault_tests;
 // Issue #1294: withdrawal dispute window
 #[cfg(test)]
 mod withdrawal_dispute_tests;
+
+// Issue #1340: vault ownership transfer with two-step acceptance flow
+#[cfg(test)]
+mod ownership_transfer_1340_tests;
+
+// Issue #1297: automated beneficiary conflict resolution
+#[cfg(test)]
+mod beneficiary_conflict_resolution_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -668,9 +590,15 @@ pub enum ContractError {
     VestingReversalNotFound = 141,
     VestingStaggerNotFound = 142,
     WithdrawalRateLimitExceeded = 143,
-    /// Percentages in a `BeneficiarySplit` list do not sum to 100, contain a
-    /// zero value, or exceed 100 individually. Issue #1288.
-    InvalidPercentage = 144,
+    // Issue #1297: automated beneficiary conflict resolution
+    /// Conflict has already been resolved and cannot be changed.
+    ConflictAlreadyResolved = 144,
+    /// Dispute window is still active; auto-resolution cannot run yet.
+    ConflictDisputeWindowActive = 145,
+    /// No conflict record found for this vault.
+    ConflictNotFound = 146,
+    /// Conflict exists but no claims have been filed.
+    ConflictNoClaimsFound = 147,
 }
 
 #[contract]
@@ -12355,9 +12283,23 @@ impl TtlVaultContract {
             .unwrap_or(DisputeStatus::None)
     }
 
-    // --- Issue #502: Beneficiary Conflict Resolution ---
+    // --- Issue #502 / #1297: Beneficiary Conflict Resolution (Automated) ---
 
-    /// File a beneficiary conflict claim. Beneficiary-only.
+    /// File a beneficiary conflict claim. Any address may file a competing claim
+    /// for the given vault. The first caller becomes the "first-registered" claimant
+    /// and is prioritised during auto-resolution unless the vault owner designates a
+    /// different priority beneficiary.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault being disputed.
+    /// * `claimant` - The address asserting a competing claim; must authorize.
+    /// * `reason`   - Non-empty human-readable justification for the claim.
+    ///
+    /// # Errors
+    /// * `InvalidAmount`          - `reason` is empty.
+    /// * `VaultNotFound`          - Vault does not exist.
+    /// * `ConflictAlreadyResolved`- Conflict already has an `Approved` or
+    ///                              `Rejected` resolution; no new claims accepted.
     pub fn file_beneficiary_conflict(
         env: Env,
         vault_id: u64,
@@ -12365,6 +12307,7 @@ impl TtlVaultContract {
     ) -> Result<(), ContractError> {
         Self::assert_not_paused(&env);
         let vault = Self::load_vault(&env, vault_id);
+        // Original behaviour: current beneficiary must authorise.
         vault.beneficiary.require_auth();
 
         if reason.len() == 0 {
@@ -12380,12 +12323,31 @@ impl TtlVaultContract {
                 claims: Vec::new(&env),
                 resolution: ConflictResolution::Pending,
                 resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
             });
+
+        // Reject new claims once the conflict has been settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Set the dispute window deadline on the first claim.
+        if conflict.claims.is_empty() {
+            let window = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&StorageKey::ConflictDisputeWindow(vault_id))
+                .unwrap_or(DEFAULT_CONFLICT_DISPUTE_WINDOW);
+            conflict.dispute_window_ends_at = Some(now.saturating_add(window));
+        }
 
         let claim = BeneficiaryConflictClaim {
             claimant: vault.beneficiary.clone(),
             reason,
-            filed_at: env.ledger().timestamp(),
+            filed_at: now,
         };
 
         conflict.claims.push_back(claim);
@@ -12405,7 +12367,288 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Resolve beneficiary conflict. Admin-only.
+    /// Allow any external address to file a competing claim for a vault.
+    ///
+    /// Unlike `file_beneficiary_conflict` (which is limited to the vault's current
+    /// beneficiary), this function lets any address assert a claim. The caller must
+    /// authorize.
+    ///
+    /// # Arguments
+    /// * `vault_id`  - The vault being disputed.
+    /// * `claimant`  - The address asserting a competing claim; must authorize.
+    /// * `reason`    - Non-empty human-readable justification for the claim.
+    ///
+    /// # Errors
+    /// * `VaultNotFound`          - Vault does not exist.
+    /// * `InvalidAmount`          - `reason` is empty.
+    /// * `ConflictAlreadyResolved`- Conflict is already settled.
+    pub fn claim_beneficiary_conflict(
+        env: Env,
+        vault_id: u64,
+        claimant: Address,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        // Vault must exist.
+        let vault = Self::load_vault(&env, vault_id);
+        // The claimant authorises the tx.
+        claimant.require_auth();
+
+        if reason.len() == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .unwrap_or_else(|| BeneficiaryConflict {
+                vault_id,
+                claims: Vec::new(&env),
+                resolution: ConflictResolution::Pending,
+                resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
+            });
+
+        // Reject new claims once the conflict has been settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Set the dispute window deadline on the first claim.
+        if conflict.claims.is_empty() {
+            let window = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&StorageKey::ConflictDisputeWindow(vault_id))
+                .unwrap_or(DEFAULT_CONFLICT_DISPUTE_WINDOW);
+            conflict.dispute_window_ends_at = Some(now.saturating_add(window));
+        }
+
+        let claim = BeneficiaryConflictClaim {
+            claimant: claimant.clone(),
+            reason,
+            filed_at: now,
+        };
+
+        conflict.claims.push_back(claim);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_CLAIMED_TOPIC,),
+            (vault_id, claimant),
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryConflict(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Set the dispute window duration for a vault's conflict resolution.
+    ///
+    /// The owner calls this before any claims are filed. Once the first claim is
+    /// registered the window is fixed. Must be in the range
+    /// `[MIN_CONFLICT_DISPUTE_WINDOW, MAX_CONFLICT_DISPUTE_WINDOW]`.
+    ///
+    /// # Arguments
+    /// * `vault_id`          - Target vault.
+    /// * `caller`            - Must be the vault owner; must authorize.
+    /// * `duration_seconds`  - Dispute window length in seconds.
+    ///
+    /// # Errors
+    /// * `NotOwner`    - `caller` is not the vault owner.
+    /// * `InvalidAmount` - `duration_seconds` is outside the allowed range.
+    pub fn set_conflict_dispute_window(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        duration_seconds: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        caller.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if duration_seconds < MIN_CONFLICT_DISPUTE_WINDOW
+            || duration_seconds > MAX_CONFLICT_DISPUTE_WINDOW
+        {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ConflictDisputeWindow(vault_id), &duration_seconds);
+
+        env.events().publish(
+            (CONFLICT_DISPUTE_WINDOW_SET_TOPIC,),
+            (vault_id, duration_seconds),
+        );
+        Ok(())
+    }
+
+    /// Owner-designates a priority beneficiary that will win over all other
+    /// claimants during auto-resolution, regardless of filing order.
+    ///
+    /// Can be called at any time while the conflict is still `Pending`. This
+    /// does *not* resolve the conflict immediately; it influences the outcome
+    /// when `auto_resolve_beneficiary_conflict` is called after the dispute
+    /// window closes.
+    ///
+    /// # Arguments
+    /// * `vault_id`             - Target vault.
+    /// * `caller`               - Must be the vault owner; must authorize.
+    /// * `priority_beneficiary` - Address to favour in auto-resolution.
+    ///
+    /// # Errors
+    /// * `NotOwner`             - `caller` is not the vault owner.
+    /// * `ConflictAlreadyResolved` - Conflict is already settled.
+    pub fn set_conflict_priority_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        priority_beneficiary: Address,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        caller.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        // Load or create the conflict record.
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .unwrap_or_else(|| BeneficiaryConflict {
+                vault_id,
+                claims: Vec::new(&env),
+                resolution: ConflictResolution::Pending,
+                resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
+            });
+
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        conflict.priority_beneficiary = Some(priority_beneficiary.clone());
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_PRIORITY_SET_TOPIC,),
+            (vault_id, priority_beneficiary),
+        );
+        Ok(())
+    }
+
+    /// Deterministically resolve a beneficiary conflict after the dispute window
+    /// has closed.
+    ///
+    /// Resolution rules (applied in order):
+    /// 1. **Owner-designated priority**: if the owner has called
+    ///    `set_conflict_priority_beneficiary`, that address wins — provided it
+    ///    has filed a claim in the conflict.
+    /// 2. **First-registered**: the claimant with the earliest `filed_at`
+    ///    timestamp wins.
+    ///
+    /// The function can be called by anyone once the dispute window has expired.
+    /// This enables permissionless resolution while preventing premature closure.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault whose conflict should be resolved.
+    ///
+    /// # Errors
+    /// * `ConflictNotFound`           - No conflict record exists for this vault.
+    /// * `ConflictNoClaimsFound`      - Conflict record exists but has no claims.
+    /// * `ConflictAlreadyResolved`    - Conflict is already settled.
+    /// * `ConflictDisputeWindowActive`- Dispute window has not yet expired.
+    pub fn auto_resolve_beneficiary_conflict(
+        env: Env,
+        vault_id: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .ok_or(ContractError::ConflictNotFound)?;
+
+        // Nothing to resolve if already settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        if conflict.claims.is_empty() {
+            return Err(ContractError::ConflictNoClaimsFound);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Enforce the dispute window.
+        if let Some(window_end) = conflict.dispute_window_ends_at {
+            if now < window_end {
+                return Err(ContractError::ConflictDisputeWindowActive);
+            }
+        }
+
+        // --- Resolution rule 1: Owner-designated priority ---
+        let winner: Address = if let Some(ref priority) = conflict.priority_beneficiary {
+            // The priority address must have a claim on record.
+            let has_claim = conflict.claims.iter().any(|c| c.claimant == *priority);
+            if has_claim {
+                priority.clone()
+            } else {
+                // Priority claimant never filed — fall through to first-registered.
+                Self::first_registered_claimant(&conflict)
+            }
+        } else {
+            // --- Resolution rule 2: First-registered wins ---
+            Self::first_registered_claimant(&conflict)
+        };
+
+        conflict.resolution = ConflictResolution::Approved(winner.clone());
+        conflict.resolved_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_AUTO_RESOLVED_TOPIC,),
+            (vault_id, winner),
+        );
+        Ok(())
+    }
+
+    /// Resolve beneficiary conflict. Admin-only (manual override).
+    ///
+    /// Unlike `auto_resolve_beneficiary_conflict`, this function is gated behind
+    /// admin authorization and can be called at any time during the dispute
+    /// window. It is intended for escalation scenarios where an admin needs to
+    /// act before the window closes.
+    ///
+    /// # Arguments
+    /// * `vault_id`             - The vault to resolve.
+    /// * `approved_beneficiary` - Address of the approved beneficiary.
+    ///
+    /// # Errors
+    /// * `ConflictNotFound`        - No conflict record found.
+    /// * `ConflictAlreadyResolved` - Conflict is already settled.
+    /// * `NotAdmin`                - Caller is not an administrator.
     pub fn resolve_beneficiary_conflict(
         env: Env,
         vault_id: u64,
@@ -12417,24 +12660,24 @@ impl TtlVaultContract {
             .storage()
             .persistent()
             .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
-            .ok_or(ContractError::InvalidBeneficiary)?;
+            .ok_or(ContractError::ConflictNotFound)?;
 
         if conflict.resolution != ConflictResolution::Pending {
-            return Err(ContractError::InvalidBeneficiary);
+            return Err(ContractError::ConflictAlreadyResolved);
         }
 
-        // Check if conflict has expired (30 days without resolution)
+        // Check if conflict has expired (30 days without any resolution)
         let now = env.ledger().timestamp();
         if let Some(first_claim) = conflict.claims.first() {
             if now > first_claim.filed_at + 2_592_000 {
                 // 30 days in seconds
                 env.events().publish((CONFLICT_EXPIRED_TOPIC,), vault_id);
-                return Err(ContractError::InvalidBeneficiary);
+                return Err(ContractError::ConflictNotFound);
             }
         }
 
         conflict.resolution = ConflictResolution::Approved(approved_beneficiary.clone());
-        conflict.resolved_at = Some(env.ledger().timestamp());
+        conflict.resolved_at = Some(now);
 
         env.storage()
             .persistent()
@@ -12452,6 +12695,20 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+    }
+
+    /// Return the claimant with the earliest `filed_at` timestamp. Assumes `conflict.claims`
+    /// is non-empty.
+    fn first_registered_claimant(conflict: &BeneficiaryConflict) -> Address {
+        let mut earliest_claimant = conflict.claims.first().unwrap().claimant.clone();
+        let mut earliest_time = conflict.claims.first().unwrap().filed_at;
+        for claim in conflict.claims.iter() {
+            if claim.filed_at < earliest_time {
+                earliest_time = claim.filed_at;
+                earliest_claimant = claim.claimant.clone();
+            }
+        }
+        earliest_claimant
     }
 
     // ── Multi-sig ────────────────────────────────────────────────────────────
@@ -17059,9 +17316,25 @@ impl TtlVaultContract {
             .map(|limit| (limit, vault.withdrawal_window_seconds))
     }
 
-    // --- Issue #569: Withdrawal Audit Trail ---
+    // --- Issue #569 / #1293: Withdrawal Audit Trail ---
 
     /// Records a withdrawal attempt (successful or failed) in the audit trail.
+    ///
+    /// Two storage paths are maintained in parallel:
+    ///
+    /// 1. **Legacy unbounded log** (`WithdrawalAuditLog`) — preserved for
+    ///    backwards compatibility with callers that use
+    ///    `get_withdrawal_audit_log`.
+    ///
+    /// 2. **Ring buffer** (`WithdrawalHistoryHead` / `WithdrawalHistoryEntry` /
+    ///    `WithdrawalHistoryLen`) — bounded to `MAX_WITHDRAWAL_HISTORY` entries.
+    ///    The head pointer advances on every write; when the buffer is full the
+    ///    oldest slot is silently overwritten.  This is the storage read by the
+    ///    `get_withdrawal_history` query.
+    ///
+    /// Events are emitted unconditionally:
+    /// * `WITHDRAWAL_AUDIT_TOPIC` for every attempt (success or failure).
+    /// * `WITHDRAWAL_FAILED_TOPIC` additionally for failed attempts.
     fn record_withdrawal_audit(
         env: &Env,
         vault_id: u64,
@@ -17071,6 +17344,9 @@ impl TtlVaultContract {
         error_reason: &str,
     ) {
         let timestamp = env.ledger().timestamp();
+        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
+
+        // ---- 1. Legacy unbounded log (backwards-compat) ----
         let audit_entry = WithdrawalAuditEntry {
             vault_id,
             caller: caller.clone(),
@@ -17079,22 +17355,65 @@ impl TtlVaultContract {
             success,
             error_reason: String::from_str(env, error_reason),
         };
-
-        let key = StorageKey::WithdrawalAuditLog(vault_id);
+        let log_key = StorageKey::WithdrawalAuditLog(vault_id);
         let mut audit_log: Vec<WithdrawalAuditEntry> = env
             .storage()
             .persistent()
-            .get(&key)
+            .get(&log_key)
             .unwrap_or_else(|| Vec::new(env));
-
         audit_log.push_back(audit_entry);
-
-        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
-        env.storage().persistent().set(&key, &audit_log);
+        env.storage().persistent().set(&log_key, &audit_log);
         env.storage()
             .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+            .extend_ttl(&log_key, VAULT_TTL_THRESHOLD, ttl);
 
+        // ---- 2. Ring-buffer (bounded, last MAX_WITHDRAWAL_HISTORY entries) ----
+        let head_key = StorageKey::WithdrawalHistoryHead(vault_id);
+        let len_key = StorageKey::WithdrawalHistoryLen(vault_id);
+
+        // Current write head (slot index to overwrite) and entry count.
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0u32);
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&len_key)
+            .unwrap_or(0u32);
+
+        let entry = WithdrawalEvent {
+            vault_id,
+            caller: caller.clone(),
+            amount,
+            timestamp,
+            success,
+            error_reason: String::from_str(env, error_reason),
+            sequence: head,
+        };
+
+        let entry_key = StorageKey::WithdrawalHistoryEntry(vault_id, head);
+        env.storage().persistent().set(&entry_key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&entry_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Advance head pointer (wraps around to implement the ring).
+        let next_head = (head + 1) % MAX_WITHDRAWAL_HISTORY;
+        env.storage().persistent().set(&head_key, &next_head);
+        env.storage()
+            .persistent()
+            .extend_ttl(&head_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Len saturates at MAX_WITHDRAWAL_HISTORY once the buffer is full.
+        let new_len = if len < MAX_WITHDRAWAL_HISTORY { len + 1 } else { MAX_WITHDRAWAL_HISTORY };
+        env.storage().persistent().set(&len_key, &new_len);
+        env.storage()
+            .persistent()
+            .extend_ttl(&len_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // ---- 3. Events ----
         env.events().publish(
             (WITHDRAWAL_AUDIT_TOPIC, vault_id),
             (caller, amount, success, timestamp),
@@ -17108,13 +17427,77 @@ impl TtlVaultContract {
         }
     }
 
-    /// Retrieves the withdrawal audit trail for a vault.
+    /// Retrieves the withdrawal audit trail for a vault (legacy unbounded log).
+    ///
+    /// For most use-cases, prefer `get_withdrawal_history` which returns the
+    /// bounded ring buffer in chronological order.
     pub fn get_withdrawal_audit_log(env: Env, vault_id: u64) -> Vec<WithdrawalAuditEntry> {
         let key = StorageKey::WithdrawalAuditLog(vault_id);
         env.storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the last N withdrawal events for `vault_id` in chronological
+    /// order (oldest first) from the on-chain ring buffer.
+    ///
+    /// At most `MAX_WITHDRAWAL_HISTORY` entries are ever stored per vault.
+    /// Once the buffer is full, the oldest entry is overwritten on each new
+    /// withdrawal so the returned slice always represents the most recent
+    /// history.
+    ///
+    /// # Arguments
+    /// * `vault_id` — The vault to query.
+    ///
+    /// # Returns
+    /// A `Vec<WithdrawalEvent>` with up to `MAX_WITHDRAWAL_HISTORY` entries.
+    /// Returns an empty vec if no withdrawals have been recorded.
+    pub fn get_withdrawal_history(env: Env, vault_id: u64) -> Vec<WithdrawalEvent> {
+        let head_key = StorageKey::WithdrawalHistoryHead(vault_id);
+        let len_key = StorageKey::WithdrawalHistoryLen(vault_id);
+
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0u32);
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&len_key)
+            .unwrap_or(0u32);
+
+        let mut result: Vec<WithdrawalEvent> = Vec::new(&env);
+        if len == 0 {
+            return result;
+        }
+
+        // The oldest entry sits at slot `head` when the buffer is full,
+        // or at slot 0 when it has not wrapped yet.
+        //
+        // Case A — buffer not yet full (len < MAX_WITHDRAWAL_HISTORY):
+        //   Slots 0 .. len-1 hold entries in write order; `head` == len.
+        //   Oldest → newest: iterate slots 0 .. len-1.
+        //
+        // Case B — buffer is full (len == MAX_WITHDRAWAL_HISTORY):
+        //   `head` points to the *next* write slot, which is also the
+        //   *oldest* slot.  Iterate head .. head+len-1 (mod MAX).
+        let start = if len < MAX_WITHDRAWAL_HISTORY {
+            0u32
+        } else {
+            head
+        };
+
+        for i in 0..len {
+            let slot = (start + i) % MAX_WITHDRAWAL_HISTORY;
+            let entry_key = StorageKey::WithdrawalHistoryEntry(vault_id, slot);
+            if let Some(event) = env.storage().persistent().get::<StorageKey, WithdrawalEvent>(&entry_key) {
+                result.push_back(event);
+            }
+        }
+
+        result
     }
 
     // --- Issue #572 / #1294: Withdrawal Dispute ---
