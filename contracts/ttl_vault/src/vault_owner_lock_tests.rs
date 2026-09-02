@@ -75,7 +75,7 @@ fn test_withdraw_rejected_when_vault_is_owner_locked() {
 
     client.owner_lock_vault(&vault_id, &owner).unwrap();
 
-    let result = client.try_withdraw(&vault_id, &owner, &100_000i128);
+    let result = client.try_withdraw(&vault_id, &owner, &100_000i128, &None, &None, &None);
     assert!(result.is_err(), "withdraw must fail on owner-locked vault");
     let err = result.unwrap_err().unwrap();
     assert_eq!(

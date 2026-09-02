@@ -146,7 +146,7 @@ fn test_withdraw_succeeds_when_no_whitelist_set() {
     let (_env, owner, _beneficiary, vault_id, client) = setup_whitelist();
 
     // No whitelist configured → withdraw must succeed (allow-all behaviour)
-    let result = client.try_withdraw(&vault_id, &owner, &500_000);
+    let result = client.try_withdraw(&vault_id, &owner, &500_000, &None, &None, &None);
     assert!(result.is_ok());
 }
 
@@ -157,7 +157,7 @@ fn test_withdraw_succeeds_when_owner_is_whitelisted() {
     // Add owner as approved destination (withdraw sends to owner)
     client.add_whitelist_destination(&vault_id, &owner, &owner);
 
-    let result = client.try_withdraw(&vault_id, &owner, &500_000);
+    let result = client.try_withdraw(&vault_id, &owner, &500_000, &None, &None, &None);
     assert!(result.is_ok());
 }
 
@@ -169,7 +169,7 @@ fn test_withdraw_fails_when_owner_not_on_whitelist() {
     let other = Address::generate(&env);
     client.add_whitelist_destination(&vault_id, &owner, &other);
 
-    let result = client.try_withdraw(&vault_id, &owner, &500_000);
+    let result = client.try_withdraw(&vault_id, &owner, &500_000, &None, &None, &None);
     assert!(result.is_err());
 }
 
@@ -181,7 +181,7 @@ fn test_withdraw_fails_after_owner_removed_from_whitelist() {
     client.add_whitelist_destination(&vault_id, &owner, &owner);
     client.remove_whitelist_destination(&vault_id, &owner, &owner);
 
-    let result = client.try_withdraw(&vault_id, &owner, &500_000);
+    let result = client.try_withdraw(&vault_id, &owner, &500_000, &None, &None, &None);
     assert!(result.is_err());
 }
 
@@ -194,7 +194,7 @@ fn test_withdraw_succeeds_after_owner_re_added_to_whitelist() {
     client.remove_whitelist_destination(&vault_id, &owner, &owner);
     client.add_whitelist_destination(&vault_id, &owner, &owner);
 
-    let result = client.try_withdraw(&vault_id, &owner, &500_000);
+    let result = client.try_withdraw(&vault_id, &owner, &500_000, &None, &None, &None);
     assert!(result.is_ok());
 }
 

@@ -184,7 +184,7 @@ fn regression_withdrawal_updates_balance() {
 
     let balance_before = client.get_vault_balance(&vault_id);
     let withdrawal_amount = 30_000i128;
-    client.withdraw(&vault_id, &withdrawal_amount);
+    client.withdraw(&vault_id, &withdrawal_amount, &None, &None, &None);
 
     let balance_after = client.get_vault_balance(&vault_id);
     assert_eq!(
@@ -219,7 +219,7 @@ fn regression_beneficiary_update_persists() {
     let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
 
     let new_beneficiary = Address::generate(&env);
-    client.update_beneficiary(&vault_id, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &new_beneficiary, &None, &None, &None);
 
     let vault = client.get_vault(&vault_id);
     assert_eq!(
@@ -239,7 +239,7 @@ fn regression_only_owner_can_checkin() {
     let unauthorized_user = Address::generate(&env);
     env.mock_all_auths_allowing_non_root_auth();
 
-    let result = client.try_check_in(&vault_id);
+    let result = client.try_check_in(&vault_id, &None, &None);
     // Note: In a real scenario with proper auth, this would fail
     // This test documents the expected behavior
     assert!(

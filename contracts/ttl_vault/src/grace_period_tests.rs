@@ -61,7 +61,7 @@ fn test_grace_period_active_blocks_release() {
     // Initial check in to reset the timestamp
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Fast forward to expiry (now + 500)
     now += 500;
@@ -95,7 +95,7 @@ fn test_grace_period_default_allows_immediate_release() {
     // Initial check in to reset the timestamp
     let mut now = env.ledger().timestamp() + 10;
     env.ledger().set_timestamp(now);
-    client.check_in(&vault_id, &owner, &None);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
 
     // Fast forward to expiry (now + 500)
     now += 500;

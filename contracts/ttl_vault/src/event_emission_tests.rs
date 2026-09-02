@@ -290,7 +290,7 @@ fn test_update_beneficiary_emits_beneficiary_updated_event() {
     let new_beneficiary = Address::generate(&env);
 
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64, &None);
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
 
     let event: BeneficiaryUpdatedEvent =
         find_event_by_topic(&env, types::BENEFICIARY_UPDATED_TOPIC)
@@ -317,7 +317,7 @@ fn test_update_beneficiary_event_captures_old_and_new_address() {
     let vault_id = client.create_vault(&owner, &original_beneficiary, &100u64, &None);
 
     // First update: original → first_new
-    client.update_beneficiary(&vault_id, &owner, &first_new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &first_new_beneficiary, &None, &None, &None);
 
     let first_event: BeneficiaryUpdatedEvent =
         find_event_by_topic(&env, types::BENEFICIARY_UPDATED_TOPIC)
@@ -331,7 +331,7 @@ fn test_update_beneficiary_event_captures_old_and_new_address() {
     client.apply_beneficiary_update(&vault_id, &owner);
 
     // Second update: first_new → second_new
-    client.update_beneficiary(&vault_id, &owner, &second_new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &second_new_beneficiary, &None, &None, &None);
 
     // Find the latest BENEFICIARY_UPDATED_TOPIC event
     let second_event: Option<BeneficiaryUpdatedEvent> =
@@ -357,7 +357,7 @@ fn test_update_beneficiary_event_topic_contains_vault_id() {
     let new_beneficiary = Address::generate(&env);
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64, &None);
 
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
 
     let found = env.events().all().iter().any(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);

@@ -278,7 +278,7 @@ fn test_partial_liquidate_then_check_in_resets_ttl() {
 
     // Now check-in as normal and confirm TTL extends.
     let passkey = BytesN::from_array(&env, &[0u8; 32]);
-    client.check_in(&vault_id, &owner, &passkey).unwrap();
+    client.check_in(&vault_id, &owner, &passkey, &None, &None).unwrap();
     let ttl_after_checkin = client.get_ttl_remaining(&vault_id).unwrap();
     assert_eq!(ttl_after_checkin, interval);
 }

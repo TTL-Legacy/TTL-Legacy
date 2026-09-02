@@ -55,7 +55,7 @@ mod tests {
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
 
         // Try to set owner as the new beneficiary
-        let result = client.try_update_beneficiary(&vault_id, &owner, &owner);
+        let result = client.try_update_beneficiary(&vault_id, &owner, &owner, &None, &None, &None);
         assert!(
             result.is_err(),
             "update_beneficiary should reject owner as new beneficiary"
@@ -100,7 +100,7 @@ mod tests {
         );
 
         // Second update fails if trying to set owner as beneficiary
-        let result = client.try_update_beneficiary(&vault_id, &owner, &owner);
+        let result = client.try_update_beneficiary(&vault_id, &owner, &owner, &None, &None, &None);
         assert!(
             result.is_err(),
             "Update to set owner as beneficiary should fail"

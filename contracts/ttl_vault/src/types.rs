@@ -577,6 +577,9 @@ pub enum StorageKey {
     VaultLowTtlThreshold(u64),
     // Issue #1337: beneficiary archival notification contact info
     BeneficiaryContactInfo(u64, Address),
+    // Issue #1283: on-chain secp256r1 public key for passkey signature verification.
+    // Key: (vault_id, passkey_hash) → SEC-1 uncompressed 65-byte public key.
+    PasskeyPublicKey(u64, BytesN<32>),
     // Issue #1288: multi-beneficiary splits and previously-missing storage keys
     AcceptanceConditions(u64),
     AdminTransferProposedAt,

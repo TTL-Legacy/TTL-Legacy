@@ -190,7 +190,7 @@ mod tests {
         // Deposit a small amount, then try to withdraw more.
         client.deposit(&vault_id, &owner, &500i128);
 
-        let result = client.try_withdraw(&vault_id, &owner, &501i128);
+        let result = client.try_withdraw(&vault_id, &owner, &501i128, &None, &None, &None);
         assert!(result.is_err(), "withdraw exceeding balance must fail");
 
         let err = result.unwrap_err().unwrap();
@@ -209,7 +209,7 @@ mod tests {
 
         client.deposit(&vault_id, &owner, &500i128);
 
-        let result = client.try_withdraw(&vault_id, &owner, &500i128);
+        let result = client.try_withdraw(&vault_id, &owner, &500i128, &None, &None, &None);
         assert!(result.is_ok(), "withdraw of exact balance must succeed");
     }
 
@@ -223,7 +223,7 @@ mod tests {
         client.deposit(&vault_id, &owner, &300i128);
         let balance_before = client.get_vault(&vault_id).balance;
 
-        let _ = client.try_withdraw(&vault_id, &owner, &301i128);
+        let _ = client.try_withdraw(&vault_id, &owner, &301i128, &None, &None, &None);
         let balance_after = client.get_vault(&vault_id).balance;
 
         assert_eq!(
