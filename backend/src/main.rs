@@ -16,7 +16,7 @@ mod consensus;
 mod csrf;
 mod db;
 mod error;
-mod security_headers;
+mod escalation;
 mod handlers;
 mod models;
 mod notifications;
@@ -26,8 +26,8 @@ mod request_id;
 mod routes;
 mod sanitization;
 mod scheduler;
+mod security_headers;
 mod two_factor;
-mod escalation;
 mod webhook_retry;
 
 #[cfg(test)]
@@ -164,7 +164,8 @@ async fn main() {
     let _otel_guard = otel::init_tracer("ttl-legacy-backend");
 
     // Check contract version before proceeding with server startup
-    let min_contract_version = parse_min_contract_version(std::env::var("MIN_CONTRACT_VERSION").ok());
+    let min_contract_version =
+        parse_min_contract_version(std::env::var("MIN_CONTRACT_VERSION").ok());
 
     let version_result = check_contract_version(
         || async {
@@ -196,7 +197,8 @@ async fn main() {
         "database pool configuration"
     );
 
-    let db = Arc::new(Db::open_with_pool_config(":memory:", &pool_config).expect("failed to open db"));
+    let db =
+        Arc::new(Db::open_with_pool_config(":memory:", &pool_config).expect("failed to open db"));
     db.migrate().expect("migration failed");
 
     let consensus = NodeCache::from_env();
@@ -232,13 +234,21 @@ async fn main() {
         .route("/metrics", get(metrics_handler))
         .route(
             "/api/vaults/:vault_id/reminder-preferences",
-            post(routes::set_preferences).layer(middleware::from_fn_with_state(sensitive_limiter.clone(), rate_limit::rate_limit_middleware))
+            post(routes::set_preferences)
+                .layer(middleware::from_fn_with_state(
+                    sensitive_limiter.clone(),
+                    rate_limit::rate_limit_middleware,
+                ))
                 .get(routes::get_preferences)
                 .delete(routes::delete_preferences),
         )
         .route(
             "/api/vaults/:vault_id/subscriptions",
-            post(routes::set_subscription).layer(middleware::from_fn_with_state(sensitive_limiter.clone(), rate_limit::rate_limit_middleware))
+            post(routes::set_subscription)
+                .layer(middleware::from_fn_with_state(
+                    sensitive_limiter.clone(),
+                    rate_limit::rate_limit_middleware,
+                ))
                 .delete(routes::delete_subscription),
         )
         .route(
@@ -251,7 +261,11 @@ async fn main() {
         )
         .route(
             "/api/vaults/:vault_id/sponsored-release",
-            post(routes::create_sponsored_release).layer(middleware::from_fn_with_state(sensitive_limiter, rate_limit::rate_limit_middleware))
+            post(routes::create_sponsored_release)
+                .layer(middleware::from_fn_with_state(
+                    sensitive_limiter,
+                    rate_limit::rate_limit_middleware,
+                ))
                 .get(routes::get_sponsored_releases),
         )
         .route(
@@ -275,10 +289,15 @@ async fn main() {
         .route("/api/auth/refresh", post(auth::refresh))
         .layer(build_cors_layer())
         .layer(middleware::from_fn(sanitization::sanitize_request))
-        .layer(middleware::from_fn_with_state(global_limiter, rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            global_limiter,
+            rate_limit::rate_limit_middleware,
+        ))
         // Outermost layer so every response — including CORS/rate-limit
         // rejections — carries the baseline security headers.
-        .layer(middleware::from_fn(security_headers::security_headers_middleware))
+        .layer(middleware::from_fn(
+            security_headers::security_headers_middleware,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

@@ -9,11 +9,7 @@ use axum::{
 };
 use chrono::Utc;
 
-use crate::{
-    db::Db,
-    error::ApiError,
-    models::AuditLogEntry,
-};
+use crate::{db::Db, error::ApiError, models::AuditLogEntry};
 
 /// Axum middleware that logs every API request to the audit log.
 pub async fn audit_middleware(
@@ -112,11 +108,13 @@ pub fn authorize_admin(headers: &HeaderMap) -> Result<(), ApiError> {
 }
 
 fn extract_client_ip(headers: &HeaderMap) -> String {
-    if let Some(val) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        return val.split(',').next().unwrap_or("unknown").trim().to_string();
+    if let Some(val) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        return val
+            .split(',')
+            .next()
+            .unwrap_or("unknown")
+            .trim()
+            .to_string();
     }
     if let Some(val) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         return val.to_string();

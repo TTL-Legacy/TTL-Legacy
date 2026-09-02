@@ -398,12 +398,19 @@ fn test_resolve_withdrawal_dispute_admin_can_resolve() {
     // With mock_all_auths active, require_admin loads the stored admin and
     // calls admin.require_auth(), which mock_all_auths satisfies.
     // This test confirms a successful resolution path exists.
-    assert_ne!(f.owner, f.admin, "Precondition: owner and admin are distinct addresses");
+    assert_ne!(
+        f.owner, f.admin,
+        "Precondition: owner and admin are distinct addresses"
+    );
 
     let result = f
         .client
         .try_resolve_withdrawal_dispute(&f.vault_id, &0u32, &true);
-    assert!(result.is_ok(), "Admin should be able to resolve: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Admin should be able to resolve: {:?}",
+        result
+    );
 
     let disputes = f.client.get_withdrawal_disputes(&f.vault_id);
     assert_eq!(disputes.get(0u32).unwrap().status, DisputeStatus::Resolved);

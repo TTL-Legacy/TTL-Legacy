@@ -4,11 +4,7 @@ extern crate alloc;
 
 use super::*;
 use proptest::prelude::*;
-use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    vec, Address, Env,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, vec, Address, Env};
 
 fn setup_bps_env() -> (Env, Address, Address, TtlVaultContractClient<'static>) {
     let env = Env::default();
@@ -17,7 +13,9 @@ fn setup_bps_env() -> (Env, Address, Address, TtlVaultContractClient<'static>) {
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let token_address = env.register_stellar_asset_contract_v2(token_admin).address();
+    let token_address = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
 
     StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
 
@@ -46,14 +44,30 @@ fn bps_sum_invariant_after_set_beneficiaries() {
 
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 5_000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b2.clone(), bps: 3_000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b3.clone(), bps: 2_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 5_000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b2.clone(),
+            bps: 3_000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b3.clone(),
+            bps: 2_000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
     let stored = client.get_vault(&vault_id).beneficiaries;
-    assert_eq!(bps_sum(&stored), 10_000, "BPS sum must equal 10_000 after set_beneficiaries");
+    assert_eq!(
+        bps_sum(&stored),
+        10_000,
+        "BPS sum must equal 10_000 after set_beneficiaries"
+    );
 }
 
 #[test]
@@ -67,14 +81,26 @@ fn bps_sum_invariant_after_cap_application() {
     // Set beneficiaries with valid BPS split — caps are applied at release, not at set time
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 7_000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b2.clone(), bps: 3_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 7_000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b2.clone(),
+            bps: 3_000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
     // BPS allocation stored in the vault remains unchanged after cap operations
     let stored = client.get_vault(&vault_id).beneficiaries;
-    assert_eq!(bps_sum(&stored), 10_000, "BPS sum must equal 10_000 after cap application");
+    assert_eq!(
+        bps_sum(&stored),
+        10_000,
+        "BPS sum must equal 10_000 after cap application"
+    );
 }
 
 #[test]
@@ -86,8 +112,16 @@ fn bps_sum_invariant_two_beneficiaries_equal_split() {
     let vault_id = client.create_vault(&owner, &b1, &3600u64, &None);
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 5_000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b2.clone(), bps: 5_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 5_000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b2.clone(),
+            bps: 5_000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
@@ -102,7 +136,11 @@ fn bps_sum_invariant_single_beneficiary_full_allocation() {
     let vault_id = client.create_vault(&owner, &b1, &3600u64, &None);
     let entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 10_000,
+            minimum_threshold: 0,
+        },
     ];
     client.set_beneficiaries(&vault_id, &owner, &entries);
 
@@ -118,11 +156,22 @@ fn bps_sum_invariant_set_rejects_non_10000() {
     let vault_id = client.create_vault(&owner, &b1, &3600u64, &None);
     let bad_entries = vec![
         &env,
-        BeneficiaryEntry { address: b1.clone(), bps: 4_000, minimum_threshold: 0 },
-        BeneficiaryEntry { address: b2.clone(), bps: 4_000, minimum_threshold: 0 },
+        BeneficiaryEntry {
+            address: b1.clone(),
+            bps: 4_000,
+            minimum_threshold: 0,
+        },
+        BeneficiaryEntry {
+            address: b2.clone(),
+            bps: 4_000,
+            minimum_threshold: 0,
+        },
     ];
     let result = client.try_set_beneficiaries(&vault_id, &owner, &bad_entries);
-    assert!(result.is_err(), "set_beneficiaries must reject BPS sum != 10_000");
+    assert!(
+        result.is_err(),
+        "set_beneficiaries must reject BPS sum != 10_000"
+    );
 }
 
 // ── Proptest invariant ────────────────────────────────────────────────────────

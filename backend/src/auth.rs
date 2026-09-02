@@ -52,14 +52,22 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-fn issue_access_token(secret: &[u8], sub: &str, vault_ids: Vec<String>) -> Result<String, AppError> {
+fn issue_access_token(
+    secret: &[u8],
+    sub: &str,
+    vault_ids: Vec<String>,
+) -> Result<String, AppError> {
     let claims = AuthClaims {
         sub: sub.to_string(),
         vault_ids,
         exp: (now_unix() + ACCESS_TOKEN_TTL_SECONDS) as usize,
     };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
-        .map_err(|e| AppError::Unauthorized(format!("failed to issue access token: {e}")))
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret),
+    )
+    .map_err(|e| AppError::Unauthorized(format!("failed to issue access token: {e}")))
 }
 
 /// Issues a new refresh token, persists its record, and returns the signed JWT.
@@ -81,8 +89,12 @@ fn issue_refresh_token(
         family_id: family_id.to_string(),
         exp: (now_unix() + REFRESH_TOKEN_TTL_SECONDS) as usize,
     };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
-        .map_err(|e| AppError::Unauthorized(format!("failed to issue refresh token: {e}")))
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret),
+    )
+    .map_err(|e| AppError::Unauthorized(format!("failed to issue refresh token: {e}")))
 }
 
 /// POST /api/auth/token
@@ -190,28 +202,47 @@ mod tests {
 
         let login_resp = login(
             State(Arc::clone(&db)),
-            ExtractJson(LoginRequest { sub: "GABC...OWNER".into(), vault_ids: vec!["v1".into()] }),
+            ExtractJson(LoginRequest {
+                sub: "GABC...OWNER".into(),
+                vault_ids: vec!["v1".into()],
+            }),
         )
         .await
         .unwrap();
         let first_refresh = login_resp.0.refresh_token.clone();
 
         // First use rotates successfully and yields a different refresh token.
-        let refreshed = refresh(State(Arc::clone(&db)), ExtractJson(RefreshRequest { refresh_token: first_refresh.clone() }))
-            .await
-            .unwrap();
+        let refreshed = refresh(
+            State(Arc::clone(&db)),
+            ExtractJson(RefreshRequest {
+                refresh_token: first_refresh.clone(),
+            }),
+        )
+        .await
+        .unwrap();
         assert_ne!(refreshed.0.refresh_token, first_refresh);
 
         // Reusing the now-rotated-out original token must be rejected.
-        let reuse_result = refresh(State(Arc::clone(&db)), ExtractJson(RefreshRequest { refresh_token: first_refresh })).await;
-        assert!(reuse_result.is_err(), "reusing a rotated refresh token must fail");
+        let reuse_result = refresh(
+            State(Arc::clone(&db)),
+            ExtractJson(RefreshRequest {
+                refresh_token: first_refresh,
+            }),
+        )
+        .await;
+        assert!(
+            reuse_result.is_err(),
+            "reusing a rotated refresh token must fail"
+        );
 
         // ...and reuse detection must have revoked the whole family: even the
         // *second* (still-fresh) token from the successful rotation above is
         // now unusable.
         let second_refresh_reuse = refresh(
             State(Arc::clone(&db)),
-            ExtractJson(RefreshRequest { refresh_token: refreshed.0.refresh_token.clone() }),
+            ExtractJson(RefreshRequest {
+                refresh_token: refreshed.0.refresh_token.clone(),
+            }),
         )
         .await;
         assert!(
@@ -225,7 +256,14 @@ mod tests {
     #[tokio::test]
     async fn login_rejects_empty_sub() {
         let (db, path) = test_db().await;
-        let result = login(State(db), ExtractJson(LoginRequest { sub: "".into(), vault_ids: vec![] })).await;
+        let result = login(
+            State(db),
+            ExtractJson(LoginRequest {
+                sub: "".into(),
+                vault_ids: vec![],
+            }),
+        )
+        .await;
         assert!(result.is_err());
         let _ = std::fs::remove_file(path);
     }
@@ -236,12 +274,22 @@ mod tests {
         let secret = jwt_secret();
         let bogus = issue_refresh_token(&db, &secret, "someone", "some-family").unwrap();
         // Delete the underlying record so the JWT is well-formed but unknown.
-        let claims = decode::<RefreshClaims>(&bogus, &DecodingKey::from_secret(&secret), &Validation::default())
-            .unwrap()
-            .claims;
+        let claims = decode::<RefreshClaims>(
+            &bogus,
+            &DecodingKey::from_secret(&secret),
+            &Validation::default(),
+        )
+        .unwrap()
+        .claims;
         db.revoke_refresh_token(&claims.jti).unwrap();
 
-        let result = refresh(State(db), ExtractJson(RefreshRequest { refresh_token: bogus })).await;
+        let result = refresh(
+            State(db),
+            ExtractJson(RefreshRequest {
+                refresh_token: bogus,
+            }),
+        )
+        .await;
         assert!(result.is_err());
         let _ = std::fs::remove_file(path);
     }

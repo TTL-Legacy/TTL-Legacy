@@ -51,7 +51,10 @@ fn setup() -> (
 
 fn encrypted_contact(env: &Env) -> Bytes {
     // Simulate a client-side encrypted payload (opaque bytes in tests)
-    Bytes::from_slice(env, b"ENCRYPTED:email:beneficiary@example.com|sms:+15551234567")
+    Bytes::from_slice(
+        env,
+        b"ENCRYPTED:email:beneficiary@example.com|sms:+15551234567",
+    )
 }
 
 // ─── set_beneficiary_contact ──────────────────────────────────────────────────
@@ -264,7 +267,12 @@ fn test_overwrite_contact_info() {
     env.ledger().with_mut(|l| l.timestamp = 200);
     client.set_beneficiary_contact(&vault_id, &beneficiary, &new_blob);
 
-    let stored = client.get_beneficiary_contact(&vault_id, &beneficiary).unwrap();
-    assert_eq!(stored.encrypted_contact, new_blob, "contact should be updated");
+    let stored = client
+        .get_beneficiary_contact(&vault_id, &beneficiary)
+        .unwrap();
+    assert_eq!(
+        stored.encrypted_contact, new_blob,
+        "contact should be updated"
+    );
     assert_eq!(stored.updated_at, 200, "timestamp should be updated");
 }

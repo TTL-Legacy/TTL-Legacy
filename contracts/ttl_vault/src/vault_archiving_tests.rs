@@ -32,7 +32,7 @@ mod tests {
 
         // Create and release a vault
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
-        
+
         // Manually mark vault as released for testing
         let mut vault = client.get_vault(&vault_id);
         vault.status = ReleaseStatus::Released;
@@ -51,7 +51,7 @@ mod tests {
 
         // Create a vault
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
-        
+
         // Manually mark vault as cancelled for testing
         let mut vault = client.get_vault(&vault_id);
         vault.status = ReleaseStatus::Cancelled;
@@ -74,7 +74,7 @@ mod tests {
         let result = client.try_archive_vault(&vault_id);
         assert!(result.is_err(), "Archiving active vault should fail");
         match result.unwrap_err().unwrap() {
-            ContractError::NotReleased => {},
+            ContractError::NotReleased => {}
             e => panic!("Expected NotReleased, got {:?}", e),
         }
     }
@@ -87,7 +87,7 @@ mod tests {
 
         // Create a vault
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
-        
+
         // Manually mark vault as frozen for testing
         let mut vault = client.get_vault(&vault_id);
         vault.status = ReleaseStatus::EmergencyFrozen;
@@ -107,7 +107,7 @@ mod tests {
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
         let mut vault = client.get_vault(&vault_id);
         vault.status = ReleaseStatus::Released;
-        
+
         let result = client.try_archive_vault(&vault_id);
         assert!(result.is_ok());
 
@@ -151,14 +151,17 @@ mod tests {
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
         let mut vault = client.get_vault(&vault_id);
         vault.status = ReleaseStatus::Released;
-        
+
         client.archive_vault(&vault_id);
 
         // Try to archive again
         let result = client.try_archive_vault(&vault_id);
-        assert!(result.is_err(), "Archiving already-archived vault should fail");
+        assert!(
+            result.is_err(),
+            "Archiving already-archived vault should fail"
+        );
         match result.unwrap_err().unwrap() {
-            ContractError::DuplicateVault => {},
+            ContractError::DuplicateVault => {}
             e => panic!("Expected DuplicateVault, got {:?}", e),
         }
     }
@@ -169,20 +172,23 @@ mod tests {
     fn test_archive_multiple_vaults() {
         let (env, owner, beneficiary, client) = setup();
 
-        let mut vault_ids = vec![];
+        let mut vault_ids: Vec<u64> = Vec::new();
         for i in 0..3 {
             let b = Address::generate(&env);
             let vault_id = client.create_vault(&owner, &b, &(86400 + i * 1000), &None);
             let mut vault = client.get_vault(&vault_id);
             vault.status = ReleaseStatus::Released;
-            
+
             client.archive_vault(&vault_id);
             vault_ids.push(vault_id);
         }
 
         // Verify all are archived
         for vault_id in vault_ids {
-            assert!(client.vault_is_archived(&vault_id), "All vaults should be archived");
+            assert!(
+                client.vault_is_archived(&vault_id),
+                "All vaults should be archived"
+            );
             let archived = client.get_archived_vault(&vault_id);
             assert_eq!(archived.status, ReleaseStatus::Released);
         }
@@ -196,7 +202,7 @@ mod tests {
 
         // Create vault
         let vault_id = client.create_vault(&owner, &beneficiary, &86400, &None);
-        
+
         // Get vault before archiving
         let vault_before = client.get_vault(&vault_id);
         let check_in_interval_before = vault_before.check_in_interval;
@@ -231,8 +237,11 @@ mod tests {
         // Different address archives the vault
         let archiver = Address::generate(&env);
         env.mock_all_auths();
-        
+
         let result = client.try_archive_vault(&vault_id);
-        assert!(result.is_ok(), "Anyone should be able to archive a released vault");
+        assert!(
+            result.is_ok(),
+            "Anyone should be able to archive a released vault"
+        );
     }
 }

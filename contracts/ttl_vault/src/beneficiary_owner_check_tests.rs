@@ -32,7 +32,10 @@ mod tests {
         let (_, owner, _, client) = setup();
 
         let result = client.try_create_vault(&owner, &owner, &86400, &None);
-        assert!(result.is_err(), "create_vault should reject owner as beneficiary");
+        assert!(
+            result.is_err(),
+            "create_vault should reject owner as beneficiary"
+        );
         // create_vault panics (via panic_with_error!) rather than returning a
         // Result, so the client surfaces the raw host error code here instead
         // of a typed ContractError.
@@ -58,7 +61,7 @@ mod tests {
             "update_beneficiary should reject owner as new beneficiary"
         );
         match result.unwrap_err().unwrap() {
-            ContractError::InvalidBeneficiary => {},
+            ContractError::InvalidBeneficiary => {}
             e => panic!("Expected InvalidBeneficiary, got {:?}", e),
         }
     }
@@ -73,7 +76,10 @@ mod tests {
         let new_beneficiary = Address::generate(&env);
 
         let result = client.try_update_beneficiary(&vault_id, &owner, &new_beneficiary);
-        assert!(result.is_ok(), "update_beneficiary should accept non-owner beneficiary");
+        assert!(
+            result.is_ok(),
+            "update_beneficiary should accept non-owner beneficiary"
+        );
     }
 
     /// Test that owner cannot update vault to assign themselves as beneficiary
@@ -87,7 +93,9 @@ mod tests {
         // First update succeeds with different beneficiary
         let new_ben1 = Address::generate(&env);
         assert!(
-            client.try_update_beneficiary(&vault_id, &owner, &new_ben1).is_ok(),
+            client
+                .try_update_beneficiary(&vault_id, &owner, &new_ben1)
+                .is_ok(),
             "First update with different beneficiary should succeed"
         );
 
@@ -98,14 +106,16 @@ mod tests {
             "Update to set owner as beneficiary should fail"
         );
         match result.unwrap_err().unwrap() {
-            ContractError::InvalidBeneficiary => {},
+            ContractError::InvalidBeneficiary => {}
             e => panic!("Expected InvalidBeneficiary, got {:?}", e),
         }
 
         // Third update succeeds with different beneficiary again
         let new_ben2 = Address::generate(&env);
         assert!(
-            client.try_update_beneficiary(&vault_id, &owner, &new_ben2).is_ok(),
+            client
+                .try_update_beneficiary(&vault_id, &owner, &new_ben2)
+                .is_ok(),
             "Subsequent update with different beneficiary should succeed"
         );
     }

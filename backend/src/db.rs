@@ -1,9 +1,8 @@
 use crate::models::{
-    Vault, VaultEvent, AuditEntry, SearchQuery, SearchResult, VaultStatus,
-    VaultBackup, VaultShare, VaultNotificationPreferences, AuditLogEntry, AuditLogQuery,
-    ReminderPreferences, Channel, Frequency,
-    Subscription, SubscriptionChannel, SubscriptionFrequency,
-    Passkey, RecoveryCode, RecoveryCodeSet,
+    AuditEntry, AuditLogEntry, AuditLogQuery, Channel, Frequency, Passkey, RecoveryCode,
+    RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult, Subscription,
+    SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
+    VaultNotificationPreferences, VaultShare, VaultStatus,
 };
 
 use chrono::Utc;
@@ -20,7 +19,6 @@ pub type NotificationStore = Arc<Mutex<HashMap<String, VaultNotificationPreferen
 pub type PasskeyStore = Arc<Mutex<Vec<Passkey>>>;
 pub type RecoveryCodeStore = Arc<Mutex<Vec<RecoveryCode>>>;
 pub type RecoveryCodeSetStore = Arc<Mutex<Vec<RecoveryCodeSet>>>;
-
 
 pub fn create_vault_store() -> VaultStore {
     Arc::new(Mutex::new(HashMap::new()))
@@ -85,10 +83,7 @@ pub struct AppState {
     pub recovery_code_set_store: RecoveryCodeSetStore,
 }
 
-pub fn search_vaults(
-    store: &VaultStore,
-    query: &SearchQuery,
-) -> SearchResult {
+pub fn search_vaults(store: &VaultStore, query: &SearchQuery) -> SearchResult {
     let vaults = store.lock().unwrap();
     let page = query.page.unwrap_or(1);
     let limit = query.limit.unwrap_or(10);
@@ -142,10 +137,7 @@ pub fn search_vaults(
     }
 }
 
-pub fn get_vault_history(
-    event_store: &EventStore,
-    vault_id: &str,
-) -> Vec<VaultEvent> {
+pub fn get_vault_history(event_store: &EventStore, vault_id: &str) -> Vec<VaultEvent> {
     event_store
         .lock()
         .unwrap()
@@ -155,15 +147,16 @@ pub fn get_vault_history(
         .collect()
 }
 
-pub fn get_vault_audit_log(
-    audit_store: &AuditStore,
-    vault_id: &str,
-) -> Vec<AuditEntry> {
+pub fn get_vault_audit_log(audit_store: &AuditStore, vault_id: &str) -> Vec<AuditEntry> {
     audit_store
         .lock()
         .unwrap()
         .iter()
-        .filter(|a| a.details.get("vault_id").map_or(false, |v| v.as_str() == Some(vault_id)))
+        .filter(|a| {
+            a.details
+                .get("vault_id")
+                .map_or(false, |v| v.as_str() == Some(vault_id))
+        })
         .cloned()
         .collect()
 }
@@ -171,16 +164,26 @@ pub fn get_vault_audit_log(
 // ── Task 1: Analytics ────────────────────────────────────────────────────────
 
 pub fn compute_vault_analytics(store: &VaultStore) -> crate::models::VaultAnalytics {
-    use crate::models::{VaultAnalytics, TimeSeriesPoint, VaultStatus};
+    use crate::models::{TimeSeriesPoint, VaultAnalytics, VaultStatus};
     use std::collections::BTreeMap;
 
     let vaults = store.lock().unwrap();
     let total_vaults = vaults.len() as u64;
-    let active_vaults = vaults.values().filter(|v| v.status == VaultStatus::Active).count() as u64;
-    let released_vaults = vaults.values().filter(|v| v.status == VaultStatus::Released).count() as u64;
+    let active_vaults = vaults
+        .values()
+        .filter(|v| v.status == VaultStatus::Active)
+        .count() as u64;
+    let released_vaults = vaults
+        .values()
+        .filter(|v| v.status == VaultStatus::Released)
+        .count() as u64;
 
     let avg_ttl = if total_vaults > 0 {
-        vaults.values().map(|v| v.check_in_interval as f64).sum::<f64>() / total_vaults as f64
+        vaults
+            .values()
+            .map(|v| v.check_in_interval as f64)
+            .sum::<f64>()
+            / total_vaults as f64
     } else {
         0.0
     };
@@ -229,10 +232,16 @@ pub fn compute_vault_analytics(store: &VaultStore) -> crate::models::VaultAnalyt
 // ── Task 2: Backup & Recovery ─────────────────────────────────────────────────
 
 pub fn store_backup(backup_store: &BackupStore, backup: crate::models::VaultBackup) {
-    backup_store.lock().unwrap().insert(backup.backup_id.clone(), backup);
+    backup_store
+        .lock()
+        .unwrap()
+        .insert(backup.backup_id.clone(), backup);
 }
 
-pub fn get_backup(backup_store: &BackupStore, backup_id: &str) -> Option<crate::models::VaultBackup> {
+pub fn get_backup(
+    backup_store: &BackupStore,
+    backup_id: &str,
+) -> Option<crate::models::VaultBackup> {
     backup_store.lock().unwrap().get(backup_id).cloned()
 }
 
@@ -242,7 +251,10 @@ pub fn add_vault_share(share_store: &ShareStore, share: crate::models::VaultShar
     share_store.lock().unwrap().push(share);
 }
 
-pub fn get_vault_shares(share_store: &ShareStore, vault_id: &str) -> Vec<crate::models::VaultShare> {
+pub fn get_vault_shares(
+    share_store: &ShareStore,
+    vault_id: &str,
+) -> Vec<crate::models::VaultShare> {
     share_store
         .lock()
         .unwrap()
@@ -284,7 +296,12 @@ pub fn revoke_share_token(store: &ShareTokenStore, token: &str) -> Option<ShareT
 
 // ── Audit helper ─────────────────────────────────────────────────────────────
 
-pub fn append_audit_entry(audit_store: &AuditStore, action: &str, actor: &str, details: serde_json::Value) {
+pub fn append_audit_entry(
+    audit_store: &AuditStore,
+    action: &str,
+    actor: &str,
+    details: serde_json::Value,
+) {
     audit_store.lock().unwrap().push(AuditEntry {
         timestamp: Utc::now(),
         action: action.to_string(),
@@ -298,7 +315,6 @@ pub fn append_audit_entry(audit_store: &AuditStore, action: &str, actor: &str, d
 pub fn set_notification_preferences(
     notif_store: &NotificationStore,
     prefs: crate::models::VaultNotificationPreferences,
-
 ) {
     notif_store
         .lock()
@@ -310,7 +326,6 @@ pub fn get_notification_preferences(
     notif_store: &NotificationStore,
     owner: &str,
 ) -> Option<crate::models::VaultNotificationPreferences> {
-
     notif_store.lock().unwrap().get(owner).cloned()
 }
 
@@ -325,9 +340,7 @@ impl Db {
     ) -> Result<(), rusqlite::Error> {
         // Store DateTimes as RFC3339 strings.
         let purchased_at = policy.purchased_at.to_rfc3339();
-        let last_extended_at = policy
-            .last_extended_at
-            .map(|d| d.to_rfc3339());
+        let last_extended_at = policy.last_extended_at.map(|d| d.to_rfc3339());
 
         let enabled_i = if policy.enabled { 1i64 } else { 0i64 };
 
@@ -361,7 +374,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_insurance_policy(&self, vault_id: u64) -> Result<Option<TtlInsurancePolicy>, rusqlite::Error> {
+    pub fn get_insurance_policy(
+        &self,
+        vault_id: u64,
+    ) -> Result<Option<TtlInsurancePolicy>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
             r#"
@@ -375,14 +391,26 @@ impl Db {
             let purchased_at_str: String = r.get(4)?;
             let purchased_at = chrono::DateTime::parse_from_rfc3339(&purchased_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
 
             let last_extended_at: Option<String> = r.get(5)?;
             let last_extended_at_dt = match last_extended_at {
                 Some(s) => {
                     let dt = chrono::DateTime::parse_from_rfc3339(&s)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
                     Some(dt)
                 }
                 None => None,
@@ -407,7 +435,11 @@ impl Db {
         }
     }
 
-    pub fn upsert_owner_activity(&self, owner_id: u64, last_active_at: chrono::DateTime<chrono::Utc>) -> Result<(), rusqlite::Error> {
+    pub fn upsert_owner_activity(
+        &self,
+        owner_id: u64,
+        last_active_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.lock().unwrap().execute(
             r#"
             INSERT INTO owner_activity (owner_id, last_active_at)
@@ -415,10 +447,7 @@ impl Db {
             ON CONFLICT(owner_id) DO UPDATE SET
                 last_active_at = excluded.last_active_at
             "#,
-            params![
-                owner_id as i64,
-                last_active_at.to_rfc3339(),
-            ],
+            params![owner_id as i64, last_active_at.to_rfc3339(),],
         )?;
         Ok(())
     }
@@ -436,13 +465,20 @@ impl Db {
             "#,
         )?;
 
-        let row_res: Result<String, rusqlite::Error> = stmt.query_row(params![owner_id as i64], |r| r.get(0));
+        let row_res: Result<String, rusqlite::Error> =
+            stmt.query_row(params![owner_id as i64], |r| r.get(0));
 
         match row_res {
             Ok(s) => {
                 let dt = chrono::DateTime::parse_from_rfc3339(&s)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
                 Ok(Some(dt))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -450,7 +486,9 @@ impl Db {
         }
     }
 
-    pub fn all_enabled_insurance_policies(&self) -> Result<Vec<TtlInsurancePolicy>, rusqlite::Error> {
+    pub fn all_enabled_insurance_policies(
+        &self,
+    ) -> Result<Vec<TtlInsurancePolicy>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
             r#"
@@ -464,14 +502,26 @@ impl Db {
             let purchased_at_str: String = r.get(4)?;
             let purchased_at = chrono::DateTime::parse_from_rfc3339(&purchased_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
 
             let last_extended_at: Option<String> = r.get(5)?;
             let last_extended_at_dt = match last_extended_at {
                 Some(s) => {
                     let dt = chrono::DateTime::parse_from_rfc3339(&s)
                         .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            )
+                        })?;
                     Some(dt)
                 }
                 None => None,
@@ -496,7 +546,6 @@ impl Db {
         Ok(out)
     }
 }
-
 
 use rusqlite::{params, Connection};
 
@@ -563,7 +612,10 @@ impl Db {
 
     /// Insert or replace a vault in the in-memory store.
     pub fn insert_vault(&self, vault: crate::models::Vault) {
-        self.vault_store.lock().unwrap().insert(vault.id.clone(), vault);
+        self.vault_store
+            .lock()
+            .unwrap()
+            .insert(vault.id.clone(), vault);
     }
 
     /// Retrieve a vault from the in-memory store by string ID.
@@ -576,7 +628,6 @@ impl Db {
         conn.execute_batch("SELECT 1")?;
         Ok(())
     }
-
 
     pub fn migrate(&self) -> Result<(), rusqlite::Error> {
         // Bootstrap the migration tracking table before anything else.
@@ -786,7 +837,6 @@ impl Db {
 
         Ok(())
     }
-
 
     pub fn upsert(&self, prefs: &ReminderPreferences) -> Result<(), rusqlite::Error> {
         let channels_json = serde_json::to_string(&prefs.channels).unwrap();
@@ -1008,7 +1058,8 @@ impl Db {
         let row = stmt.query_row(params![vault_id as i64], |r| {
             let channels_str: String = r.get(2)?;
             let frequency_str: String = r.get(3)?;
-            let channels: Vec<SubscriptionChannel> = serde_json::from_str(&channels_str).unwrap_or_default();
+            let channels: Vec<SubscriptionChannel> =
+                serde_json::from_str(&channels_str).unwrap_or_default();
             let frequency: SubscriptionFrequency = serde_json::from_str(&frequency_str).unwrap();
             Ok(Subscription {
                 vault_id: r.get::<_, i64>(0)? as u64,
@@ -1030,7 +1081,12 @@ impl Db {
         let _ = self.conn.lock().unwrap().execute(
             r#"INSERT OR REPLACE INTO idempotency_keys (key, status_code, response_body, created_at)
                VALUES (?1, ?2, ?3, ?4)"#,
-            params![key, status_code as i64, response_body, chrono::Utc::now().to_rfc3339()],
+            params![
+                key,
+                status_code as i64,
+                response_body,
+                chrono::Utc::now().to_rfc3339()
+            ],
         );
     }
 
@@ -1043,8 +1099,16 @@ impl Db {
             let created_str: String = r.get(3)?;
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
-            let age = chrono::Utc::now().signed_duration_since(created_at).num_seconds();
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let age = chrono::Utc::now()
+                .signed_duration_since(created_at)
+                .num_seconds();
             if age > 86_400 {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
@@ -1157,7 +1221,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn query_audit_logs(&self, query: &AuditLogQuery) -> Result<Vec<AuditLogEntry>, rusqlite::Error> {
+    pub fn query_audit_logs(
+        &self,
+        query: &AuditLogQuery,
+    ) -> Result<Vec<AuditLogEntry>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
 
         let mut sql = String::from(
@@ -1198,16 +1265,21 @@ impl Db {
         param_values.push(Box::new(limit));
         param_values.push(Box::new(offset));
 
-        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
 
         let rows = stmt.query_map(params.as_slice(), |r| {
             let timestamp_str: String = r.get(1)?;
             let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                    1, rusqlite::types::Type::Text, Box::new(e),
-                ))?;
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
             let details_str: Option<String> = r.get(7)?;
             let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
 
@@ -1257,7 +1329,11 @@ impl Db {
             let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .map_err(|e| {
-                    rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
                 })?;
             let details_str: Option<String> = r.get(7)?;
             let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
@@ -1309,12 +1385,15 @@ impl Db {
         jti: &str,
     ) -> Result<Option<(String, String, bool)>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT family_id, sub, revoked_at FROM refresh_tokens WHERE jti = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT family_id, sub, revoked_at FROM refresh_tokens WHERE jti = ?1")?;
         let row = stmt.query_row(params![jti], |r| {
             let revoked_at: Option<String> = r.get(2)?;
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, revoked_at.is_some()))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                revoked_at.is_some(),
+            ))
         });
         match row {
             Ok(v) => Ok(Some(v)),
@@ -1344,7 +1423,10 @@ impl Db {
 
     // ── Sponsored Release tracking (#1122) ───────────────────────────────────
 
-    pub fn insert_sponsored_release(&self, release: &crate::fee_sponsorship::SponsoredRelease) -> Result<(), rusqlite::Error> {
+    pub fn insert_sponsored_release(
+        &self,
+        release: &crate::fee_sponsorship::SponsoredRelease,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.lock().unwrap().execute(
             r#"
             INSERT INTO sponsored_releases (
@@ -1373,7 +1455,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_sponsored_release(&self, tx_id: &str) -> Result<Option<crate::fee_sponsorship::SponsoredRelease>, rusqlite::Error> {
+    pub fn get_sponsored_release(
+        &self,
+        tx_id: &str,
+    ) -> Result<Option<crate::fee_sponsorship::SponsoredRelease>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
             r#"
@@ -1399,7 +1484,13 @@ impl Db {
             let created_at_str: String = r.get(10)?;
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e)))?;
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
 
             let executed_at_str: Option<String> = r.get(11)?;
             let executed_at = executed_at_str.and_then(|s| {
@@ -1435,7 +1526,10 @@ impl Db {
         }
     }
 
-    pub fn list_sponsored_releases_for_vault(&self, vault_id: &str) -> Result<Vec<crate::fee_sponsorship::SponsoredRelease>, rusqlite::Error> {
+    pub fn list_sponsored_releases_for_vault(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<crate::fee_sponsorship::SponsoredRelease>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
             r#"
@@ -1462,7 +1556,13 @@ impl Db {
             let created_at_str: String = r.get(10)?;
             let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e)))?;
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        10,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
 
             let executed_at_str: Option<String> = r.get(11)?;
             let executed_at = executed_at_str.and_then(|s| {
@@ -1535,11 +1635,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn fail_sponsored_release(
-        &self,
-        tx_id: &str,
-        error: &str,
-    ) -> Result<(), rusqlite::Error> {
+    pub fn fail_sponsored_release(&self, tx_id: &str, error: &str) -> Result<(), rusqlite::Error> {
         self.conn.lock().unwrap().execute(
             r#"
             UPDATE sponsored_releases
@@ -1556,7 +1652,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_vesting_bonus(&self, vault_id: &str) -> Result<Option<crate::models::VestingBonusConfig>, rusqlite::Error> {
+    pub fn get_vesting_bonus(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<crate::models::VestingBonusConfig>, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"SELECT vault_id, bonus_bps, on_time_window_seconds
@@ -1577,7 +1676,10 @@ impl Db {
         }
     }
 
-    pub fn upsert_vesting_bonus(&self, config: &crate::models::VestingBonusConfig) -> Result<(), rusqlite::Error> {
+    pub fn upsert_vesting_bonus(
+        &self,
+        config: &crate::models::VestingBonusConfig,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.lock().unwrap().execute(
             r#"
             INSERT INTO vesting_bonus_config (vault_id, bonus_bps, on_time_window_seconds)
@@ -1641,26 +1743,27 @@ impl Db {
             "#,
         )?;
 
-        let row_res = stmt.query_row(
-            params![vault_id, beneficiary_address],
-            |r| {
-                let updated_at_str: String = r.get(5)?;
-                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        5, rusqlite::types::Type::Text, Box::new(e),
-                    ))?;
-                let opted_in_i: i64 = r.get(4)?;
-                Ok(crate::models::BeneficiaryContact {
-                    vault_id: r.get(0)?,
-                    beneficiary_address: r.get(1)?,
-                    email: r.get(2)?,
-                    phone: r.get(3)?,
-                    opted_in: opted_in_i != 0,
-                    updated_at,
-                })
-            },
-        );
+        let row_res = stmt.query_row(params![vault_id, beneficiary_address], |r| {
+            let updated_at_str: String = r.get(5)?;
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let opted_in_i: i64 = r.get(4)?;
+            Ok(crate::models::BeneficiaryContact {
+                vault_id: r.get(0)?,
+                beneficiary_address: r.get(1)?,
+                email: r.get(2)?,
+                phone: r.get(3)?,
+                opted_in: opted_in_i != 0,
+                updated_at,
+            })
+        });
 
         match row_res {
             Ok(c) => Ok(Some(c)),
@@ -1687,9 +1790,13 @@ impl Db {
             let updated_at_str: String = r.get(5)?;
             let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                    5, rusqlite::types::Type::Text, Box::new(e),
-                ))?;
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
             let opted_in_i: i64 = r.get(4)?;
             Ok(crate::models::BeneficiaryContact {
                 vault_id: r.get(0)?,

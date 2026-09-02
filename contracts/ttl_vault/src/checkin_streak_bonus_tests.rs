@@ -210,7 +210,8 @@ fn test_streak_bonus_incentivizes_engagement() {
 
     // With streak bonus, TTL extension should be greater than base interval
     for _ in 0..3 {
-        env.ledger().set_timestamp(env.ledger().timestamp() + interval);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + interval);
         client.check_in(&vault_id, &owner, &None);
     }
 

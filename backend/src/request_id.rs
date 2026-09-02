@@ -32,10 +32,7 @@ use uuid::Uuid;
 
 /// Axum middleware that attaches a per-request correlation ID to the tracing
 /// span and to the `X-Request-ID` response header.
-pub async fn request_id_middleware(
-    mut req: Request<Body>,
-    next: Next,
-) -> Response<Body> {
+pub async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response<Body> {
     // Extract or generate the request ID.
     let request_id = req
         .headers()

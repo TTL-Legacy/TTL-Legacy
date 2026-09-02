@@ -45,10 +45,7 @@ fn test_check_in_nonexistent_vault_returns_vault_not_found() {
 
     match result.unwrap_err().unwrap() {
         ContractError::VaultNotFound => {}
-        other => panic!(
-            "Expected ContractError::VaultNotFound, got {:?}",
-            other
-        ),
+        other => panic!("Expected ContractError::VaultNotFound, got {:?}", other),
     }
 }
 

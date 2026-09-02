@@ -54,9 +54,7 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 /// - `Secure` – only transmitted over HTTPS (enforced by `__Host-` prefix too).
 /// - `Path=/` – required by `__Host-` prefix rules.
 pub fn csrf_cookie_header_value(token: &str) -> String {
-    format!(
-        "{CSRF_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Secure; Path=/"
-    )
+    format!("{CSRF_COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Secure; Path=/")
 }
 
 // ── Error response ────────────────────────────────────────────────────────────
@@ -81,12 +79,7 @@ fn csrf_forbidden() -> Response {
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 /// Paths that bypass CSRF validation entirely (diagnostics / token issuance).
-const EXEMPT_PATHS: &[&str] = &[
-    "/health",
-    "/health/consensus",
-    "/ready",
-    "/api/csrf-token",
-];
+const EXEMPT_PATHS: &[&str] = &["/health", "/health/consensus", "/ready", "/api/csrf-token"];
 
 /// Axum middleware that enforces CSRF token validation on state-mutating
 /// requests.
@@ -160,9 +153,7 @@ pub async fn csrf_token_handler() -> impl IntoResponse {
             ("Set-Cookie", cookie),
             ("Content-Type", "application/json".to_owned()),
         ],
-        Json(CsrfTokenResponse {
-            csrf_token: token,
-        }),
+        Json(CsrfTokenResponse { csrf_token: token }),
     )
 }
 
@@ -204,10 +195,7 @@ mod unit_tests {
             "cookie",
             "__Host-csrf=my-token; other=value".parse().unwrap(),
         );
-        assert_eq!(
-            extract_cookie_token(&headers),
-            Some("my-token".to_owned())
-        );
+        assert_eq!(extract_cookie_token(&headers), Some("my-token".to_owned()));
     }
 
     #[test]

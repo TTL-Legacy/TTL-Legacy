@@ -9,7 +9,6 @@
 ///   - A tier is only dispatched once within a 24-hour window (deduplication).
 ///   - The scheduler promotes to the next tier when TTL crosses the threshold.
 ///   - Every dispatch is written to the escalation_events audit table.
-
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -124,12 +123,7 @@ async fn dispatch_escalation(db: &Arc<Db>, vault_id: u64, tier: EscalationTier) 
     let now = Utc::now();
     let event_id = Uuid::new_v4().to_string();
 
-    tracing::info!(
-        vault_id,
-        ?tier,
-        ?channels,
-        "escalation: dispatching tier"
-    );
+    tracing::info!(vault_id, ?tier, ?channels, "escalation: dispatching tier");
 
     // Stub: in production, call email/SMS/emergency-contact providers here.
     send_escalation_notifications(vault_id, tier, &channels).await;
@@ -178,12 +172,7 @@ async fn dispatch_escalation(db: &Arc<Db>, vault_id: u64, tier: EscalationTier) 
 /// Replace with real email/SMS/emergency-contact integrations in production.
 async fn send_escalation_notifications(vault_id: u64, tier: EscalationTier, channels: &[String]) {
     for channel in channels {
-        tracing::info!(
-            vault_id,
-            ?tier,
-            channel,
-            "escalation: sending notification"
-        );
+        tracing::info!(vault_id, ?tier, channel, "escalation: sending notification");
     }
 }
 
@@ -283,7 +272,11 @@ mod tests {
         // Now TTL drops to T2 threshold — should promote.
         evaluate_vault(&db, 7, 48).await;
         let events = db.get_escalation_events(7).unwrap();
-        assert_eq!(events.len(), 2, "two escalation events expected (T1 then T2)");
+        assert_eq!(
+            events.len(),
+            2,
+            "two escalation events expected (T1 then T2)"
+        );
         // The most recent event should be T2.
         assert_eq!(events[0].tier, EscalationTier::T2);
     }

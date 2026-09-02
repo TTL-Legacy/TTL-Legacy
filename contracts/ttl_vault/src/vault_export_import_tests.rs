@@ -113,7 +113,9 @@ fn test_import_vault_recreates_config() {
     // A new vault ID is assigned.
     assert_ne!(new_vault_id, vault_id, "import should create a new vault");
 
-    let new_vault = client.get_vault(&new_vault_id).expect("new vault should exist");
+    let new_vault = client
+        .get_vault(&new_vault_id)
+        .expect("new vault should exist");
     assert_eq!(new_vault.owner, owner);
     assert_eq!(new_vault.beneficiary, beneficiary);
     assert_eq!(new_vault.check_in_interval, interval);
@@ -188,11 +190,7 @@ fn test_export_import_preserves_multi_beneficiary_split() {
     let new_vault = client.get_vault(&new_id).unwrap();
     assert_eq!(new_vault.beneficiaries.len(), 2);
     assert_eq!(
-        new_vault
-            .beneficiaries
-            .iter()
-            .map(|e| e.bps)
-            .sum::<u32>(),
+        new_vault.beneficiaries.iter().map(|e| e.bps).sum::<u32>(),
         10_000
     );
 }

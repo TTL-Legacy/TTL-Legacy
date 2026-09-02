@@ -38,18 +38,18 @@ mod openapi_contract {
     // Derived from docs/openapi.yaml. Update this list whenever routes change.
     // Format: (method, path_template)
     const ROUTES: &[(&str, &str)] = &[
-        ("GET",    "/health"),
-        ("GET",    "/api/vaults/{vault_id}/reminders"),
-        ("POST",   "/api/vaults/{vault_id}/reminders"),
-        ("GET",    "/api/vaults/{vault_id}/preferences"),
-        ("POST",   "/api/vaults/{vault_id}/preferences"),
+        ("GET", "/health"),
+        ("GET", "/api/vaults/{vault_id}/reminders"),
+        ("POST", "/api/vaults/{vault_id}/reminders"),
+        ("GET", "/api/vaults/{vault_id}/preferences"),
+        ("POST", "/api/vaults/{vault_id}/preferences"),
         ("DELETE", "/api/vaults/{vault_id}/preferences"),
-        ("GET",    "/api/unsubscribe"),
-        ("GET",    "/api/vaults/{vault_id}/simulate-release"),
-        ("POST",   "/api/vaults/{vault_id}/sponsored-release"),
-        ("GET",    "/api/vaults/{vault_id}/sponsored-release"),
-        ("POST",   "/api/vaults/{vault_id}/vesting/claim-bonus"),
-        ("GET",    "/api/vaults/{vault_id}/vesting/bonus"),
+        ("GET", "/api/unsubscribe"),
+        ("GET", "/api/vaults/{vault_id}/simulate-release"),
+        ("POST", "/api/vaults/{vault_id}/sponsored-release"),
+        ("GET", "/api/vaults/{vault_id}/sponsored-release"),
+        ("POST", "/api/vaults/{vault_id}/vesting/claim-bonus"),
+        ("GET", "/api/vaults/{vault_id}/vesting/bonus"),
     ];
 
     /// Checks that a route returns something other than 404.
