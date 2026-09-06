@@ -37,6 +37,8 @@ tags:
     description: Backup and recovery operations
   - name: Release Simulator
     description: Project vault release dates under different check-in behaviour scenarios
+  - name: Legal Document Anchoring
+    description: Anchor signed legal document hashes (will, trust deed, power of attorney) to vaults via SHA-256 on Stellar
 
 paths:
   /health:
@@ -802,6 +804,139 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  # ── Legal Document Anchoring (Issue #1339) ─────────────────────────────────
+
+  /api/vaults/{vault_id}/document-anchors:
+    post:
+      summary: Anchor a legal document hash
+      description: |
+        Records the SHA-256 hash of a signed legal document as an immutable
+        on-chain anchor tied to the vault.
+
+        **Raw document bytes are never sent to this endpoint** — only the
+        64-character hex-encoded SHA-256 hash is transmitted.
+
+        **Legal disclaimer**: this does not constitute legal execution of the
+        underlying document. It provides a cryptographic timestamp proof of
+        the document's existence. Consult a qualified legal professional for
+        estate-planning advice.
+      operationId: createDocumentAnchor
+      tags:
+        - Legal Document Anchoring
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Numeric vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnchorDocumentRequest'
+            examples:
+              will:
+                summary: Anchor a will
+                value:
+                  owner_address: "GABCDE..."
+                  doc_hash_hex: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+                  doc_type: "will"
+                  storage_ref: "ipfs://QmExampleCid"
+      responses:
+        '201':
+          description: Document anchored successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentAnchorRecord'
+        '422':
+          description: Invalid input (e.g. hash not 64 hex chars)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      summary: List document anchors for a vault
+      description: |
+        Returns all document anchor records for the vault, including
+        soft-removed ones. Filter client-side on `removed = false` to display
+        only active anchors.
+      operationId: listDocumentAnchors
+      tags:
+        - Legal Document Anchoring
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Numeric vault ID
+      responses:
+        '200':
+          description: List of document anchors
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentAnchorRecord'
+        '422':
+          description: Invalid vault_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/document-anchors/{doc_id}:
+    delete:
+      summary: Soft-remove a document anchor
+      description: |
+        Marks a document anchor as removed (`removed = true`). The hash record
+        is preserved permanently for audit purposes — on-chain history cannot
+        be mutated.
+      operationId: deleteDocumentAnchor
+      tags:
+        - Legal Document Anchoring
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Numeric vault ID
+        - name: doc_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+          description: Sequential document ID within the vault
+      responses:
+        '204':
+          description: Anchor soft-removed successfully (no body)
+        '404':
+          description: Anchor not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ErrorResponse:
@@ -1362,6 +1497,77 @@ components:
         - last_check_in
         - scenarios
         - simulated_at
+
+    # ── Legal Document Anchoring schemas (Issue #1339) ──────────────────────
+
+    LegalDocumentType:
+      type: string
+      enum: [will, trust_deed, power_of_attorney, other]
+      description: Category of the legal document being anchored
+
+    AnchorDocumentRequest:
+      type: object
+      description: Request body for anchoring a legal document hash
+      properties:
+        owner_address:
+          type: string
+          description: Stellar account address of the vault owner
+        doc_hash_hex:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: Hex-encoded SHA-256 hash of the document (64 characters)
+        doc_type:
+          $ref: '#/components/schemas/LegalDocumentType'
+        storage_ref:
+          type: string
+          maxLength: 128
+          nullable: true
+          description: Optional IPFS CID or off-chain storage reference (max 128 chars)
+      required:
+        - owner_address
+        - doc_hash_hex
+        - doc_type
+
+    DocumentAnchorRecord:
+      type: object
+      description: An anchored legal document hash record
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Database row ID
+        vault_id:
+          type: string
+          description: Vault the anchor belongs to
+        doc_id:
+          type: integer
+          format: int32
+          description: Sequential document ID within the vault (1-indexed)
+        doc_hash_hex:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: Hex-encoded SHA-256 hash of the anchored document
+        doc_type:
+          $ref: '#/components/schemas/LegalDocumentType'
+        storage_ref:
+          type: string
+          nullable: true
+          description: Optional off-chain storage reference
+        anchored_at:
+          type: string
+          format: date-time
+          description: UTC timestamp when the anchor was recorded
+        removed:
+          type: boolean
+          description: Whether the owner has soft-removed this anchor
+      required:
+        - id
+        - vault_id
+        - doc_id
+        - doc_hash_hex
+        - doc_type
+        - anchored_at
+        - removed
 
   securitySchemes:
     ApiKeyAuth:

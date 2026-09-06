@@ -558,6 +558,10 @@ pub enum StorageKey {
     VaultLowTtlThreshold(u64),
     // Issue #1337: beneficiary archival notification contact info
     BeneficiaryContactInfo(u64, Address),
+    // Issue #1339: legal document anchor (keyed by vault_id + doc_id)
+    LegalDocumentAnchor(u64, u32),
+    // Issue #1339: count of legal document anchors per vault
+    LegalDocumentAnchorCount(u64),
 }
 
 
@@ -1726,6 +1730,10 @@ pub const TRANCHE_CLAIMED_TOPIC: Symbol = symbol_short!("tr_claim");
 pub const VAULT_EXPORTED_TOPIC: Symbol = symbol_short!("v_export");
 pub const VAULT_IMPORTED_TOPIC: Symbol = symbol_short!("v_import");
 
+// Issue #1339: legal document anchoring
+pub const DOC_ANCHORED_TOPIC: Symbol = symbol_short!("doc_anch");
+pub const DOC_REMOVED_TOPIC: Symbol = symbol_short!("doc_rem");
+
 /// Exported vault configuration for disaster recovery (Issue #1338).
 ///
 /// This struct captures all configuration needed to reconstruct a vault
@@ -1763,4 +1771,50 @@ pub struct VaultExportConfig {
     pub release_condition: ReleaseCondition,
     /// Ledger timestamp when this config was exported.
     pub exported_at: u64,
+}
+
+// ============================================================
+// Issue #1339: Legal Document Anchoring
+// ============================================================
+
+/// Type of legal document being anchored.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum LegalDocumentType {
+    /// Last will and testament.
+    Will,
+    /// Trust deed or living trust.
+    TrustDeed,
+    /// Power of attorney.
+    PowerOfAttorney,
+    /// Generic/other legal document.
+    Other,
+}
+
+/// An on-chain anchor record for a signed legal document (Issue #1339).
+///
+/// Only the SHA-256 hash of the document is stored on-chain — the raw document
+/// bytes are never submitted to the contract.  The `ipfs_cid` or `storage_ref`
+/// field optionally points to an off-chain location (e.g. IPFS) where the
+/// encrypted document can be retrieved for verification.
+///
+/// **Legal disclaimer**: this anchor does not constitute legal execution of any
+/// document.  It provides an immutable timestamp-proof that a document with the
+/// recorded hash existed at the time of anchoring.  Consult a qualified legal
+/// professional for estate-planning advice.
+#[contracttype]
+#[derive(Clone)]
+pub struct LegalDocumentAnchor {
+    /// Sequential document ID within the vault (1-indexed).
+    pub doc_id: u32,
+    /// SHA-256 hash of the signed document bytes.
+    pub doc_hash: BytesN<32>,
+    /// Human-readable document type.
+    pub doc_type: LegalDocumentType,
+    /// Optional IPFS CID or other off-chain storage reference (max 128 bytes).
+    pub storage_ref: Option<String>,
+    /// Ledger timestamp when the anchor was recorded.
+    pub anchored_at: u64,
+    /// Whether this anchor has been removed by the vault owner.
+    pub removed: bool,
 }

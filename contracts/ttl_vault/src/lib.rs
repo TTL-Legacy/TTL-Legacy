@@ -82,6 +82,8 @@ pub use types::{
     VESTING_SCHEDULE_ADDED_TOPIC,
     // Issue #1338: vault export/import for disaster recovery
     VaultExportConfig, VAULT_EXPORTED_TOPIC, VAULT_IMPORTED_TOPIC,
+    // Issue #1339: legal document anchoring
+    LegalDocumentAnchor, LegalDocumentType, DOC_ANCHORED_TOPIC, DOC_REMOVED_TOPIC,
 };
 #[cfg(test)]
 mod beneficiary_auction_tests;
@@ -154,6 +156,10 @@ mod batch_withdrawal_tests;
 // Issue #1294: withdrawal dispute window
 #[cfg(test)]
 mod withdrawal_dispute_tests;
+
+// Issue #1339: legal document anchoring tests
+#[cfg(test)]
+mod legal_document_anchor_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -17915,5 +17921,170 @@ impl TtlVaultContract {
         );
 
         vault_id
+    }
+
+    // =========================================================
+    // Issue #1339: Legal Document Anchoring
+    // =========================================================
+
+    /// Anchors the SHA-256 hash of a signed legal document to the vault,
+    /// creating an immutable on-chain timestamp-proof of the document's
+    /// existence at this ledger sequence.
+    ///
+    /// **Legal disclaimer**: anchoring a hash does not constitute legal
+    /// execution of the underlying document.  It provides cryptographic
+    /// evidence that a document with the recorded hash existed at anchor
+    /// time.  Consult a qualified legal professional for estate-planning
+    /// advice.
+    ///
+    /// # Arguments
+    /// * `vault_id`    - ID of the vault to attach the anchor to.
+    /// * `caller`      - Must be the vault owner.
+    /// * `doc_hash`    - SHA-256 hash of the document bytes (32 bytes).
+    /// * `doc_type`    - Category of the legal document.
+    /// * `storage_ref` - Optional IPFS CID or other off-chain reference
+    ///                   (max 128 bytes when present).
+    ///
+    /// # Returns
+    /// The new document anchor ID (1-indexed, per-vault).
+    pub fn anchor_document(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        doc_hash: BytesN<32>,
+        doc_type: LegalDocumentType,
+        storage_ref: Option<String>,
+    ) -> u32 {
+        caller.require_auth();
+
+        let vault = Self::get_vault(env.clone(), vault_id);
+        if vault.owner != caller {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        // Validate optional storage_ref length (max 128 chars).
+        if let Some(ref s) = storage_ref {
+            if s.len() > 128 {
+                panic_with_error!(&env, ContractError::InvalidAmount); // reuse as generic bounds error
+            }
+        }
+
+        // Assign sequential doc_id.
+        let count_key = StorageKey::LegalDocumentAnchorCount(vault_id);
+        let doc_id: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&count_key)
+            .unwrap_or(0)
+            + 1;
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        let timestamp = env.ledger().timestamp();
+
+        let anchor = LegalDocumentAnchor {
+            doc_id,
+            doc_hash: doc_hash.clone(),
+            doc_type,
+            storage_ref,
+            anchored_at: timestamp,
+            removed: false,
+        };
+
+        // Persist anchor and updated count.
+        let anchor_key = StorageKey::LegalDocumentAnchor(vault_id, doc_id);
+        env.storage().persistent().set(&anchor_key, &anchor);
+        env.storage().persistent().extend_ttl(&anchor_key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.storage().persistent().set(&count_key, &doc_id);
+        env.storage().persistent().extend_ttl(&count_key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (DOC_ANCHORED_TOPIC,),
+            (vault_id, doc_id, doc_hash, timestamp),
+        );
+
+        doc_id
+    }
+
+    /// Returns the anchor record for a specific document, or panics with
+    /// `VaultNotFound` if it does not exist.
+    pub fn get_document_anchor(
+        env: Env,
+        vault_id: u64,
+        doc_id: u32,
+    ) -> LegalDocumentAnchor {
+        let key = StorageKey::LegalDocumentAnchor(vault_id, doc_id);
+        env.storage()
+            .persistent()
+            .get::<_, LegalDocumentAnchor>(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::VaultNotFound))
+    }
+
+    /// Returns all (including removed) document anchors for a vault.
+    /// Callers can filter client-side on `anchor.removed` to show only active anchors.
+    pub fn list_document_anchors(
+        env: Env,
+        vault_id: u64,
+    ) -> Vec<LegalDocumentAnchor> {
+        let count_key = StorageKey::LegalDocumentAnchorCount(vault_id);
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&count_key)
+            .unwrap_or(0);
+
+        let mut result: Vec<LegalDocumentAnchor> = Vec::new(&env);
+        for doc_id in 1..=count {
+            let key = StorageKey::LegalDocumentAnchor(vault_id, doc_id);
+            if let Some(anchor) = env.storage().persistent().get::<_, LegalDocumentAnchor>(&key) {
+                result.push_back(anchor);
+            }
+        }
+        result
+    }
+
+    /// Soft-removes a previously anchored document record.
+    ///
+    /// Marks the anchor as `removed = true` rather than deleting storage so
+    /// the on-chain event log is never mutated.  Emits `DOC_REMOVED_TOPIC`.
+    ///
+    /// Only the vault owner may call this.
+    pub fn remove_document_anchor(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        doc_id: u32,
+    ) {
+        caller.require_auth();
+
+        let vault = Self::get_vault(env.clone(), vault_id);
+        if vault.owner != caller {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        let key = StorageKey::LegalDocumentAnchor(vault_id, doc_id);
+        let mut anchor: LegalDocumentAnchor = env
+            .storage()
+            .persistent()
+            .get::<_, LegalDocumentAnchor>(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::VaultNotFound));
+
+        anchor.removed = true;
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &anchor);
+        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (DOC_REMOVED_TOPIC,),
+            (vault_id, doc_id, env.ledger().timestamp()),
+        );
     }
 }

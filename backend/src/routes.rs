@@ -409,3 +409,100 @@ pub async fn check_in(
         }),
     ))
 }
+
+// ── Legal Document Anchoring (Issue #1339) ────────────────────────────────────
+
+/// POST /api/vaults/:vault_id/document-anchors
+///
+/// Registers a new document anchor for the specified vault.
+/// The caller must supply the SHA-256 hex hash of the document — raw document
+/// bytes are never sent to this endpoint.
+///
+/// **Legal disclaimer**: this endpoint records a cryptographic hash commitment;
+/// it does not constitute legal execution of any underlying document.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn create_document_anchor(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+    Json(body): Json<crate::models::AnchorDocumentRequest>,
+) -> Result<(StatusCode, Json<crate::models::DocumentAnchorRecord>), AppError> {
+    if vault_id.is_empty() {
+        return Err(AppError::InvalidInput("vault_id must not be empty".into()));
+    }
+    if body.doc_hash_hex.len() != 64 {
+        return Err(AppError::InvalidInput(
+            "doc_hash_hex must be a 64-character hex-encoded SHA-256 hash".into(),
+        ));
+    }
+    if !body.doc_hash_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::InvalidInput(
+            "doc_hash_hex must contain only hexadecimal characters".into(),
+        ));
+    }
+    if let Some(ref s) = body.storage_ref {
+        if s.len() > 128 {
+            return Err(AppError::InvalidInput(
+                "storage_ref must not exceed 128 characters".into(),
+            ));
+        }
+    }
+
+    let db = &state.db;
+
+    // Derive doc_id from the current anchor count for this vault.
+    let existing = db.list_document_anchors(&vault_id)?;
+    let doc_id = (existing.len() as u32) + 1;
+
+    let record = crate::models::DocumentAnchorRecord {
+        id: 0, // assigned by DB
+        vault_id: vault_id.clone(),
+        doc_id,
+        doc_hash_hex: body.doc_hash_hex.clone(),
+        doc_type: body.doc_type,
+        storage_ref: body.storage_ref,
+        anchored_at: chrono::Utc::now(),
+        removed: false,
+    };
+
+    let row_id = db.insert_document_anchor(&record)?;
+    let mut saved = record;
+    saved.id = row_id;
+
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+/// GET /api/vaults/:vault_id/document-anchors
+///
+/// Returns all document anchors for a vault (including soft-removed ones).
+/// Clients should filter on `removed = false` to show only active anchors.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn list_document_anchors(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<Vec<crate::models::DocumentAnchorRecord>>, AppError> {
+    if vault_id.is_empty() {
+        return Err(AppError::InvalidInput("vault_id must not be empty".into()));
+    }
+    let anchors = state.db.list_document_anchors(&vault_id)?;
+    Ok(Json(anchors))
+}
+
+/// DELETE /api/vaults/:vault_id/document-anchors/:doc_id
+///
+/// Soft-removes a document anchor (marks it as `removed = true`).
+/// The hash record is preserved for audit purposes.
+#[instrument(skip(state), fields(vault_id = %vault_id, doc_id = %doc_id))]
+pub async fn delete_document_anchor(
+    State(state): State<Arc<AppState>>,
+    Path((vault_id, doc_id)): Path<(String, u32)>,
+) -> Result<StatusCode, AppError> {
+    if vault_id.is_empty() {
+        return Err(AppError::InvalidInput("vault_id must not be empty".into()));
+    }
+    let found = state.db.remove_document_anchor(&vault_id, doc_id)?;
+    if found {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
+}

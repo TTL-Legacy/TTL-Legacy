@@ -271,6 +271,16 @@ async fn main() {
             post(routes::check_in)
                 .layer(middleware::from_fn_with_state(checkin_limiter, rate_limit::checkin_rate_limit_middleware)),
         )
+        // Issue #1339: legal document anchoring
+        .route(
+            "/api/vaults/:vault_id/document-anchors",
+            post(routes::create_document_anchor)
+                .get(routes::list_document_anchors),
+        )
+        .route(
+            "/api/vaults/:vault_id/document-anchors/:doc_id",
+            delete(routes::delete_document_anchor),
+        )
         .route("/api/auth/token", post(auth::login))
         .route("/api/auth/refresh", post(auth::refresh))
         .layer(build_cors_layer())

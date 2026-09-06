@@ -1014,3 +1014,52 @@ pub struct BeneficiaryArchivalNotification {
     /// Error message if delivery failed.
     pub error: Option<String>,
 }
+
+// ── Legal Document Anchoring (Issue #1339) ────────────────────────────────────
+
+/// Document type classification for legal anchoring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LegalDocumentTypeApi {
+    Will,
+    TrustDeed,
+    PowerOfAttorney,
+    Other,
+}
+
+/// Request body for `POST /api/vaults/{vault_id}/document-anchors`.
+///
+/// The caller must provide the SHA-256 hex-encoded hash of the document.
+/// Raw document bytes are never sent to this endpoint.
+#[derive(Debug, Deserialize)]
+pub struct AnchorDocumentRequest {
+    /// Stellar account address of the vault owner (used for auth assertion).
+    pub owner_address: String,
+    /// Hex-encoded SHA-256 hash of the document (64 hex chars = 32 bytes).
+    pub doc_hash_hex: String,
+    /// Category of the legal document.
+    pub doc_type: LegalDocumentTypeApi,
+    /// Optional IPFS CID or off-chain storage reference (max 128 chars).
+    pub storage_ref: Option<String>,
+}
+
+/// Response / database record for a legal document anchor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentAnchorRecord {
+    /// Database row ID.
+    pub id: i64,
+    /// Vault this anchor belongs to.
+    pub vault_id: String,
+    /// Sequential document ID within the vault (matches on-chain doc_id).
+    pub doc_id: u32,
+    /// Hex-encoded SHA-256 hash of the anchored document.
+    pub doc_hash_hex: String,
+    /// Document type.
+    pub doc_type: LegalDocumentTypeApi,
+    /// Optional IPFS CID or storage reference.
+    pub storage_ref: Option<String>,
+    /// UTC timestamp when the anchor was recorded (off-chain mirror).
+    pub anchored_at: DateTime<Utc>,
+    /// Whether the anchor has been soft-removed by the owner.
+    pub removed: bool,
+}

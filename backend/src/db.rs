@@ -758,6 +758,25 @@ impl Db {
                     ON withdrawal_alert_preferences(owner);
                 "#,
             ),
+            (
+                "7",
+                r#"
+                CREATE TABLE IF NOT EXISTS legal_document_anchors (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id    TEXT    NOT NULL,
+                    doc_id      INTEGER NOT NULL,
+                    doc_hash_hex TEXT   NOT NULL,
+                    doc_type    TEXT    NOT NULL,
+                    storage_ref TEXT,
+                    anchored_at TEXT    NOT NULL,
+                    removed     INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_doc_anchor_vault_doc
+                    ON legal_document_anchors(vault_id, doc_id);
+                CREATE INDEX IF NOT EXISTS idx_legal_doc_anchor_vault_id
+                    ON legal_document_anchors(vault_id);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -1750,6 +1769,86 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    // ── Legal Document Anchoring (Issue #1339) ────────────────────────────────
+
+    /// Inserts a new document anchor record and returns the generated row id.
+    pub fn insert_document_anchor(
+        &self,
+        anchor: &crate::models::DocumentAnchorRecord,
+    ) -> Result<i64, rusqlite::Error> {
+        let doc_type = serde_json::to_string(&anchor.doc_type).unwrap_or_default();
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO legal_document_anchors
+                (vault_id, doc_id, doc_hash_hex, doc_type, storage_ref, anchored_at, removed)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                anchor.vault_id,
+                anchor.doc_id as i64,
+                anchor.doc_hash_hex,
+                doc_type,
+                anchor.storage_ref,
+                anchor.anchored_at.to_rfc3339(),
+                anchor.removed as i64,
+            ],
+        )?;
+        Ok(self.conn.lock().unwrap().last_insert_rowid())
+    }
+
+    /// Returns all document anchors for a vault (including soft-removed).
+    pub fn list_document_anchors(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<crate::models::DocumentAnchorRecord>, rusqlite::Error> {
+        use chrono::DateTime;
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT id, vault_id, doc_id, doc_hash_hex, doc_type, storage_ref, anchored_at, removed
+            FROM legal_document_anchors
+            WHERE vault_id = ?1
+            ORDER BY doc_id ASC
+            "#,
+        )?;
+        let iter = stmt.query_map(params![vault_id], |r| {
+            let doc_type_str: String = r.get(4)?;
+            let anchored_at_str: String = r.get(6)?;
+            Ok(crate::models::DocumentAnchorRecord {
+                id: r.get(0)?,
+                vault_id: r.get(1)?,
+                doc_id: r.get::<_, i64>(2)? as u32,
+                doc_hash_hex: r.get(3)?,
+                doc_type: serde_json::from_str(&doc_type_str)
+                    .unwrap_or(crate::models::LegalDocumentTypeApi::Other),
+                storage_ref: r.get(5)?,
+                anchored_at: DateTime::parse_from_rfc3339(&anchored_at_str)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                removed: r.get::<_, i64>(7)? != 0,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    /// Soft-removes a document anchor (sets removed = true).
+    pub fn remove_document_anchor(
+        &self,
+        vault_id: &str,
+        doc_id: u32,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_changed = self.conn.lock().unwrap().execute(
+            "UPDATE legal_document_anchors SET removed = 1 WHERE vault_id = ?1 AND doc_id = ?2",
+            params![vault_id, doc_id as i64],
+        )?;
+        Ok(rows_changed > 0)
     }
 }
 
