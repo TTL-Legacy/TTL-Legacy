@@ -73,7 +73,7 @@ jobs:
         run: git-cliff --latest --strip all --output RELEASE_NOTES.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
           token: ${{ secrets.GITHUB_TOKEN }}
