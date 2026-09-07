@@ -57,7 +57,7 @@ sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio",
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # JWT authentication for WebSocket connections
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 
 # Distributed cache for multi-node consensus checks
 redis = "0.27"
