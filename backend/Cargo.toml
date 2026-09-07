@@ -31,7 +31,7 @@ opentelemetry-otlp = { version = "0.16", features = ["tonic", "trace"] }
 opentelemetry-semantic-conventions = "0.15"
 tracing-opentelemetry = "0.24"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.7", features = ["trace", "cors"] }
 
 env_logger = "0.11"
 thiserror = "1"
