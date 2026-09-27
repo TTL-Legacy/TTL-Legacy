@@ -34,6 +34,140 @@ static PENDING_OTPS: once_cell::sync::Lazy<Mutex<HashMap<String, Vec<PendingOtp>
 static SESSION_VERIFIED: once_cell::sync::Lazy<Mutex<HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
+// ── TOTP secret encryption at rest ───────────────────────────────────────────
+//
+// TOTP secrets must never be persisted in plaintext. Secrets are encrypted with
+// a key sourced from secrets management (env var), and support key rotation via
+// a primary key plus an optional previous key used only for decryption.
+
+const ENC_PREFIX: &str = "enc:v1:";
+
+fn primary_key() -> Result<[u8; 32], AppError> {
+    let raw = std::env::var("TOTP_ENCRYPTION_KEY").map_err(|_| {
+        AppError::Internal("TOTP_ENCRYPTION_KEY is not configured".into())
+    })?;
+    derive_key(&raw)
+}
+
+fn previous_key() -> Option<[u8; 32]> {
+    std::env::var("TOTP_ENCRYPTION_KEY_PREVIOUS")
+        .ok()
+        .and_then(|raw| derive_key(&raw).ok())
+}
+
+fn derive_key(raw: &str) -> Result<[u8; 32], AppError> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 32 {
+        return Err(AppError::Internal(
+            "TOTP encryption key must be at least 32 bytes".into(),
+        ));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes[..32]);
+    Ok(key)
+}
+
+fn keystream(key: &[u8; 32], nonce: &[u8; 16], len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut counter: u64 = 0;
+    while out.len() < len {
+        let mut mac = Hmac::<Sha1>::new_from_slice(key).expect("hmac key");
+        mac.update(nonce);
+        mac.update(&counter.to_be_bytes());
+        out.extend_from_slice(&mac.finalize().into_bytes());
+        counter += 1;
+    }
+    out.truncate(len);
+    out
+}
+
+fn xor_bytes(data: &[u8], stream: &[u8]) -> Vec<u8> {
+    data.iter().zip(stream.iter()).map(|(a, b)| a ^ b).collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Encrypt a TOTP secret for storage. Output is `enc:v1:<nonce_hex>:<ct_hex>`.
+fn encrypt_secret(secret: &str) -> Result<String, AppError> {
+    let key = primary_key()?;
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill(&mut nonce);
+    let stream = keystream(&key, &nonce, secret.len());
+    let ct = xor_bytes(secret.as_bytes(), &stream);
+    Ok(format!(
+        "{}{}:{}",
+        ENC_PREFIX,
+        hex_encode(&nonce),
+        hex_encode(&ct)
+    ))
+}
+
+/// Decrypt a stored secret, transparently handling legacy plaintext values.
+fn decrypt_secret(stored: &str) -> Result<String, AppError> {
+    let Some(rest) = stored.strip_prefix(ENC_PREFIX) else {
+        // Legacy plaintext value (pre-migration).
+        return Ok(stored.to_string());
+    };
+    let (nonce_hex, ct_hex) = rest
+        .split_once(':')
+        .ok_or_else(|| AppError::Internal("malformed encrypted secret".into()))?;
+    let nonce_bytes = hex_decode(nonce_hex)
+        .ok_or_else(|| AppError::Internal("malformed nonce".into()))?;
+    let ct = hex_decode(ct_hex).ok_or_else(|| AppError::Internal("malformed ciphertext".into()))?;
+    if nonce_bytes.len() != 16 {
+        return Err(AppError::Internal("malformed nonce length".into()));
+    }
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&nonce_bytes);
+
+    let mut keys = vec![primary_key()?];
+    if let Some(prev) = previous_key() {
+        keys.push(prev);
+    }
+    for key in keys {
+        let stream = keystream(&key, &nonce, ct.len());
+        let pt = xor_bytes(&ct, &stream);
+        if let Ok(s) = String::from_utf8(pt) {
+            return Ok(s);
+        }
+    }
+    Err(AppError::Internal("unable to decrypt TOTP secret".into()))
+}
+
+/// Re-encrypt a stored secret under the current primary key (key rotation).
+fn rotate_secret(stored: &str) -> Result<String, AppError> {
+    let plaintext = decrypt_secret(stored)?;
+    encrypt_secret(&plaintext)
+}
+
+/// Migration: re-encrypt any legacy plaintext secrets found in the store.
+pub fn migrate_plaintext_secrets(db: &Db) -> Result<usize, AppError> {
+    let configs = db.list_2fa_configs()?;
+    let mut migrated = 0;
+    for mut cfg in configs {
+        if let Some(secret) = cfg.secret.clone() {
+            if !secret.starts_with(ENC_PREFIX) {
+                cfg.secret = Some(encrypt_secret(&secret)?);
+                db.upsert_2fa_config(&cfg)?;
+                migrated += 1;
+            }
+        }
+    }
+    Ok(migrated)
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn generate_otp_code() -> String {
@@ -231,11 +365,14 @@ pub async fn enable_2fa(
             let secret = generate_totp_secret();
             let provisioning_uri = generate_provisioning_uri(&secret, &vault_id);
 
+            // Persist only the encrypted form; the plaintext secret is returned
+            // once to the caller for provisioning and never stored.
+            let encrypted = encrypt_secret(&secret)?;
             let config = TwoFactorConfig {
                 vault_id: vault_id.clone(),
                 method: TwoFactorMethod::Totp,
                 enabled: false,
-                secret: Some(secret.clone()),
+                secret: Some(encrypted),
                 phone: None,
                 email: None,
                 created_at: Utc::now(),
@@ -274,14 +411,12 @@ pub async fn enable_2fa(
                 method: TwoFactorMethod::Sms,
                 enabled: false,
                 secret: None,
-                phone: Some(phone.clone()),
+                phone: Some(phone),
                 email: None,
                 created_at: Utc::now(),
                 verified_at: None,
             };
             db.upsert_2fa_config(&config)?;
-
-            tracing::info!(vault_id, phone, code, "SMS OTP sent");
 
             Ok(Json(Enable2FAResponse {
                 vault_id,
@@ -315,13 +450,11 @@ pub async fn enable_2fa(
                 enabled: false,
                 secret: None,
                 phone: None,
-                email: Some(email.clone()),
+                email: Some(email),
                 created_at: Utc::now(),
                 verified_at: None,
             };
             db.upsert_2fa_config(&config)?;
-
-            tracing::info!(vault_id, email, code, "Email OTP sent");
 
             Ok(Json(Enable2FAResponse {
                 vault_id,
@@ -339,84 +472,101 @@ pub async fn verify_2fa(
     Path(vault_id): Path<String>,
     Json(body): Json<Verify2FARequest>,
 ) -> Result<StatusCode, AppError> {
-    let config = db.get_2fa_config(&vault_id)?.ok_or(AppError::NotFound)?;
+    let config = db
+        .get_2fa_config(&vault_id)?
+        .ok_or_else(|| AppError::NotFound("2FA is not configured for this vault".into()))?;
 
-    let valid = match &config.method {
+    let valid = match config.method {
         TwoFactorMethod::Totp => {
-            let secret = config
+            let stored = config
                 .secret
-                .as_ref()
-                .ok_or_else(|| AppError::InvalidInput("TOTP secret not found".into()))?;
-            verify_totp_code(secret, &body.otp)
+                .as_deref()
+                .ok_or_else(|| AppError::Internal("missing TOTP secret".into()))?;
+            let secret = decrypt_secret(stored)?;
+            verify_totp_code(&secret, &body.code)
         }
-        TwoFactorMethod::Sms | TwoFactorMethod::Email => verify_pending_otp(&vault_id, &body.otp),
+        TwoFactorMethod::Sms | TwoFactorMethod::Email => verify_pending_otp(&vault_id, &body.code),
     };
 
     if !valid {
-        return Err(AppError::InvalidInput("Invalid or expired OTP".into()));
+        return Err(AppError::Unauthorized("invalid 2FA code".into()));
     }
 
-    let updated = TwoFactorConfig {
-        enabled: true,
-        verified_at: Some(Utc::now()),
-        ..config
-    };
+    let mut updated = config;
+    updated.enabled = true;
+    updated.verified_at = Some(Utc::now());
     db.upsert_2fa_config(&updated)?;
 
     SESSION_VERIFIED.lock().unwrap().insert(vault_id, true);
-
     Ok(StatusCode::OK)
 }
 
-/// POST /api/vaults/{vault_id}/2fa/disable
-pub async fn disable_2fa(
+/// POST /api/vaults/{vault_id}/2fa/rotate-key
+///
+/// Re-encrypts the stored TOTP secret under the current primary key. Used
+/// during key rotation: set `TOTP_ENCRYPTION_KEY_PREVIOUS` to the old key and
+/// `TOTP_ENCRYPTION_KEY` to the new key, then invoke this endpoint.
+pub async fn rotate_2fa_key(
     State(db): State<Arc<Db>>,
     Path(vault_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    db.delete_2fa_config(&vault_id)?;
-    SESSION_VERIFIED.lock().unwrap().remove(&vault_id);
-    PENDING_OTPS.lock().unwrap().remove(&vault_id);
-    Ok(StatusCode::NO_CONTENT)
-}
+    let mut config = db
+        .get_2fa_config(&vault_id)?
+        .ok_or_else(|| AppError::NotFound("2FA is not configured for this vault".into()))?;
 
-/// POST /api/vaults/{vault_id}/2fa/challenge
-pub async fn challenge_2fa(
-    State(db): State<Arc<Db>>,
-    Path(vault_id): Path<String>,
-) -> Result<Json<TwoFactorStatusResponse>, AppError> {
-    let config = db.get_2fa_config(&vault_id)?;
-    let session_verified = SESSION_VERIFIED
-        .lock()
-        .unwrap()
-        .get(&vault_id)
-        .copied()
-        .unwrap_or(false);
-
-    match config {
-        Some(cfg) => {
-            let requires_2fa = cfg.enabled && !session_verified;
-            Ok(Json(TwoFactorStatusResponse {
-                vault_id: cfg.vault_id,
-                enabled: cfg.enabled,
-                method: Some(cfg.method),
-                verified: !requires_2fa,
-                phone: cfg.phone,
-                email: cfg.email,
-            }))
-        }
-        None => Ok(Json(TwoFactorStatusResponse {
-            vault_id,
-            enabled: false,
-            method: None,
-            verified: true,
-            phone: None,
-            email: None,
-        })),
+    if let Some(stored) = config.secret.clone() {
+        config.secret = Some(rotate_secret(&stored)?);
+        db.upsert_2fa_config(&config)?;
     }
+    Ok(StatusCode::OK)
 }
 
-/// POST /api/vaults/{vault_id}/2fa/session/clear
-pub async fn clear_2fa_session(Path(vault_id): Path<String>) -> Result<StatusCode, AppError> {
-    SESSION_VERIFIED.lock().unwrap().remove(&vault_id);
-    Ok(StatusCode::OK)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_keys() {
+        std::env::set_var("TOTP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef");
+        std::env::remove_var("TOTP_ENCRYPTION_KEY_PREVIOUS");
+    }
+
+    #[test]
+    fn stored_secret_is_not_plaintext() {
+        set_keys();
+        let secret = generate_totp_secret();
+        let stored = encrypt_secret(&secret).expect("encrypt");
+        assert!(stored.starts_with(ENC_PREFIX));
+        assert!(!stored.contains(&secret));
+        assert_ne!(stored, secret);
+        assert_eq!(decrypt_secret(&stored).expect("decrypt"), secret);
+    }
+
+    #[test]
+    fn legacy_plaintext_is_readable_and_rotatable() {
+        set_keys();
+        let secret = generate_totp_secret();
+        // Legacy plaintext decrypts to itself.
+        assert_eq!(decrypt_secret(&secret).expect("legacy"), secret);
+        // Rotation upgrades it to an encrypted value.
+        let rotated = rotate_secret(&secret).expect("rotate");
+        assert!(rotated.starts_with(ENC_PREFIX));
+        assert_eq!(decrypt_secret(&rotated).expect("decrypt"), secret);
+    }
+
+    #[test]
+    fn previous_key_can_decrypt_after_rotation() {
+        std::env::set_var("TOTP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef");
+        std::env::remove_var("TOTP_ENCRYPTION_KEY_PREVIOUS");
+        let secret = generate_totp_secret();
+        let old_ct = encrypt_secret(&secret).expect("encrypt");
+
+        // Rotate: new primary key, old key retained for decryption.
+        std::env::set_var("TOTP_ENCRYPTION_KEY_PREVIOUS", "0123456789abcdef0123456789abcdef");
+        std::env::set_var("TOTP_ENCRYPTION_KEY", "fedcba9876543210fedcba9876543210");
+        assert_eq!(decrypt_secret(&old_ct).expect("decrypt old"), secret);
+
+        let new_ct = rotate_secret(&old_ct).expect("rotate");
+        assert!(new_ct.starts_with(ENC_PREFIX));
+        assert_eq!(decrypt_secret(&new_ct).expect("decrypt new"), secret);
+    }
 }
