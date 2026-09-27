@@ -49,7 +49,7 @@ jobs:
           components: rust-src
 
       - name: Cache cargo registry
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -59,7 +59,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Cache cargo build
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: target/
           key: ${{ runner.os }}-fuzz-${{ matrix.fuzz_target }}-${{ hashFiles('**/Cargo.lock') }}
