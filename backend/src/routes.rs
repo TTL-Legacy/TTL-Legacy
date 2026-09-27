@@ -26,6 +26,59 @@ use crate::{
     },
 };
 
+// ── Health & readiness probes (#1489) ────────────────────────────────────────
+
+/// GET /health
+///
+/// Cheap liveness probe: confirms the process is up and serving requests.
+/// Intentionally performs no dependency checks so it stays fast and cannot
+/// flap when the DB or RPC is temporarily unreachable.
+#[instrument]
+pub async fn health() -> StatusCode {
+    StatusCode::OK
+}
+
+#[derive(serde::Serialize)]
+pub struct ReadinessResponse {
+    pub status: &'static str,
+    pub checks: ReadinessChecks,
+}
+
+#[derive(serde::Serialize)]
+pub struct ReadinessChecks {
+    pub db: &'static str,
+    pub rpc: &'static str,
+}
+
+/// GET /ready
+///
+/// Readiness probe: verifies that dependencies (DB connection and Soroban RPC)
+/// are reachable before the instance is considered ready to serve traffic.
+#[instrument(skip(state))]
+pub async fn ready(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ReadinessResponse>, AppError> {
+    let db_ok = state.db.ping().is_ok();
+    let rpc_ok = state.rpc.ping().await.is_ok();
+
+    let checks = ReadinessChecks {
+        db: if db_ok { "ok" } else { "unavailable" },
+        rpc: if rpc_ok { "ok" } else { "unavailable" },
+    };
+
+    if db_ok && rpc_ok {
+        Ok(Json(ReadinessResponse {
+            status: "ready",
+            checks,
+        }))
+    } else {
+        Err(AppError::ServiceUnavailable(Json(ReadinessResponse {
+            status: "not_ready",
+            checks,
+        })))
+    }
+}
+
 #[derive(Deserialize)]
 pub struct RemindersQuery {
     pub include_deleted: Option<bool>,
@@ -247,148 +300,6 @@ pub async fn create_sponsored_release(
     Ok((StatusCode::CREATED, Json(result)))
 }
 
-/// GET /api/vaults/:vault_id/sponsored-release
-/// List all sponsored releases for a vault.
-pub async fn get_sponsored_releases(
-    State(state): State<Arc<AppState>>,
-    Path(vault_id): Path<String>,
-) -> Result<Json<Vec<crate::fee_sponsorship::SponsoredRelease>>, AppError> {
-    let result = list_sponsored_releases_handler(Arc::clone(&state.db), &vault_id)
-        .map_err(|e| AppError::InvalidInput(e))?;
+/// GET /api/vault
 
-    Ok(Json(result))
-}
-
-// --- Issue #1143: Vesting Bonus endpoints ---
-
-/// POST /api/vaults/:vault_id/vesting/claim-bonus
-/// Claim vesting bonus on behalf of the beneficiary.
-pub async fn claim_vesting_bonus(
-    State(db): State<Arc<Db>>,
-    Path(vault_id): Path<String>,
-    headers: HeaderMap,
-    Json(req): Json<ClaimBonusRequest>,
-) -> Result<(StatusCode, Json<crate::models::ClaimBonusResponse>), AppError> {
-    let result = claim_vesting_bonus_handler(Arc::clone(&db), headers, &vault_id, req)
-        .map_err(|e| AppError::InvalidInput(e))?;
-    Ok((StatusCode::OK, Json(result)))
-}
-
-/// GET /api/vaults/:vault_id/vesting/bonus
-/// Return current vesting bonus configuration for the vault.
-pub async fn get_vesting_bonus(
-    State(db): State<Arc<Db>>,
-    Path(vault_id): Path<String>,
-) -> Result<Json<crate::models::VestingBonusResponse>, AppError> {
-    let result = get_vesting_bonus_handler(Arc::clone(&db), &vault_id)
-        .map_err(|e| AppError::InvalidInput(e))?;
-    Ok(Json(result))
-}
-
-// ── Notification subscriptions (email/SMS/webhook channels) ─────────────────
-// Referenced from main.rs's router table but previously never implemented —
-// filled in as part of Issue #1174 (idempotency-key support for reminder
-// endpoints), which needs a real POST handler to attach that support to.
-
-#[instrument(skip(state, headers), fields(vault_id = %vault_id))]
-pub async fn set_subscription(
-    State(state): State<Arc<AppState>>,
-    Path(vault_id): Path<u64>,
-    headers: HeaderMap,
-    Json(body): Json<SetSubscriptionRequest>,
-) -> Result<(StatusCode, Json<Subscription>), AppError> {
-    let db = &state.db;
-    if body.channels.is_empty() {
-        return Err(AppError::InvalidInput("channels must not be empty".into()));
-    }
-
-    // Issue #1174: idempotency-key support, mirroring set_preferences (#825)
-    // exactly so retried/duplicated subscription requests (email or SMS
-    // channel changes) can't double-apply.
-    if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
-        if let Some(cached) = db.check_idempotency(idem_key) {
-            let cached_sub: Subscription = serde_json::from_str(&cached.response_body).unwrap();
-            return Ok((StatusCode::OK, Json(cached_sub)));
-        }
-    }
-
-    let sub = Subscription {
-        vault_id,
-        owner: body.owner,
-        channels: body.channels,
-        frequency: body.frequency,
-    };
-    db.upsert_subscription(&sub)?;
-
-    if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
-        let body_json = serde_json::to_string(&sub).unwrap();
-        db.store_idempotency(idem_key, 200, &body_json);
-    }
-
-    Ok((StatusCode::OK, Json(sub)))
-}
-
-#[instrument(skip(state), fields(vault_id = %vault_id))]
-pub async fn delete_subscription(
-    State(state): State<Arc<AppState>>,
-    Path(vault_id): Path<u64>,
-) -> Result<StatusCode, AppError> {
-    state.db.delete_subscription(vault_id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// ── Vault release history (Issue #1173) ──────────────────────────────────────
-
-/// GET /api/vaults/:vault_id/release-history
-/// Combines audit-logged requests against this vault's release-related
-/// endpoints with its recorded sponsored-release attempts/completions, so
-/// beneficiaries and auditors don't have to parse Stellar transaction
-/// history by hand to answer "what release activity has happened here."
-#[instrument(skip(state), fields(vault_id = %vault_id))]
-pub async fn get_vault_release_history(
-    State(state): State<Arc<AppState>>,
-    Path(vault_id): Path<String>,
-) -> Result<Json<VaultReleaseHistory>, AppError> {
-    let db = &state.db;
-    let audit_entries: Vec<AuditLogEntry> = db.get_vault_release_audit_logs(&vault_id)?;
-    let sponsored_releases = db.list_sponsored_releases_for_vault(&vault_id)?;
-
-    Ok(Json(VaultReleaseHistory {
-        vault_id,
-        audit_entries,
-        sponsored_releases,
-    }))
-}
-
-// ── Check-in endpoint (Issue: per-user rate limiting) ────────────────────────
-
-#[derive(serde::Serialize)]
-pub struct CheckInResponse {
-    pub vault_id: String,
-    pub checked_in_at: chrono::DateTime<chrono::Utc>,
-    pub message: String,
-}
-
-/// POST /api/vaults/:vault_id/check-in
-///
-/// Records a vault owner check-in, resetting the TTL countdown.  Each vault
-/// is limited to **1 check-in per 60 seconds** — enforced by the per-user
-/// `checkin_rate_limit_middleware` applied to this route.  Excess requests
-/// receive `429 Too Many Requests` with a `Retry-After` header.
-#[instrument(fields(vault_id = %vault_id))]
-pub async fn check_in(
-    Path(vault_id): Path<String>,
-) -> Result<(StatusCode, Json<CheckInResponse>), AppError> {
-    if vault_id.is_empty() {
-        return Err(AppError::InvalidInput("vault_id must not be empty".into()));
-    }
-
-    Ok((
-        StatusCode::OK,
-        Json(CheckInResponse {
-            vault_id,
-            checked_in_at: chrono::Utc::now(),
-            message: "Check-in recorded successfully".to_string(),
-        }),
-    ))
-}
+/* … truncated 5431 chars — edit only what you need near the top … */
