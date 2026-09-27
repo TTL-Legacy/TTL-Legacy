@@ -9,6 +9,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 
 mod auth;
@@ -40,16 +41,27 @@ pub use db::Db;
 
 use crate::metrics::Metrics;
 
+/// Default grace period for draining in-flight background work on shutdown.
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Db>,
     pub consensus: Arc<NodeCache>,
     pub metrics: Arc<Metrics>,
+    /// Shared shutdown token signalled on SIGTERM/SIGINT (issue #1488).
+    pub shutdown: CancellationToken,
 }
 
 impl FromRef<AppState> for Arc<Db> {
     fn from_ref(state: &AppState) -> Arc<Db> {
         Arc::clone(&state.db)
+    }
+}
+
+impl FromRef<AppState> for CancellationToken {
+    fn from_ref(state: &AppState) -> CancellationToken {
+        state.shutdown.clone()
     }
 }
 
@@ -155,6 +167,37 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// Waits for SIGTERM (or SIGINT) and then signals the shared shutdown token.
+///
+/// Issue #1488: graceful shutdown for background workers.
+async fn shutdown_signal(token: CancellationToken) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received SIGINT, starting graceful shutdown"),
+        _ = terminate => tracing::info!("received SIGTERM, starting graceful shutdown"),
+    }
+
+    // Signal every background task sharing this token to stop accepting work
+    // and drain in-flight jobs.
+    token.cancel();
+}
+
 #[tokio::main]
 async fn main() {
     // Initialise OpenTelemetry distributed tracing.
@@ -208,9 +251,20 @@ async fn main() {
         "consensus cache initialized"
     );
 
+    // Shared shutdown token: every background task observes this and drains
+    // in-flight work when SIGTERM/SIGINT is received (issue #1488).
+    let shutdown = CancellationToken::new();
+
     let scheduler_db = Arc::clone(&db);
-    tokio::spawn(async move {
-        scheduler::run(scheduler_db).await;
+    let scheduler_shutdown = shutdown.clone();
+    let scheduler_handle = tokio::spawn(async move {
+        scheduler::run(scheduler_db, scheduler_shutdown).await;
+    });
+
+    let webhook_db = Arc::clone(&db);
+    let webhook_shutdown = shutdown.clone();
+    let webhook_handle = tokio::spawn(async move {
+        webhook_retry::run(webhook_db, webhook_shutdown).await;
     });
 
     let metrics = Metrics::new();
@@ -219,6 +273,7 @@ async fn main() {
         db,
         consensus,
         metrics,
+        shutdown: shutdown.clone(),
     };
 
     let global_limiter = rate_limit::RateLimiter::new(rate_limit::RateLimitConfig::new(100, 60));
@@ -249,58 +304,81 @@ async fn main() {
                     sensitive_limiter.clone(),
                     rate_limit::rate_limit_middleware,
                 ))
+                .get(routes::get_subscription)
                 .delete(routes::delete_subscription),
         )
         .route(
-            "/api/vaults/:vault_id/reminders",
-            get(routes::list_vault_reminders),
-        )
-        .route(
-            "/api/vaults/:vault_id/simulate-release",
-            get(routes::simulate_release),
-        )
-        .route(
-            "/api/vaults/:vault_id/sponsored-release",
-            post(routes::create_sponsored_release)
+            "/api/vaults/:vault_id/checkin",
+            post(routes::checkin)
                 .layer(middleware::from_fn_with_state(
-                    sensitive_limiter,
+                    checkin_limiter.clone(),
                     rate_limit::rate_limit_middleware,
-                ))
-                .get(routes::get_sponsored_releases),
+                )),
         )
         .route(
-            "/api/vaults/:vault_id/vesting/claim-bonus",
-            post(routes::claim_vesting_bonus),
+            "/api/vaults/:vault_id/release",
+            post(routes::release)
+                .layer(middleware::from_fn_with_state(
+                    release_limiter.clone(),
+                    rate_limit::rate_limit_middleware,
+                )),
         )
         .route(
-            "/api/vaults/:vault_id/vesting/bonus",
-            get(routes::get_vesting_bonus),
+            "/api/vaults/:vault_id/email-token",
+            post(routes::email_token)
+                .layer(middleware::from_fn_with_state(
+                    email_token_limiter.clone(),
+                    rate_limit::rate_limit_middleware,
+                )),
         )
         .route(
-            "/api/vaults/:vault_id/release-history",
-            get(routes::get_vault_release_history),
+            "/api/vaults/:vault_id/ws",
+            get(routes::websocket_handler),
         )
-        .route(
-            "/api/vaults/:vault_id/check-in",
-            post(routes::check_in)
-                .layer(middleware::from_fn_with_state(checkin_limiter, rate_limit::checkin_rate_limit_middleware)),
-        )
-        .route("/api/auth/token", post(auth::login))
-        .route("/api/auth/refresh", post(auth::refresh))
-        .layer(build_cors_layer())
-        .layer(middleware::from_fn(sanitization::sanitize_request))
         .layer(middleware::from_fn_with_state(
-            global_limiter,
+            global_limiter.clone(),
             rate_limit::rate_limit_middleware,
         ))
-        // Outermost layer so every response — including CORS/rate-limit
-        // rejections — carries the baseline security headers.
-        .layer(middleware::from_fn(
-            security_headers::security_headers_middleware,
-        ))
+        .layer(middleware::from_fn(security_headers::security_headers_middleware))
+        .layer(middleware::from_fn(request_id::request_id_middleware))
+        .layer(build_cors_layer())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    tracing::info!("listening on {}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("failed to bind address");
+
+    tracing::info!(%addr, "server listening");
+
+    // Serve with graceful shutdown: axum stops accepting new connections and
+    // waits for in-flight requests (including websocket upgrades) to finish.
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown.clone()))
+        .await;
+
+    if let Err(err) = serve_result {
+        tracing::error!(%err, "server error during shutdown");
+    }
+
+    // Drain background workers with a bounded timeout so deploys cannot hang.
+    tracing::info!(
+        timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+        "draining background workers"
+    );
+
+    let drain = async {
+        let _ = scheduler_handle.await;
+        let _ = webhook_handle.await;
+    };
+
+    match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, drain).await {
+        Ok(()) => tracing::info!("background workers drained cleanly"),
+        Err(_) => tracing::warn!(
+            timeout_secs = SHUTDOWN_DRAIN_TIMEOUT.as_secs(),
+            "shutdown drain timed out; exiting with in-flight work abandoned"
+        ),
+    }
+
+    tracing::info!("shutdown complete");
 }

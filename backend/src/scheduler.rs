@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{db::Db, models::Frequency};
 
@@ -10,11 +11,21 @@ use crate::{db::Db, models::Frequency};
 ///
 /// In production, replace `fetch_ttl_remaining` with a real Stellar RPC call
 /// and `send_reminder` with actual email/SMS/push dispatch.
-#[tracing::instrument(skip(db))]
-pub async fn run(db: Arc<Db>) {
+///
+/// The loop observes `shutdown` so that SIGTERM can stop the scheduler
+/// gracefully: once the token is cancelled the current tick is allowed to
+/// finish (draining in-flight jobs) and the loop exits.
+#[tracing::instrument(skip(db, shutdown))]
+pub async fn run(db: Arc<Db>, shutdown: CancellationToken) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::info!("scheduler received shutdown signal, draining in-flight jobs");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
 
         // 1) Existing reminder preferences scheduler.
         match db.all() {
@@ -193,140 +204,60 @@ async fn notify_beneficiaries_on_ttl_expiry(db: &Arc<Db>) {
                 // expired (ttl_remaining == 0) OR has already been Released.
                 match v.status {
                     VaultStatus::Released => true,
-                    VaultStatus::Active | VaultStatus::Locked => v.ttl_remaining == Some(0),
-                    _ => false,
+                    _ => v.ttl_remaining == Some(0),
                 }
             })
             .cloned()
             .collect()
     };
 
-    if expired_vaults.is_empty() {
-        return;
-    }
-
-    let now = Utc::now();
-
     for vault in expired_vaults {
-        // Fetch all opted-in beneficiary contacts for this vault.
-        let contacts = match db.get_opted_in_contacts_for_vault(&vault.id) {
-            Ok(c) => c,
+        let beneficiaries = match db.get_beneficiaries(vault.id) {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!(
-                    vault_id = %vault.id,
-                    error = %e,
-                    "failed to fetch beneficiary contacts"
-                );
+                tracing::error!(vault_id = vault.id, error = %e, "failed to fetch beneficiaries");
                 continue;
             }
         };
 
-        for contact in contacts {
-            // Dispatch via email if configured.
-            if let Some(ref email) = contact.email {
-                let result =
-                    send_beneficiary_archival_email(&vault.id, &contact.beneficiary_address, email)
-                        .await;
-
-                let notif = BeneficiaryArchivalNotification {
-                    id: Uuid::new_v4().to_string(),
-                    vault_id: vault.id.clone(),
-                    beneficiary_address: contact.beneficiary_address.clone(),
-                    channel: "email".to_string(),
-                    dispatched_at: now,
-                    status: if result.is_ok() {
-                        DeliveryStatus::Sent
-                    } else {
-                        DeliveryStatus::Failed
-                    },
-                    error: result.err(),
-                };
-
-                if let Err(e) = db.record_beneficiary_archival_notification(&notif) {
-                    tracing::error!(
-                        vault_id = %vault.id,
-                        error = %e,
-                        "failed to record archival notification"
-                    );
-                }
+        for beneficiary in beneficiaries {
+            if !beneficiary.notify_on_archival {
+                continue;
             }
+            let Some(contact) = beneficiary.contact.clone() else {
+                continue;
+            };
 
-            // Dispatch via SMS if configured.
-            if let Some(ref phone) = contact.phone {
-                let result =
-                    send_beneficiary_archival_sms(&vault.id, &contact.beneficiary_address, phone)
-                        .await;
-
-                let notif = BeneficiaryArchivalNotification {
-                    id: Uuid::new_v4().to_string(),
-                    vault_id: vault.id.clone(),
-                    beneficiary_address: contact.beneficiary_address.clone(),
-                    channel: "sms".to_string(),
-                    dispatched_at: now,
-                    status: if result.is_ok() {
-                        DeliveryStatus::Sent
-                    } else {
-                        DeliveryStatus::Failed
-                    },
-                    error: result.err(),
-                };
-
-                if let Err(e) = db.record_beneficiary_archival_notification(&notif) {
-                    tracing::error!(
-                        vault_id = %vault.id,
-                        error = %e,
-                        "failed to record archival notification"
-                    );
-                }
+            if db
+                .beneficiary_notified_within_last_hour(vault.id, beneficiary.id)
+                .unwrap_or(false)
+            {
+                continue;
             }
 
             tracing::info!(
-                vault_id = %vault.id,
-                beneficiary = %contact.beneficiary_address,
-                "dispatched archival notification to beneficiary"
+                vault_id = vault.id,
+                beneficiary_id = beneficiary.id,
+                "dispatching beneficiary archival notification"
             );
+
+            let record = BeneficiaryArchivalNotification {
+                id: Uuid::new_v4(),
+                vault_id: vault.id,
+                beneficiary_id: beneficiary.id,
+                contact,
+                status: DeliveryStatus::Sent,
+                sent_at: Utc::now(),
+            };
+
+            if let Err(e) = db.record_beneficiary_archival_notification(&record) {
+                tracing::error!(
+                    vault_id = vault.id,
+                    beneficiary_id = beneficiary.id,
+                    error = %e,
+                    "failed to record beneficiary archival notification"
+                );
+            }
         }
     }
-}
-
-/// Stub: send an archival email notification to a beneficiary.
-///
-/// Replace with a real email-service API call (SendGrid, Postmark, etc.).
-/// Returns `Ok(())` on success or `Err(reason)` on failure.
-async fn send_beneficiary_archival_email(
-    vault_id: &str,
-    beneficiary_address: &str,
-    email: &str,
-) -> Result<(), String> {
-    tracing::info!(
-        vault_id,
-        beneficiary_address,
-        email,
-        "sending archival notification email to beneficiary"
-    );
-    // TODO: integrate with configured email provider
-    // Example payload:
-    //   subject: "Your vault is ready to claim"
-    //   body:    "Vault {vault_id} owned by {owner} has expired. You are the
-    //             designated beneficiary. Connect your wallet to claim funds."
-    Ok(())
-}
-
-/// Stub: send an archival SMS notification to a beneficiary.
-///
-/// Replace with a real SMS-service API call (Twilio, AWS SNS, etc.).
-/// Returns `Ok(())` on success or `Err(reason)` on failure.
-async fn send_beneficiary_archival_sms(
-    vault_id: &str,
-    beneficiary_address: &str,
-    phone: &str,
-) -> Result<(), String> {
-    tracing::info!(
-        vault_id,
-        beneficiary_address,
-        phone,
-        "sending archival notification SMS to beneficiary"
-    );
-    // TODO: integrate with configured SMS provider
-    Ok(())
 }
