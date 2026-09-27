@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod models;
 pub mod notifications;
 pub mod otel;
+pub mod rate_limit;
 pub mod routes;
 /// Issue #1199: request input sanitization middleware
 pub mod sanitization;
@@ -27,5 +28,6 @@ pub use fee_sponsorship::*;
 pub use handlers::*;
 pub use models::*;
 pub use notifications::*;
+pub use rate_limit::*;
 pub use templates::*;
 pub use websocket::*;
