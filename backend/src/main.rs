@@ -28,6 +28,7 @@ mod routes;
 mod sanitization;
 mod scheduler;
 mod security_headers;
+mod ttl_watch;
 mod two_factor;
 mod webhook_retry;
 
@@ -160,7 +161,7 @@ async fn health_handler() -> Json<serde_json::Value> {
 async fn ready_handler(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    match state.db.check_connectivity() {
+    match state.db.check_connectivity().await {
         Ok(()) => Ok(Json(serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
@@ -205,35 +206,77 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-/// Waits for SIGTERM (or SIGINT) and then signals the shared shutdown token.
+/// Default timeout applied to the Soroban RPC `get_contract_version` call.
+const CONTRACT_VERSION_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fetches the deployed contract's version via Soroban RPC.
 ///
-/// Issue #1488: graceful shutdown for background workers.
-async fn shutdown_signal(token: CancellationToken) {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+/// The RPC endpoint is read from `SOROBAN_RPC_URL` (falling back to
+/// `STELLAR_RPC_URL`), and the contract id from `CONTRACT_ID`. When either is
+/// missing the check is skipped by returning `Ok(1)` so local/dev startup is
+/// not blocked. Any transport failure or timeout surfaces as a clear `Err`.
+async fn fetch_contract_version() -> Result<u32, String> {
+    let rpc_url = std::env::var("SOROBAN_RPC_URL")
+        .or_else(|_| std::env::var("STELLAR_RPC_URL"))
+        .ok();
+    let contract_id = std::env::var("CONTRACT_ID").ok();
+
+    let (rpc_url, contract_id) = match (rpc_url, contract_id) {
+        (Some(url), Some(id)) if !url.is_empty() && !id.is_empty() => (url, id),
+        _ => {
+            tracing::warn!(
+                "SOROBAN_RPC_URL/CONTRACT_ID not configured; skipping contract version check"
+            );
+            return Ok(1);
+        }
     };
 
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
+    let client = reqwest::Client::builder()
+        .timeout(CONTRACT_VERSION_RPC_TIMEOUT)
+        .build()
+        .map_err(|e| format!("failed to build Soroban RPC client: {e}"))?;
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getContractData",
+        "params": {
+            "contractId": contract_id,
+            "key": "get_contract_version",
+            "durability": "persistent",
+        }
+    });
 
-    tokio::select! {
-        _ = ctrl_c => tracing::info!("received SIGINT, starting graceful shutdown"),
-        _ = terminate => tracing::info!("received SIGTERM, starting graceful shutdown"),
+    let response = client
+        .post(&rpc_url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Soroban RPC request to {rpc_url} failed: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Soroban RPC returned HTTP {} for get_contract_version",
+            response.status()
+        ));
     }
 
-    // Signal every background task sharing this token to stop accepting work
-    // and drain in-flight jobs.
-    token.cancel();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("invalid Soroban RPC response: {e}"))?;
+
+    if let Some(err) = body.get("error") {
+        return Err(format!("Soroban RPC error: {err}"));
+    }
+
+    let version = body
+        .get("result")
+        .and_then(|r| r.get("version"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "Soroban RPC response missing numeric `version`".to_string())?;
+
+    u32::try_from(version).map_err(|_| format!("contract version {version} out of range"))
 }
 
 #[tokio::main]
@@ -248,15 +291,7 @@ async fn main() {
     let min_contract_version =
         parse_min_contract_version(std::env::var("MIN_CONTRACT_VERSION").ok());
 
-    let version_result = check_contract_version(
-        || async {
-            // TODO: replace with real Soroban client call when available
-            // For now, this is a stub that returns Ok(1) so startup proceeds
-            Ok::<u32, String>(1)
-        },
-        min_contract_version,
-    )
-    .await;
+    let version_result = check_contract_version(fetch_contract_version, min_contract_version).await;
 
     tracing::info!("{}", version_result);
 
@@ -278,9 +313,12 @@ async fn main() {
         "database pool configuration"
     );
 
+    // Issue #1487: unify SQLite access on sqlx. The database is opened through
+    // the sqlx-backed `Db` handle and migrations are applied via `sqlx::migrate!`
+    // inside `Db::migrate`, so no rusqlite call sites remain here.
     let db =
         Arc::new(Db::open_with_pool_config(":memory:", &pool_config).expect("failed to open db"));
-    db.migrate().expect("migration failed");
+    db.migrate().await.expect("migration failed");
 
     let consensus = NodeCache::from_env();
     tracing::info!(
@@ -296,6 +334,36 @@ async fn main() {
     // in-flight work when SIGTERM/SIGINT is received (issue #1488).
     let shutdown = CancellationToken::new();
 
+    let scheduler_db = Arc::clone(&db);
+    let scheduler_shutdown = shutdown.clone();
+    let scheduler_handle = tokio::spawn(async move {
+        scheduler::run(scheduler_db, scheduler_shutdown).await;
+    });
+
+    let webhook_db = Arc::clone(&db);
+    let webhook_shutdown = shutdown.clone();
+    let webhook_handle = tokio::spawn(async move {
+        webhook_retry::run(webhook_db, webhook_shutdown).await;
+    });
+
+    // #1596: warn owners when a vault's storage TTL nears archival.
+    let notification_service = Arc::new(notifications::NotificationService::new(
+        Arc::new(notifications::FcmClient::new(
+            std::env::var("FCM_SERVER_KEY").unwrap_or_default(),
+            std::env::var("FCM_PROJECT_ID").unwrap_or_default(),
+        )),
+        notifications::create_token_store(),
+        notifications::create_prefs_store(),
+        notifications::create_schedule_store(),
+        notifications::create_delivery_store(),
+    ));
+    notifications::start_scheduler(Arc::clone(&notification_service), 60);
+    ttl_watch::spawn(
+        Arc::clone(&db),
+        notification_service,
+        ttl_watch::TtlWatchConfig::from_env(),
+    );
+
     let state = AppState {
         db: Arc::clone(&db),
         consensus: Arc::new(consensus),
@@ -306,29 +374,26 @@ async fn main() {
 
     let app = routes::build_router(state.clone());
 
-    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("failed to bind address");
+    let app = Router::new()
+        .route("/health", get(health_handler))
+        .route("/health/consensus", get(consensus_health_handler))
+        .route("/ready", get(ready_handler))
+        .route("/metrics", get(metrics_handler))
+        .route(
+            "/api/vaults/:vault_id/reminder-preferences",
+            post(routes::set_preferences)
+                .layer(middleware::from_fn_with_state(
+                    sensitive_limiter.clone(),
+                    rate_limit::rate_limit_middleware,
+                ))
+                .get(routes::get_preferences)
+                .delete(routes::delete_preferences),
+        )
+        .route(
+            "/api/vaults/:vault_id/subscriptions",
+            post(routes::set_subscription)
+                .layer(middleware::from_fn_with_state(
+                    sensitive_limiter.clone(),
+                  
 
-    tracing::info!("listening on {}", addr);
-
-    let shutdown_for_server = shutdown.clone();
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        shutdown_signal(shutdown_for_server).await;
-    });
-
-    if let Err(err) = server.await {
-        tracing::error!("server error: {}", err);
-    }
-
-    // Allow background workers to drain in-flight work before exiting.
-    if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, shutdown.cancelled())
-        .await
-        .is_err()
-    {
-        tracing::warn!("shutdown drain timed out");
-    }
-
-    tracing::info!("shutdown complete");
-}
+/* … truncated 2140 chars — edit only what you need near the top … */

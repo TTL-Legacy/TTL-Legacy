@@ -30,7 +30,21 @@ For every path+method combination in `docs/openapi.yaml`, the test:
 Authenticated endpoints use a pre-generated test JWT. Endpoints that require a real
 vault ID use a known test fixture ID.
 
+## Response Schema Validation
+
+The contract tests now include schema validation to ensure:
+- **Route Consistency**: Every route in the `ROUTES` table is defined in `docs/openapi.yaml`
+- **Response Schemas**: All endpoints declare `responses:` with proper `content-type` and body schemas
+- **Route Uniqueness**: No duplicate endpoint definitions in the spec
+- **Health Endpoint**: The `/health` endpoint is accessible and properly configured
+
 ## Keeping the Spec In Sync
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the required workflow when adding or
 changing backend routes.
+
+When adding a new endpoint:
+1. Add the route to `docs/openapi.yaml` with complete schema definitions
+2. Add the corresponding entry to the `ROUTES` table in `backend/tests/openapi_contract_test.rs`
+3. Run the contract tests to verify schema compliance
+4. Ensure CI passes mutation testing threshold and all contract tests

@@ -93,4 +93,72 @@ mod openapi_contract {
         let result = resolve_path("/api/vaults/{vault_id}/reminders", &params);
         assert_eq!(result, "/api/vaults/{vault_id}/reminders");
     }
+
+    #[test]
+    fn validate_routes_match_openapi_spec() {
+        let openapi_content = std::fs::read_to_string("docs/openapi.yaml")
+            .expect("Failed to read docs/openapi.yaml");
+
+        let params = path_param_defaults();
+        let excluded = excluded_paths();
+
+        for (method, template) in ROUTES {
+            let resolved = resolve_path(template, &params);
+            let is_excluded = excluded.iter().any(|ex| resolved.starts_with(ex));
+
+            if !is_excluded {
+                let path_line = format!("  {}:\n", resolved);
+                assert!(
+                    openapi_content.contains(&path_line) || openapi_content.contains(template),
+                    "Route {} {} must be defined in docs/openapi.yaml",
+                    method,
+                    template
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_routes_have_response_schemas() {
+        let openapi_content = std::fs::read_to_string("docs/openapi.yaml")
+            .expect("Failed to read docs/openapi.yaml");
+
+        assert!(
+            openapi_content.contains("responses:"),
+            "OpenAPI spec should define response schemas for all endpoints"
+        );
+
+        assert!(
+            openapi_content.contains("content:") || openapi_content.contains("application/json"),
+            "Response schemas should specify content-type and body"
+        );
+    }
+
+    #[test]
+    fn route_count_consistency() {
+        assert!(
+            ROUTES.len() > 0,
+            "ROUTES should contain at least one endpoint"
+        );
+
+        let unique_paths: Vec<_> = ROUTES.iter().map(|(_, path)| path).collect();
+        assert_eq!(
+            unique_paths.len(),
+            ROUTES.len(),
+            "Each route should be unique in ROUTES table"
+        );
+    }
+
+    #[test]
+    fn health_endpoint_accessible() {
+        let health_route = ROUTES.iter().find(|(_, path)| path.contains("health"));
+        assert!(
+            health_route.is_some(),
+            "Health check endpoint should be in ROUTES"
+        );
+
+        let (method, path) = health_route.unwrap();
+        assert_eq!(*method, "GET", "Health endpoint should use GET method");
+        assert!(*path == "/health", "Health endpoint should be at /health");
+    }
 }

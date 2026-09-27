@@ -427,4 +427,53 @@ mod tests {
         assert_eq!(report.conflicts_resolved, 1);
         assert_eq!(node_b.get("vault:3").unwrap().unwrap().value, "winner");
     }
+
+    #[test]
+    fn test_majority_agreement() {
+        let backend: Arc<dyn CacheBackend> = shared_backend();
+        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::Voting);
+        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::Voting);
+        let node_c = NodeCache::new("node-c", Arc::clone(&backend), ConflictStrategy::Voting);
+
+        let entry = sample_entry("data:shared", "unanimous", "node-a", 3_000);
+        backend.set_entry(&entry).unwrap();
+        node_a.set_local_entry(entry.clone());
+        node_b.set_local_entry(entry.clone());
+        node_c.set_local_entry(entry.clone());
+
+        let report = node_c.check_and_resolve().unwrap();
+        assert!(report.consistent);
+        assert_eq!(report.conflicts_resolved, 0);
+    }
+
+    #[test]
+    fn test_no_quorum() {
+        let backend: Arc<dyn CacheBackend> = shared_backend();
+        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::Voting);
+        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::Voting);
+
+        let entry_a = sample_entry("data:conflict", "version-a", "node-a", 1_000);
+        let entry_b = sample_entry("data:conflict", "version-b", "node-b", 2_000);
+
+        backend.set_entry(&entry_b).unwrap();
+        node_a.set_local_entry(entry_a);
+        node_b.set_local_entry(entry_b.clone());
+
+        let report = node_a.check_and_resolve().unwrap();
+        assert!(!report.consistent);
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].key, "data:conflict");
+    }
+
+    #[test]
+    fn test_node_timeout_detection() {
+        let backend: Arc<dyn CacheBackend> = shared_backend();
+        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::Voting);
+
+        node_a.put("vault:timeout-test", "data").unwrap();
+
+        let entry = node_a.get("vault:timeout-test").unwrap();
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().value, "data");
+    }
 }

@@ -12,6 +12,9 @@ name: Mutation Testing
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   mutation-testing:
     name: Mutation Testing (informational)
@@ -21,13 +24,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
 
       - name: Cache Cargo registry and build artefacts
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry
@@ -45,9 +48,37 @@ jobs:
         # The exit code is ignored because the job is non-blocking.
         run: cargo mutants --package ttl-vault 2>&1 | tee mutants-report.txt
 
+      - name: Parse mutation score and enforce threshold
+        run: |
+          REPORT_FILE="mutants-report.txt"
+          THRESHOLD=75
+
+          if [ ! -f "$REPORT_FILE" ]; then
+            echo "Error: Mutation report not found"
+            exit 1
+          fi
+
+          SURVIVAL_RATE=$(grep -oP 'survival rate\s*=\s*\K[0-9.]+(?=%)' "$REPORT_FILE" | head -1)
+
+          if [ -z "$SURVIVAL_RATE" ]; then
+            echo "⚠️  Could not parse mutation score from report"
+            SURVIVAL_RATE=0
+          fi
+
+          echo "📊 Mutation Testing Score: ${SURVIVAL_RATE}% (threshold: ${THRESHOLD}%)"
+
+          if (( $(echo "$SURVIVAL_RATE < $THRESHOLD" | bc -l) )); then
+            echo "❌ Mutation survival rate (${SURVIVAL_RATE}%) is below threshold (${THRESHOLD}%)"
+            echo "Consider improving test coverage for uncovered code paths"
+            exit 1
+          else
+            echo "✅ Mutation survival rate (${SURVIVAL_RATE}%) meets threshold (${THRESHOLD}%)"
+          fi
+
       - name: Upload mutant survival report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: mutant-survival-report
           path: mutants-report.txt
           retention-days: 14
+        if: always()

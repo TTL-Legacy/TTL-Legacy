@@ -342,6 +342,48 @@ impl NotificationService {
         });
     }
 
+    /// Enqueue an immediate `ExpiryWarning` telling the owner that the vault's
+    /// on-chain storage TTL is close to archival (#1596).
+    ///
+    /// Respects the owner's `expiry_warning_enabled` preference and global
+    /// unsubscribe, and does not stack on an expiry warning that is already due.
+    /// Returns `true` if the owner will be warned (enqueued now or already due),
+    /// `false` if the owner opted out.
+    #[instrument(skip(self))]
+    pub fn enqueue_ttl_archival_warning(&self, vault_id: &str, owner: &str) -> bool {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.expiry_warning_enabled {
+            return false;
+        }
+
+        let now = Utc::now();
+        let mut store = self
+            .schedule
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let already_due = store.iter().any(|s| {
+            s.vault_id == vault_id
+                && s.notification_type == NotificationType::ExpiryWarning
+                && s.status == DeliveryStatus::Pending
+                && s.scheduled_at <= now
+        });
+        if already_due {
+            return true;
+        }
+
+        store.push(ScheduledNotification {
+            id: Uuid::new_v4().to_string(),
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type: NotificationType::ExpiryWarning,
+            scheduled_at: now,
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+        });
+        true
+    }
+
     /// Schedule an immediate notification (fires now).
     #[instrument(skip(self), fields(vault_id = %vault_id, notification_type = ?notification_type))]
     pub fn schedule_immediate(

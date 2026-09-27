@@ -16,6 +16,9 @@ on:
         required: false
         default: '1024'
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
@@ -38,15 +41,15 @@ jobs:
       fail-fast: false
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rust-src
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -56,7 +59,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: target/
           key: ${{ runner.os }}-fuzz-${{ matrix.fuzz_target }}-${{ hashFiles('**/Cargo.lock') }}
@@ -108,7 +111,7 @@ jobs:
 
       - name: Archive fuzzer results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fuzz-results-${{ matrix.fuzz_target }}
           path: |

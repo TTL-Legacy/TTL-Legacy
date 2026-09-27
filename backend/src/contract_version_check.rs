@@ -5,9 +5,15 @@
 /// begins accepting requests.
 ///
 /// This module defines the version check logic and result structure. The actual
-/// contract interaction (RPC call to get_contract_version) is mocked in tests
-/// and implemented via the contract client in production.
+/// contract interaction (RPC call to get_contract_version) is implemented via
+/// `fetch_contract_version_via_rpc`, while the check itself accepts an injectable
+/// closure so tests can substitute fakes.
 use std::fmt;
+use std::time::Duration;
+
+/// Default timeout applied to the Soroban RPC call when fetching the contract
+/// version. Kept short so a hung/unreachable endpoint fails fast at startup.
+pub const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Result of a contract version compatibility check.
 #[derive(Debug, Clone)]
@@ -72,6 +78,84 @@ where
             error: Some(format!("Unable to reach contract to verify version: {}", e)),
         },
     }
+}
+
+/// Fetch the deployed contract's version by invoking `get_contract_version`
+/// over Soroban RPC.
+///
+/// This is the production implementation of the closure passed to
+/// [`check_contract_version`]. It performs a real RPC round-trip against
+/// `rpc_url` for `contract_id`, applying `timeout` so an unreachable or
+/// unresponsive endpoint fails fast with a clear error instead of hanging
+/// startup indefinitely.
+///
+/// # Arguments
+/// * `rpc_url` - The Soroban RPC endpoint (e.g. `http://localhost:8000/soroban/rpc`).
+/// * `contract_id` - The deployed contract's identifier.
+/// * `timeout` - Maximum time to wait for the RPC response.
+///
+/// # Returns
+/// `Ok(version)` on success, or `Err(message)` describing the failure
+/// (timeout, transport error, or malformed response).
+pub async fn fetch_contract_version_via_rpc(
+    rpc_url: &str,
+    contract_id: &str,
+    timeout: Duration,
+) -> Result<u32, String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getContractVersion",
+        "params": {
+            "contractId": contract_id,
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("failed to build RPC client: {}", e))?;
+
+    let response = client
+        .post(rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!(
+                    "Soroban RPC request to {} timed out after {:?}",
+                    rpc_url, timeout
+                )
+            } else {
+                format!("Soroban RPC request to {} failed: {}", rpc_url, e)
+            }
+        })?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Soroban RPC returned HTTP {} from {}",
+            response.status(),
+            rpc_url
+        ));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse Soroban RPC response: {}", e))?;
+
+    if let Some(err) = body.get("error") {
+        return Err(format!("Soroban RPC error: {}", err));
+    }
+
+    body.get("result")
+        .and_then(|r| r.get("version"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .ok_or_else(|| {
+            "Soroban RPC response missing result.version".to_string()
+        })
 }
 
 /// Parse MIN_CONTRACT_VERSION from environment variables.
@@ -207,5 +291,49 @@ mod tests {
         let display = result.to_string();
         assert!(display.contains("Contract version 2"));
         assert!(display.contains("minimum required: 1"));
+    }
+
+    // i) rpc_fetch_reports_clear_error_when_endpoint_unreachable
+    //
+    // Integration-style test: points the RPC fetch at a port with no listener
+    // and asserts it fails fast with a clear, non-panicking error rather than
+    // hanging or returning a stub version.
+    #[tokio::test]
+    async fn rpc_fetch_reports_clear_error_when_endpoint_unreachable() {
+        let result = fetch_contract_version_via_rpc(
+            "http://127.0.0.1:1/soroban/rpc",
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            Duration::from_millis(500),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Soroban RPC request"));
+    }
+
+    // j) rpc_fetch_result_feeds_version_check
+    //
+    // Exercises the production wiring: the RPC fetch closure is passed into
+    // check_contract_version, and an unreachable endpoint yields an
+    // incompatible result with a populated error (never a stub Ok(1)).
+    #[tokio::test]
+    async fn rpc_fetch_result_feeds_version_check() {
+        let result = check_contract_version(
+            || async {
+                fetch_contract_version_via_rpc(
+                    "http://127.0.0.1:1/soroban/rpc",
+                    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                    Duration::from_millis(500),
+                )
+                .await
+            },
+            1,
+        )
+        .await;
+
+        assert!(!result.compatible);
+        assert!(result.contract_version.is_none());
+        assert!(result.error.is_some());
     }
 }

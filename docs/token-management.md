@@ -778,6 +778,59 @@ pub fn get_token_hedge(env: Env, vault_id: u64) -> Option<TokenHedge>
 ### Purpose
 
 Automatically rebalance a multi-token vault portfolio based on configured target weights.
+This feature allows vault owners to maintain a diversified portfolio that matches their intended asset allocation strategy.
+
+### Target Weights and Rebalancing Thresholds
+
+#### Target Weights
+
+Target weights define the desired allocation percentage for each token in the portfolio.
+
+**Definition:**
+- Each token has a `target_bps` (basis points) value representing its desired allocation
+- All `target_bps` values must sum to exactly 10000 (100%)
+- Valid range per token: 0 to 10000 basis points
+
+**Example Portfolio:**
+```
+Portfolio with 3 tokens:
+- XLM: 5000 bps = 50%
+- USDC: 3000 bps = 30%
+- ETH: 2000 bps = 20%
+Total: 10000 bps = 100% ✓
+
+Portfolio value: $10,000
+- XLM holdings: $5,000 (50%)
+- USDC holdings: $3,000 (30%)
+- ETH holdings: $2,000 (20%)
+```
+
+#### Rebalancing Threshold
+
+The rebalance threshold defines when a portfolio is considered "out of balance" and needs rebalancing.
+
+**Definition:**
+- `rebalance_threshold_bps`: Drift tolerance in basis points
+- Rebalancing is triggered when any token's actual allocation drifts beyond the threshold from its target
+- Example: threshold of 500 bps (5%) means rebalance if actual allocation differs from target by 5% or more
+
+**When to Rebalance:**
+```
+Portfolio with target allocations:
+- XLM target: 50% ± 5%
+- USDC target: 30% ± 5%
+- ETH target: 20% ± 5%
+
+Rebalance triggered when:
+- XLM drops below 45% or rises above 55%
+- USDC drops below 25% or rises above 35%
+- ETH drops below 15% or rises above 25%
+```
+
+**Typical Thresholds:**
+- Conservative (1-3%): Frequent rebalancing, lower drift, higher fees
+- Moderate (3-5%): Balanced approach, suitable for most portfolios
+- Aggressive (5-10%): Infrequent rebalancing, higher drift tolerance, lower fees
 
 ### API
 
@@ -794,11 +847,32 @@ pub fn set_token_rebalance(
 ```
 
 **Parameters:**
-- `target_weights`: Per-token allocations; `target_bps` values must sum to 10000
-- `rebalance_threshold_bps`: Drift tolerance before triggering a rebalance (e.g., 500 = 5%)
+- `vault_id`: The vault ID to rebalance
+- `caller`: Must be the vault owner
+- `target_weights`: Vector of token weights with target allocations
+  ```rust
+  pub struct TokenWeight {
+      pub token_address: Address,
+      pub target_bps: u32,  // 0 to 10000 (basis points)
+  }
+  ```
+- `rebalance_threshold_bps`: Drift tolerance in basis points (e.g., 500 = 5%)
+
+**Validation Rules:**
+- Sum of all `target_bps` must equal exactly 10000
+- All `target_bps` values must be non-negative
+- `rebalance_threshold_bps` must be between 0 and 10000
+- Caller must be the vault owner
+- Vault must support multi-token holdings
 
 **Events:**
 - `TOKEN_REBALANCE_TOPIC`: Emitted when rebalance config is set
+
+**Errors:**
+- `InvalidTargetWeights`: Weights don't sum to 10000
+- `InvalidThreshold`: Threshold is out of range
+- `Unauthorized`: Caller is not the vault owner
+- `VaultNotFound`: Vault does not exist
 
 #### Trigger Rebalance
 
@@ -806,14 +880,171 @@ pub fn set_token_rebalance(
 pub fn trigger_rebalance(env: Env, vault_id: u64) -> Result<(), ContractError>
 ```
 
+Manually triggers a rebalance of the vault portfolio to match target weights.
+
+**When to Use:**
+- After significant market movements
+- When portfolio has drifted beyond threshold
+- Periodically (e.g., quarterly or annually)
+- When vault owner wants to manually align allocations
+
+**Rebalancing Process:**
+1. Calculate current allocation for each token (actual_bps)
+2. Compare with target allocation
+3. Swap tokens to bring allocations within threshold
+4. Deduct rebalancing fees (typically 40 bps)
+5. Emit `TOKEN_REBALANCED_TOPIC` event
+
 **Events:**
-- `TOKEN_REBALANCED_TOPIC`: Emitted on each rebalance
+- `TOKEN_REBALANCED_TOPIC`: Emitted after rebalance completes
+
+**Fees:**
+- Standard rebalancing fee: 40 bps (0.4%) of portfolio value
 
 #### Get Token Rebalance
 
 ```rust
 pub fn get_token_rebalance(env: Env, vault_id: u64) -> Option<TokenRebalanceConfig>
 ```
+
+Retrieves the current rebalancing configuration and status.
+
+**Returns:**
+```rust
+pub struct TokenRebalanceConfig {
+    pub vault_id: u64,
+    pub target_weights: Vec<TokenWeight>,
+    pub rebalance_threshold_bps: u32,
+    pub last_rebalanced_at: u64,  // Ledger sequence number
+    pub total_rebalances: u32,     // Historical count
+}
+```
+
+### Example Invocations
+
+#### Example 1: Set Up a Balanced 60/40 Portfolio
+
+```rust
+// Create a 60/40 XLM/USDC portfolio with 3% rebalance threshold
+let target_weights = vec![
+    TokenWeight {
+        token_address: xlm_token.clone(),
+        target_bps: 6000,  // 60%
+    },
+    TokenWeight {
+        token_address: usdc_token.clone(),
+        target_bps: 4000,  // 40%
+    },
+];
+
+client.set_token_rebalance(
+    &vault_id,
+    &owner,
+    &target_weights,
+    &300u32,  // 3% threshold
+)?;
+
+println!("Portfolio set up: 60% XLM, 40% USDC");
+println!("Rebalance threshold: 3%");
+```
+
+#### Example 2: Diversified Multi-Asset Portfolio
+
+```rust
+// Create a diversified portfolio
+let target_weights = vec![
+    TokenWeight {
+        token_address: xlm_token.clone(),
+        target_bps: 5000,  // 50%
+    },
+    TokenWeight {
+        token_address: usdc_token.clone(),
+        target_bps: 2500,  // 25%
+    },
+    TokenWeight {
+        token_address: eth_token.clone(),
+        target_bps: 1500,  // 15%
+    },
+    TokenWeight {
+        token_address: btc_token.clone(),
+        target_bps: 1000,  // 10%
+    },
+];
+
+client.set_token_rebalance(
+    &vault_id,
+    &owner,
+    &target_weights,
+    &500u32,  // 5% threshold
+)?;
+
+// Later, trigger a rebalance if markets have shifted
+let rebalanced = client.trigger_rebalance(&vault_id)?;
+println!("Portfolio rebalanced to target weights");
+
+// Check current rebalance config
+if let Some(config) = client.get_token_rebalance(&vault_id) {
+    println!("Total rebalances performed: {}", config.total_rebalances);
+    println!("Last rebalanced at ledger: {}", config.last_rebalanced_at);
+}
+```
+
+#### Example 3: Conservative Portfolio with Low Drift Tolerance
+
+```rust
+// Conservative 80/20 portfolio with 1% rebalance threshold
+// This maintains tight allocation control
+let target_weights = vec![
+    TokenWeight {
+        token_address: usdc_token.clone(),
+        target_bps: 8000,  // 80% stablecoins
+    },
+    TokenWeight {
+        token_address: xlm_token.clone(),
+        target_bps: 2000,  // 20% native asset
+    },
+];
+
+client.set_token_rebalance(
+    &vault_id,
+    &owner,
+    &target_weights,
+    &100u32,  // 1% tight threshold
+)?;
+
+println!("Conservative portfolio: 80% USDC, 20% XLM");
+println!("Rebalance threshold: 1% (tight control)");
+```
+
+### Cost Analysis
+
+**Rebalancing Costs:**
+
+```
+Portfolio value: $10,000
+Rebalance threshold: 5%
+Rebalancing fee rate: 40 bps
+
+Cost per rebalance: ($10,000 × 40) / 10000 = $4.00
+Annual cost (monthly rebalance): $4.00 × 12 = $48.00
+Annual cost (quarterly rebalance): $4.00 × 4 = $16.00
+```
+
+**Break-even Analysis:**
+```
+If portfolio rebalance saves 2% in value drift per year:
+Value saved: $10,000 × 0.02 = $200/year
+Cost for quarterly rebalance: $16/year
+Net benefit: $200 - $16 = $184/year (92% ROI)
+```
+
+### Best Practices
+
+1. **Set Realistic Thresholds**: Balance between maintaining allocations and minimizing fees
+2. **Monitor Periodically**: Check drift and rebalance when approaching threshold
+3. **Coordinate with Market Conditions**: Avoid rebalancing during high volatility
+4. **Start Conservative**: Use higher thresholds (5-10%) to learn the feature
+5. **Review Annually**: Adjust target weights and thresholds based on market changes
 
 ## Security Considerations
 

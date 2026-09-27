@@ -87,6 +87,41 @@ pub async fn log_state_modification(
     }
 }
 
+/// Helper: record an escalation attempt in the audit log.
+///
+/// Escalation runs from background tasks (no request headers), so this
+/// variant takes explicit actor/ip values and is safe to call from the
+/// scheduler without an `axum` request context.
+pub async fn log_escalation_attempt(
+    db: &Arc<Db>,
+    vault_id: &str,
+    tier: u8,
+    recipient: &str,
+    result: &str,
+    details: Option<serde_json::Value>,
+) {
+    let mut merged = details.unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = merged.as_object_mut() {
+        obj.insert("vault_id".to_string(), serde_json::json!(vault_id));
+        obj.insert("tier".to_string(), serde_json::json!(tier));
+        obj.insert("recipient".to_string(), serde_json::json!(recipient));
+    }
+
+    let entry = AuditLogEntry {
+        id: 0,
+        timestamp: Utc::now(),
+        user_id: "system:escalation".to_string(),
+        action: "escalation.dispatch".to_string(),
+        resource: format!("vault/{vault_id}"),
+        result: result.to_string(),
+        ip_address: "internal".to_string(),
+        details: Some(merged),
+    };
+    if let Err(e) = db.insert_audit_log(&entry) {
+        tracing::error!(error = %e, "failed to persist escalation audit log entry");
+    }
+}
+
 /// Check that the request carries a valid admin API key.
 pub fn authorize_admin(headers: &HeaderMap) -> Result<(), ApiError> {
     let api_key = std::env::var("ADMIN_API_KEY").unwrap_or_default();

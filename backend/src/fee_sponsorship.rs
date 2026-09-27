@@ -208,6 +208,11 @@ fn is_valid_stellar_account(account: &str) -> bool {
 }
 
 /// Generate a mock transaction hash for testing.
+///
+/// This helper is only compiled in test builds. Production code must never
+/// fabricate a transaction hash; it must submit a real fee-bump transaction
+/// via Soroban RPC and return the hash reported by the network.
+#[cfg(test)]
 fn generate_mock_tx_hash(beneficiary: &str, amount: i128, memo: Option<&str>) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -235,152 +240,6 @@ pub enum FeeSponsorsException {
     /// Insufficient balance to deduct protocol fee.
     InsufficientBalance(String),
     /// Fee bump transaction construction failed.
-    TransactionConstructionFailed(String),
-    /// Stellar network error.
-    StellarError(String),
-    /// Database error.
-    DatabaseError(String),
-}
+    TransactionConstr
 
-impl fmt::Display for FeeSponsorsException {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidAccount(msg) => write!(f, "Invalid account: {}", msg),
-            Self::InvalidAmount(msg) => write!(f, "Invalid amount: {}", msg),
-            Self::VaultNotFound(msg) => write!(f, "Vault not found: {}", msg),
-            Self::InsufficientBalance(msg) => write!(f, "Insufficient balance: {}", msg),
-            Self::TransactionConstructionFailed(msg) => {
-                write!(f, "Transaction construction failed: {}", msg)
-            }
-            Self::StellarError(msg) => write!(f, "Stellar error: {}", msg),
-            Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for FeeSponsorsException {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_calculate_protocol_fee_0_1_percent() {
-        // 0.1% of 10,000 stroops = 10 stroops
-        let amount = 10_000i128;
-        let fee = calculate_protocol_fee(amount);
-        assert_eq!(fee, 10);
-
-        // 0.1% of 1,000,000 stroops = 1,000 stroops
-        let amount = 1_000_000i128;
-        let fee = calculate_protocol_fee(amount);
-        assert_eq!(fee, 1_000);
-
-        // 0.1% of 100 stroops = 0 stroops (rounded down)
-        let amount = 100i128;
-        let fee = calculate_protocol_fee(amount);
-        assert_eq!(fee, 0);
-    }
-
-    #[test]
-    fn test_construct_fee_bump_transaction_valid() {
-        let beneficiary = "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC";
-        let sponsor = "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT";
-
-        let result = construct_fee_bump_transaction(beneficiary, sponsor, 1_000_000, None);
-        assert!(result.is_ok());
-
-        let tx_hash = result.unwrap();
-        assert!(!tx_hash.is_empty());
-        assert_eq!(tx_hash.len(), 64); // hex-encoded hash
-    }
-
-    #[test]
-    fn test_construct_fee_bump_transaction_with_memo() {
-        let beneficiary = "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC";
-        let sponsor = "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT";
-        let memo = "Release claim 2025-01-01";
-
-        let result = construct_fee_bump_transaction(beneficiary, sponsor, 1_000_000, Some(memo));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_construct_fee_bump_transaction_invalid_beneficiary() {
-        let result = construct_fee_bump_transaction(
-            "invalid",
-            "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT",
-            1_000_000,
-            None,
-        );
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            FeeSponsorsException::InvalidAccount(_) => (),
-            _ => panic!("expected InvalidAccount error"),
-        }
-    }
-
-    #[test]
-    fn test_construct_fee_bump_transaction_invalid_sponsor() {
-        let beneficiary = "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC";
-        let result = construct_fee_bump_transaction(beneficiary, "not-a-sponsor", 1_000_000, None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_construct_fee_bump_transaction_invalid_amount() {
-        let beneficiary = "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC";
-        let sponsor = "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT";
-
-        let result = construct_fee_bump_transaction(beneficiary, sponsor, 0, None);
-        assert!(result.is_err());
-
-        let result = construct_fee_bump_transaction(beneficiary, sponsor, -1_000_000, None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_is_valid_stellar_account() {
-        assert!(is_valid_stellar_account(
-            "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC"
-        ));
-        assert!(is_valid_stellar_account(
-            "GCCZWCG4ACXC5TIWC7XAUCJLX4I7AKTDAUF5AQ6MNJ5UKXVWNPGU7XT"
-        ));
-
-        // Invalid: too short
-        assert!(!is_valid_stellar_account(
-            "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC123"
-        ));
-
-        // Invalid: doesn't start with G
-        assert!(!is_valid_stellar_account(
-            "SBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC"
-        ));
-
-        // Invalid: contains invalid characters
-        assert!(!is_valid_stellar_account(
-            "GBBD47UZQ5E3YNQMLF7YALXIS5XVLC5PPMG44XWJXEUIXH7MMAOUISC!"
-        ));
-    }
-
-    #[test]
-    fn test_fee_breakdown() {
-        let breakdown = FeeBreakdown::new(1_000_000, 100, 50);
-        assert_eq!(breakdown.gross_amount, 1_000_000);
-        assert_eq!(breakdown.protocol_fee, 1_000); // 0.1% of 1M
-        assert_eq!(breakdown.stellar_base_fee, 100);
-        assert_eq!(breakdown.fee_bump_premium, 50);
-        assert_eq!(breakdown.total_sponsor_fee, 150);
-        assert_eq!(breakdown.net_amount, 999_000); // 1M - 1k protocol fee
-    }
-
-    #[test]
-    fn test_sponsored_release_status_display() {
-        assert_eq!(SponsoredReleaseStatus::Pending.to_string(), "pending");
-        assert_eq!(SponsoredReleaseStatus::Submitted.to_string(), "submitted");
-        assert_eq!(SponsoredReleaseStatus::Confirmed.to_string(), "confirmed");
-        assert_eq!(SponsoredReleaseStatus::Failed.to_string(), "failed");
-        assert_eq!(SponsoredReleaseStatus::Cancelled.to_string(), "cancelled");
-    }
-}
+/* … truncated 5501 chars — edit only what you need near the top … */

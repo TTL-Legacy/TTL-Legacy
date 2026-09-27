@@ -211,3 +211,171 @@ mod unit_tests {
         assert!(extract_cookie_token(&headers).is_none());
     }
 }
+
+// ── Middleware integration tests ───────────────────────────────────────────
+
+#[cfg(test)]
+mod middleware_tests {
+    use super::*;
+    use axum::{routing::post, Router};
+    use tower::ServiceExt;
+
+    async fn state_mutating_handler() -> &'static str {
+        "mutated"
+    }
+
+    fn test_app() -> Router {
+        Router::new()
+            .route("/api/data", post(state_mutating_handler))
+            .layer(axum::middleware::from_fn(csrf_middleware))
+    }
+
+    #[tokio::test]
+    async fn missing_token_rejected() {
+        let app = test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn invalid_token_rejected() {
+        let app = test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data")
+                    .header(
+                        "cookie",
+                        "__Host-csrf=token-from-cookie; other=value",
+                    )
+                    .header("x-csrf-token", "different-token-from-header")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn valid_token_accepted() {
+        let app = test_app();
+        let token = "same-token-everywhere";
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data")
+                    .header("cookie", format!("__Host-csrf={}", token))
+                    .header("x-csrf-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn safe_methods_exempt() {
+        for method in &["GET", "HEAD", "OPTIONS"] {
+            let app = test_app();
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(*method)
+                        .uri("/api/data")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                response.status().is_success(),
+                "Method {} should be exempt from CSRF checks",
+                method
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exempt_paths_bypass_validation() {
+        for path in &["/health", "/health/consensus", "/ready", "/api/csrf-token"] {
+            let app = test_app();
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(*path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_ne!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "Path {} should be exempt from CSRF checks",
+                path
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_header_token_rejected() {
+        let app = test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data")
+                    .header("cookie", "__Host-csrf=token-in-cookie")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn missing_cookie_token_rejected() {
+        let app = test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/data")
+                    .header("x-csrf-token", "token-in-header")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}

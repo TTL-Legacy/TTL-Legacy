@@ -5,39 +5,74 @@ final class KeychainService {
     static let shared = KeychainService()
     private init() {}
 
-    private let tokenKey = "com.ttllegacy.auth_token"
-    private let credentialKey = "com.ttllegacy.passkey_credential"
+    /// Secrets must never leave this device: no iCloud Keychain sync and no
+    /// restore from backups onto another device.
+    static let accessibility = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+
+    enum Key {
+        static let token = "com.ttllegacy.auth_token"
+        static let credentialID = "com.ttllegacy.passkey_credential"
+    }
 
     func saveToken(_ token: String) {
-        save(token, forKey: tokenKey)
+        save(token, forKey: Key.token)
     }
 
     func loadToken() -> String? {
-        load(forKey: tokenKey)
+        load(forKey: Key.token)
     }
 
     func deleteToken() {
-        delete(forKey: tokenKey)
+        delete(forKey: Key.token)
     }
 
     func saveCredentialID(_ id: String) {
-        save(id, forKey: credentialKey)
+        save(id, forKey: Key.credentialID)
     }
 
     func loadCredentialID() -> String? {
-        load(forKey: credentialKey)
+        load(forKey: Key.credentialID)
     }
 
-    private func save(_ value: String, forKey key: String) {
-        let data = Data(value.utf8)
-        let query: [CFString: Any] = [
+    // MARK: - Queries
+
+    /// Identifies an item regardless of its value, accessibility, or sync state,
+    /// so deletes also purge legacy items stored with weaker attributes.
+    static func identityQuery(forKey key: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrAccount: key,
+            kSecAttrSynchronizable: kSecAttrSynchronizableAny
+        ]
+    }
+
+    static func addQuery(forKey key: String, data: Data) -> [CFString: Any] {
+        [
             kSecClass: kSecClassGenericPassword,
             kSecAttrAccount: key,
             kSecValueData: data,
-            kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccessible: accessibility,
+            kSecAttrSynchronizable: false
         ]
-        SecItemDelete(query as CFDictionary)
-        SecItemAdd(query as CFDictionary, nil)
+    }
+
+    /// Stored attributes for `key`, or nil if absent. Used to verify accessibility.
+    func attributes(forKey key: String) -> [String: Any]? {
+        var query = Self.identityQuery(forKey: key)
+        query[kSecReturnAttributes] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? [String: Any]
+    }
+
+    // MARK: - Storage
+
+    private func save(_ value: String, forKey key: String) {
+        // Delete by identity first so an existing item with different
+        // accessibility is replaced rather than causing errSecDuplicateItem.
+        SecItemDelete(Self.identityQuery(forKey: key) as CFDictionary)
+        SecItemAdd(Self.addQuery(forKey: key, data: Data(value.utf8)) as CFDictionary, nil)
     }
 
     private func load(forKey key: String) -> String? {
@@ -54,7 +89,6 @@ final class KeychainService {
     }
 
     private func delete(forKey key: String) {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrAccount: key]
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(Self.identityQuery(forKey: key) as CFDictionary)
     }
 }

@@ -1858,6 +1858,153 @@ impl Db {
         )?;
         Ok(())
     }
+
+    // ── Issue #1594: Escalation tier transitions ────────────────────────────
+
+    pub fn get_escalation_state(
+        &self,
+        vault_id: u64,
+    ) -> Result<Option<crate::models::EscalationState>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT vault_id, last_escalation_tier, escalated_at
+            FROM escalation_states
+            WHERE vault_id = ?1
+            "#,
+        )?;
+
+        let row_res = stmt.query_row(params![vault_id as i64], |r| {
+            let tier_str: Option<String> = r.get(1)?;
+            let tier = tier_str.as_ref().map(|t| {
+                match t.as_str() {
+                    "T1" => crate::models::EscalationTier::T1,
+                    "T2" => crate::models::EscalationTier::T2,
+                    "T3" => crate::models::EscalationTier::T3,
+                    _ => crate::models::EscalationTier::T1,
+                }
+            });
+
+            let escalated_at_str: Option<String> = r.get(2)?;
+            let escalated_at = escalated_at_str.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .ok()
+            });
+
+            Ok(crate::models::EscalationState {
+                vault_id: r.get(0)?,
+                last_escalation_tier: tier,
+                escalated_at,
+            })
+        });
+
+        match row_res {
+            Ok(state) => Ok(Some(state)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn upsert_escalation_state(
+        &self,
+        state: &crate::models::EscalationState,
+    ) -> Result<(), rusqlite::Error> {
+        let tier_str = state
+            .last_escalation_tier
+            .map(|t| format!("{:?}", t));
+        let escalated_at_str = state.escalated_at.map(|dt| dt.to_rfc3339());
+
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO escalation_states (vault_id, last_escalation_tier, escalated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(vault_id) DO UPDATE SET
+              last_escalation_tier = excluded.last_escalation_tier,
+              escalated_at = excluded.escalated_at
+            "#,
+            params![state.vault_id as i64, tier_str, escalated_at_str],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_escalation_event(
+        &self,
+        event: &crate::models::EscalationEvent,
+    ) -> Result<(), rusqlite::Error> {
+        let channels_json = serde_json::to_string(&event.channels).unwrap_or_else(|_| "[]".to_string());
+        let tier_str = format!("{:?}", event.tier);
+
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO escalation_events (id, vault_id, tier, dispatched_at, channels)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                event.id,
+                event.vault_id as i64,
+                tier_str,
+                event.dispatched_at.to_rfc3339(),
+                channels_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_escalation_events(
+        &self,
+        vault_id: u64,
+    ) -> Result<Vec<crate::models::EscalationEvent>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"
+            SELECT id, vault_id, tier, dispatched_at, channels
+            FROM escalation_events
+            WHERE vault_id = ?1
+            ORDER BY dispatched_at DESC
+            "#,
+        )?;
+
+        let iter = stmt.query_map(params![vault_id as i64], |r| {
+            let tier_str: String = r.get(2)?;
+            let tier = match tier_str.as_str() {
+                "T1" => crate::models::EscalationTier::T1,
+                "T2" => crate::models::EscalationTier::T2,
+                "T3" => crate::models::EscalationTier::T3,
+                _ => crate::models::EscalationTier::T1,
+            };
+
+            let channels_json_str: String = r.get(4)?;
+            let channels: Vec<String> = serde_json::from_str(&channels_json_str).unwrap_or_default();
+
+            let dispatched_at_str: String = r.get(3)?;
+            let dispatched_at = chrono::DateTime::parse_from_rfc3339(&dispatched_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+            Ok(crate::models::EscalationEvent {
+                id: r.get(0)?,
+                vault_id: r.get::<_, i64>(1)? as u64,
+                tier,
+                dispatched_at,
+                channels,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for item in iter {
+            out.push(item?);
+        }
+        Ok(out)
+    }
+
+    pub fn clear_escalation_state(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM escalation_states WHERE vault_id = ?1",
+            params![vault_id as i64],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

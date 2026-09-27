@@ -79,3 +79,6 @@ coverage/
 *.tmp
 *.bak
 target/
+
+# PR description drafts (local development)
+pr-description*.md

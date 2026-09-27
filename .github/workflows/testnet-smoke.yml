@@ -5,6 +5,10 @@ on:
     - cron: '0 2 * * *' # 02:00 UTC nightly
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 env:
   STELLAR_CLI_VERSION: "21.4.0"
 
@@ -15,13 +19,13 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
@@ -106,7 +110,7 @@ jobs:
           EOF
           cat smoke-results/contract.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: smoke-test-${{ github.run_id }}
           path: smoke-results/
@@ -218,7 +222,7 @@ jobs:
       # issue for repeated failures so the tracker stays clean.
       - name: Alert — file failure issue
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

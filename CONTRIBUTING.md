@@ -50,7 +50,7 @@ We welcome contributions! Please follow these guidelines to help us maintain pro
 
 6. **Start the frontend dev server:**
    ```bash
-   cd frontend && npm run dev
+   just frontend-dev
    ```
    The frontend dev server runs at `http://localhost:5173`.
 
@@ -82,6 +82,71 @@ This points the backend at your local Stellar Quickstart instance instead of tes
    just ci
    ```
 5. **Pull Requests:** Open a PR against main. Ensure your PR description clearly outlines the changes and links to the relevant issue.
+
+## Stellar Wave Contributors
+
+Contributors from the Stellar Wave program can pick up and complete issues following this process:
+
+### Picking Up an Issue
+
+1. **Check the issue labels:** Look for issues labeled with:
+   - `good-first-issue` - Great for new contributors
+   - `help-wanted` - Community contributions welcome
+   - `stellar-wave` - Specifically for Stellar Wave participants
+   
+2. **Read the issue description:** Each issue has:
+   - A clear description of what needs to be done
+   - Estimated time to complete
+   - Priority level (Low, Medium, High)
+   - Category (e.g., Testing, Documentation, Feature, etc.)
+
+3. **Comment on the issue:** Before starting work, comment on the issue to claim it:
+   ```
+   @ttl-legacy-bot claim
+   ```
+   This prevents duplicate work.
+
+### Completing an Issue
+
+1. **Create a feature branch:** Use the issue number and a descriptive name:
+   ```bash
+   git checkout -b feat/issue-XXXX-brief-description
+   ```
+
+2. **Follow the development workflow** (see above section)
+
+3. **Link your PR to the issue:** In your PR description, include:
+   ```
+   Closes #XXXX
+   ```
+   Replace `XXXX` with the issue number. This automatically closes the issue when merged.
+
+4. **PR Description Template:** Use this template:
+   ```markdown
+   ## Summary
+   Brief description of what this PR does.
+
+   ## Changes
+   - Change 1
+   - Change 2
+   - Change 3
+
+   ## Testing
+   How to test these changes locally.
+
+   Closes #XXXX
+   ```
+
+5. **Wait for review:** A maintainer will review your PR within 48 hours.
+
+### Issue Categories & Guide
+
+| Category | What to expect | PR checklist |
+|----------|---|---|
+| **Testing** | Add or improve test coverage | - Tests compile and pass locally<br>- New tests have clear assertions<br>- Run `just test` before submitting |
+| **Documentation** | Add or update docs/guides | - Docs are clear and accurate<br>- Examples are tested<br>- Follow existing formatting |
+| **Feature** | Implement new functionality | - All above + feature works end-to-end<br>- Add tests for new features<br>- Update relevant docs |
+| **Bug Fix** | Resolve reported bugs | - Root cause identified<br>- Fix is minimal and targeted<br>- Add regression test |
 
 ## Automated Security Scanning in CI
 
@@ -152,11 +217,39 @@ Available recipes:
     deploy-testnet-force# Force-redeploy to testnet without confirmation prompt
     docker-down         # Stop and remove local dev stack containers
     docker-up           # Start local dev stack (PostgreSQL, backend, Stellar Quickstart)
+    dr-backup           # Run disaster-recovery backup
     env-setup           # Copy .env.example to .env (skips if .env already exists)
     fmt                 # Auto-format all code
     fmt-check           # Check code formatting
+    frontend-dev        # Start frontend development server
+    frontend-test       # Run frontend tests
     test                # Run the full ttl_vault test suite
 ```
+
+### Frontend Development
+
+The `frontend-dev` and `frontend-test` commands simplify frontend work:
+
+```bash
+# Start the frontend dev server at http://localhost:5173
+just frontend-dev
+
+# Run the frontend test suite
+just frontend-test
+```
+
+These commands automatically install dependencies and run the appropriate npm scripts.
+
+### Disaster Recovery
+
+The `dr-backup` command runs the disaster-recovery backup script:
+
+```bash
+# Trigger a backup to the configured S3 bucket
+just dr-backup
+```
+
+See [RECOVERY_IMPLEMENTATION.md](RECOVERY_IMPLEMENTATION.md) for more details on disaster recovery procedures.
 
 ## Fuzz Testing
 

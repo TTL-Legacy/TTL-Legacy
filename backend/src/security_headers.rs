@@ -149,4 +149,89 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
         assert!(response.headers().get("x-frame-options").is_some());
     }
+
+    #[tokio::test]
+    async fn csp_header_present_on_every_response() {
+        std::env::remove_var("CSP_POLICY");
+        let app = test_app();
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.headers().contains_key("content-security-policy"));
+        assert_eq!(
+            response.headers().get("content-security-policy").unwrap(),
+            "default-src 'self'"
+        );
+    }
+
+    #[tokio::test]
+    async fn hsts_header_present_on_every_response() {
+        std::env::remove_var("CSP_POLICY");
+        let app = test_app();
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.headers().contains_key("strict-transport-security"));
+        assert_eq!(
+            response.headers().get("strict-transport-security").unwrap(),
+            "max-age=63072000; includeSubDomains"
+        );
+    }
+
+    #[tokio::test]
+    async fn x_content_type_options_header_present_on_every_response() {
+        std::env::remove_var("CSP_POLICY");
+        let app = test_app();
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.headers().contains_key("x-content-type-options"));
+        assert_eq!(
+            response.headers().get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+    }
+
+    #[tokio::test]
+    async fn x_frame_options_header_present_on_every_response() {
+        std::env::remove_var("CSP_POLICY");
+        let app = test_app();
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.headers().contains_key("x-frame-options"));
+        assert_eq!(
+            response.headers().get("x-frame-options").unwrap(),
+            "DENY"
+        );
+    }
+
+    #[tokio::test]
+    async fn referrer_policy_header_present_on_every_response() {
+        std::env::remove_var("CSP_POLICY");
+        let app = test_app();
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.headers().contains_key("referrer-policy"));
+        assert_eq!(
+            response.headers().get("referrer-policy").unwrap(),
+            "no-referrer"
+        );
+    }
 }

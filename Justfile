@@ -71,6 +71,31 @@ docker-up:
 docker-down:
     docker-compose down
 
+# ── Frontend ──────────────────────────────────────────────────────────────────
+
+# Start frontend development server
+frontend-dev:
+    @if [ ! -d "web" ]; then \
+        echo "Frontend directory not found"; \
+        exit 1; \
+    fi
+    cd web && npm install && npm run dev
+
+# Run frontend tests
+frontend-test:
+    @if [ ! -d "web" ]; then \
+        echo "Frontend directory not found"; \
+        exit 1; \
+    fi
+    cd web && npm install && npm run test
+
+# ── Disaster Recovery ─────────────────────────────────────────────────────────
+
+# Run disaster-recovery backup
+dr-backup:
+    @echo "Running disaster-recovery backup..."
+    bash scripts/dr_backup.sh
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 # Run build + test + clippy in one shot (useful before opening a PR)

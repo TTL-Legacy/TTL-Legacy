@@ -16,8 +16,12 @@ pub mod rate_limit;
 pub mod routes;
 /// Issue #1199: request input sanitization middleware
 pub mod sanitization;
+pub mod scheduler;
 pub mod security_headers;
+pub mod sms;
 pub mod templates;
+/// Issue #1596: owner warning when storage TTL nears archival
+pub mod ttl_watch;
 pub mod two_factor;
 pub mod webhook_retry;
 pub mod websocket;
@@ -28,6 +32,6 @@ pub use fee_sponsorship::*;
 pub use handlers::*;
 pub use models::*;
 pub use notifications::*;
-pub use rate_limit::*;
+pub use sms::*;
 pub use templates::*;
 pub use websocket::*;

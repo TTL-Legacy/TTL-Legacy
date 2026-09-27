@@ -45,6 +45,8 @@ pub enum AppError {
     TwoFactorNotEnabled,
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    #[error("email delivery failed: {0}")]
+    EmailDelivery(String),
 }
 
 impl IntoResponse for AppError {
@@ -56,6 +58,7 @@ impl IntoResponse for AppError {
             AppError::TwoFactorRequired => (StatusCode::UNAUTHORIZED, "two_factor_required"),
             AppError::TwoFactorNotEnabled => (StatusCode::BAD_REQUEST, "two_factor_not_enabled"),
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            AppError::EmailDelivery(_) => (StatusCode::BAD_GATEWAY, "email_delivery_failed"),
         };
         ApiError::new(status, code, self.to_string()).into_response()
     }
