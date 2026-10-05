@@ -201,3 +201,65 @@ fn test_batch_withdraw_reduces_balance() {
     assert_eq!(client.get_vault(&vault_id).balance, 500i128);
     assert_eq!(token_client.balance(&dest), before + 500i128);
 }
+
+// ── Issue #1529: batch_withdraw must not bypass hold checks ──────────────────
+
+/// A paused vault must not be withdrawable via the batch path. The single
+/// `withdraw` function already enforces `vault.is_paused`; this test confirms
+/// that `batch_withdraw` applies the same guard so an attacker cannot bypass
+/// the vault-level pause by routing through the batch endpoint.
+#[test]
+fn test_batch_withdraw_blocked_on_paused_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // Pause the vault.
+    client.pause_vault(&vault_id, &owner).unwrap();
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, withdrawal(&env, vault_id, &dest, 100i128)],
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    // The batch must be rejected — the vault-level pause must not be bypassable.
+    assert_eq!(
+        err,
+        ContractError::Paused,
+        "batch_withdraw must honour vault-level pause (issue #1529)"
+    );
+    // Vault balance must be unchanged.
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000i128);
+}
+
+/// An owner-locked vault must not be withdrawable via the batch path.
+/// Mirrors the `VaultOwnerLocked` guard applied by single `withdraw`.
+#[test]
+fn test_batch_withdraw_blocked_on_owner_locked_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // Owner-lock the vault.
+    client.owner_lock_vault(&vault_id, &owner).unwrap();
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, withdrawal(&env, vault_id, &dest, 100i128)],
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(
+        err,
+        ContractError::VaultOwnerLocked,
+        "batch_withdraw must honour owner-lock (issue #1529)"
+    );
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000i128);
+}

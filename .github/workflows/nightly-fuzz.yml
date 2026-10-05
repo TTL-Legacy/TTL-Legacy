@@ -37,6 +37,8 @@ jobs:
           - fuzz_check_in
           - fuzz_xdr_scval
           - fuzz_contract_xdr
+          - fuzz_withdrawal_splitting   # Issue #1523: withdrawal BPS split rounding invariants
+          - fuzz_passkey_signature       # Issue #1524: passkey/WebAuthn authenticator data parsing
       # Continue fuzzing other targets even if one fails
       fail-fast: false
     timeout-minutes: 30

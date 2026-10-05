@@ -950,6 +950,12 @@ pub struct TokenPairResponse {
     pub refresh_token: String,
     /// Access token lifetime in seconds, for client-side proactive refresh.
     pub expires_in: i64,
+    /// Fresh CSRF token issued on every successful authentication.
+    ///
+    /// The server simultaneously sets a `__Host-csrf` HttpOnly cookie carrying
+    /// the same value (see issue #1497). Clients must include this value in the
+    /// `X-CSRF-Token` header on every subsequent state-mutating request.
+    pub csrf_token: String,
 }
 
 // ── Issue #1337: Beneficiary archival notification ───────────────────────────
