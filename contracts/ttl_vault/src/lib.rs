@@ -2709,10 +2709,14 @@ impl TtlVaultContract {
     /// `Ok(())` on success, `Err` on failure
     ///
     /// # Errors
-    /// * `ContractError::Paused` - If the contract is paused
+    /// * `ContractError::Paused` - If the contract is paused, or any referenced vault is paused
     /// * `ContractError::InvalidAmount` - If `withdrawals` is empty or any amount is not positive
     /// * `ContractError::VaultNotFound` - If any referenced vault does not exist
     /// * `ContractError::NotOwner` - If caller is not the owner of any referenced vault
+    /// * `ContractError::AlreadyHibernating` - If any referenced vault is hibernating
+    /// * `ContractError::VaultFrozen` - If any referenced vault is emergency-frozen or admin-frozen
+    /// * `ContractError::VaultOwnerLocked` - If any referenced vault is owner-locked
+    /// * `ContractError::TwoFactorRequired` - If 2FA is enabled on any vault and not verified
     /// * `ContractError::AlreadyReleased` - If any referenced vault is not in Locked status
     /// * `ContractError::WithdrawalDestinationNotWhitelisted` - If any destination is not whitelisted
     /// * `ContractError::InsufficientBalance` - If the total amount for any vault exceeds its balance
@@ -2756,6 +2760,78 @@ impl TtlVaultContract {
                     "Not owner",
                 );
                 return Err(ContractError::NotOwner);
+            }
+            // Issue #1529: hold checks — batch path must mirror single withdraw.
+            if vault.is_paused {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault paused",
+                );
+                return Err(ContractError::Paused);
+            }
+            if Self::is_hibernating(env.clone(), w.vault_id) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault hibernating",
+                );
+                return Err(ContractError::AlreadyHibernating);
+            }
+            if vault.status == ReleaseStatus::EmergencyFrozen {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault frozen",
+                );
+                return Err(ContractError::VaultFrozen);
+            }
+            if Self::check_vault_frozen(&env, w.vault_id) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault admin-frozen",
+                );
+                return Err(ContractError::VaultFrozen);
+            }
+            if env
+                .storage()
+                .persistent()
+                .get::<StorageKey, bool>(&StorageKey::VaultLocked(w.vault_id))
+                .unwrap_or(false)
+            {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault owner-locked",
+                );
+                return Err(ContractError::VaultOwnerLocked);
+            }
+            if Self::is_2fa_enabled(&env, w.vault_id) && !Self::is_2fa_verified(&env, w.vault_id) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "2FA verification required",
+                );
+                return Err(ContractError::TwoFactorRequired);
             }
             if vault.status != ReleaseStatus::Locked {
                 Self::record_withdrawal_audit(

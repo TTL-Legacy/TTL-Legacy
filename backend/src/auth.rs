@@ -22,6 +22,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use uuid::Uuid;
 
 use crate::{
+    csrf::{csrf_cookie_header_value, generate_token as generate_csrf_token},
     db::Db,
     error::AppError,
     models::{AuthClaims, LoginRequest, RefreshClaims, RefreshRequest, TokenPairResponse},
@@ -104,10 +105,15 @@ fn issue_refresh_token(
 /// the actual wallet-signature challenge/verify flow that would authenticate
 /// `sub` in production is a separate concern from token issuance/rotation and
 /// is out of scope for this issue.
+///
+/// Issue #1497: a fresh CSRF token is generated on every successful login and
+/// returned both in the JSON body (`csrf_token`) and in a `__Host-csrf`
+/// HttpOnly + SameSite=Strict cookie. This prevents session-fixation attacks
+/// where an attacker pre-plants a CSRF token before the victim logs in.
 pub async fn login(
     State(db): State<Arc<Db>>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<TokenPairResponse>, AppError> {
+) -> Result<impl axum::response::IntoResponse, AppError> {
     if req.sub.trim().is_empty() {
         return Err(AppError::InvalidInput("sub must not be empty".into()));
     }
@@ -118,11 +124,23 @@ pub async fn login(
     let access_token = issue_access_token(&secret, &req.sub, req.vault_ids.clone())?;
     let refresh_token = issue_refresh_token(&db, &secret, &req.sub, &family_id)?;
 
-    Ok(Json(TokenPairResponse {
+    // Issue #1497: rotate CSRF token on every successful authentication so
+    // that any token the client (or attacker) held before login is invalidated.
+    let csrf_token = generate_csrf_token();
+    let csrf_cookie = csrf_cookie_header_value(&csrf_token);
+
+    let body = TokenPairResponse {
         access_token,
         refresh_token,
         expires_in: ACCESS_TOKEN_TTL_SECONDS,
-    }))
+        csrf_token,
+    };
+
+    Ok((
+        axum::http::StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, csrf_cookie)],
+        axum::Json(body),
+    ))
 }
 
 /// POST /api/auth/refresh
@@ -168,10 +186,15 @@ pub async fn refresh(
     let access_token = issue_access_token(&secret, &sub, vec![])?;
     let new_refresh_token = issue_refresh_token(&db, &secret, &sub, &family_id)?;
 
+    // Issue #1497: also rotate the CSRF token on token refresh so the
+    // session-fixation protection extends across token renewals.
+    let csrf_token = generate_csrf_token();
+
     Ok(Json(TokenPairResponse {
         access_token,
         refresh_token: new_refresh_token,
         expires_in: ACCESS_TOKEN_TTL_SECONDS,
+        csrf_token,
     }))
 }
 
@@ -179,6 +202,7 @@ pub async fn refresh(
 mod tests {
     use super::*;
     use axum::extract::Json as ExtractJson;
+    use axum::response::IntoResponse;
 
     /// Refresh tokens live in a table created by the sqlx migration set
     /// (migrations/0007_refresh_tokens.sql), which is independent of
@@ -196,20 +220,40 @@ mod tests {
         (Arc::new(db), path)
     }
 
+    /// Helper: call `login` and return the `TokenPairResponse` body directly.
+    ///
+    /// The `login` handler returns `impl IntoResponse` (a tuple with the
+    /// `Set-Cookie` header + JSON body). For unit tests we only need the body;
+    /// this helper extracts it by invoking the handler and deserializing the
+    /// response body via axum's `tower::ServiceExt`.
+    async fn do_login(db: &Arc<Db>, sub: &str) -> Result<TokenPairResponse, AppError> {
+        let result = login(
+            State(Arc::clone(db)),
+            ExtractJson(LoginRequest {
+                sub: sub.to_string(),
+                vault_ids: vec![],
+            }),
+        )
+        .await;
+
+        match result {
+            Err(e) => Err(e),
+            Ok(resp) => {
+                use axum::body::to_bytes;
+                let response = resp.into_response();
+                let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let pair: TokenPairResponse = serde_json::from_slice(&body_bytes).unwrap();
+                Ok(pair)
+            }
+        }
+    }
+
     #[tokio::test]
     async fn login_then_refresh_rotates_the_refresh_token() {
         let (db, path) = test_db().await;
 
-        let login_resp = login(
-            State(Arc::clone(&db)),
-            ExtractJson(LoginRequest {
-                sub: "GABC...OWNER".into(),
-                vault_ids: vec!["v1".into()],
-            }),
-        )
-        .await
-        .unwrap();
-        let first_refresh = login_resp.0.refresh_token.clone();
+        let login_resp = do_login(&db, "GABC...OWNER").await.unwrap();
+        let first_refresh = login_resp.refresh_token.clone();
 
         // First use rotates successfully and yields a different refresh token.
         let refreshed = refresh(
@@ -256,14 +300,7 @@ mod tests {
     #[tokio::test]
     async fn login_rejects_empty_sub() {
         let (db, path) = test_db().await;
-        let result = login(
-            State(db),
-            ExtractJson(LoginRequest {
-                sub: "".into(),
-                vault_ids: vec![],
-            }),
-        )
-        .await;
+        let result = do_login(&db, "").await;
         assert!(result.is_err());
         let _ = std::fs::remove_file(path);
     }
@@ -291,6 +328,89 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ── Issue #1497: CSRF token rotation on login ─────────────────────────────
+
+    /// Each successful login must produce a unique CSRF token so that a token
+    /// obtained before login cannot be used after login (session-fixation
+    /// mitigation).
+    #[tokio::test]
+    async fn login_rotates_csrf_token() {
+        let (db, path) = test_db().await;
+
+        let first = do_login(&db, "GTEST...USER").await.unwrap();
+        let second = do_login(&db, "GTEST...USER").await.unwrap();
+
+        assert!(
+            !first.csrf_token.is_empty(),
+            "login must return a non-empty CSRF token (issue #1497)"
+        );
+        assert!(
+            !second.csrf_token.is_empty(),
+            "every login must return a non-empty CSRF token"
+        );
+        assert_ne!(
+            first.csrf_token, second.csrf_token,
+            "successive logins must produce distinct CSRF tokens (issue #1497)"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Verifies that the login response also sets the `__Host-csrf` cookie
+    /// carrying the same token value that appears in the JSON body, so the
+    /// double-submit pattern is correctly bootstrapped after login.
+    #[tokio::test]
+    async fn login_sets_csrf_cookie_matching_body_token() {
+        let (db, path) = test_db().await;
+
+        use axum::body::to_bytes;
+        use axum::response::IntoResponse as _;
+
+        let resp = login(
+            State(Arc::clone(&db)),
+            ExtractJson(LoginRequest {
+                sub: "GCOOKIE...TEST".into(),
+                vault_ids: vec![],
+            }),
+        )
+        .await
+        .expect("login must succeed");
+
+        let http_response = resp.into_response();
+
+        // Extract the Set-Cookie header.
+        let set_cookie = http_response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("login must set the __Host-csrf cookie (issue #1497)")
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        // Extract the body token.
+        let body_bytes = to_bytes(http_response.into_body(), usize::MAX).await.unwrap();
+        let pair: TokenPairResponse = serde_json::from_slice(&body_bytes).unwrap();
+
+        // The cookie must contain the same token as the body.
+        assert!(
+            set_cookie.contains(&pair.csrf_token),
+            "Set-Cookie header must contain the CSRF token from the response body \
+             (cookie={set_cookie:?}, body_token={:?})",
+            pair.csrf_token
+        );
+        assert!(
+            set_cookie.contains("__Host-csrf="),
+            "cookie name must be __Host-csrf"
+        );
+        assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+        assert!(
+            set_cookie.contains("SameSite=Strict"),
+            "cookie must be SameSite=Strict"
+        );
+
         let _ = std::fs::remove_file(path);
     }
 }
