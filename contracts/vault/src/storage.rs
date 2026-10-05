@@ -1,7 +1,14 @@
-use soroban_sdk::{contracttype, Address, Env, Symbol};
+use soroban_sdk::{contracttype, Address, Env, Symbol, Vec};
 
 /// Number of ledgers in a day, assuming ~5s close time.
 pub const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Maximum number of ids accepted by `get_vaults` in a single call.
+///
+/// Bounds the work (and therefore the resource cost) of a batch read so a
+/// single invocation cannot be used to force an unbounded number of storage
+/// lookups.
+pub const MAX_BATCH_GET_VAULTS: u32 = 50;
 
 /// Approximate number of bytes a single vault entry occupies in persistent
 /// storage. This is a conservative estimate of the serialized footprint of a
@@ -119,6 +126,34 @@ pub fn remove_vault(env: &Env, vault_id: u64) {
     env.storage().persistent().remove(&key);
 }
 
+/// Batch-load multiple vault records in a single call.
+///
+/// Reduces RPC round-trips for clients that need several vaults at once.
+///
+/// # Inputs
+/// * `ids` - identifiers of the vaults to load. Must contain at most
+///   `MAX_BATCH_GET_VAULTS` entries; larger batches are rejected.
+///
+/// # Behavior
+/// * Missing vaults are skipped rather than failing the whole call.
+/// * Returned vaults preserve the order of `ids`.
+///
+/// # Panics
+/// * If `ids.len() > MAX_BATCH_GET_VAULTS`.
+pub fn get_vaults(env: &Env, ids: Vec<u64>) -> Vec<Vault> {
+    if ids.len() > MAX_BATCH_GET_VAULTS {
+        panic!("batch too large");
+    }
+
+    let mut vaults = Vec::new(env);
+    for id in ids.iter() {
+        if let Some(vault) = load_vault(env, id) {
+            vaults.push_back(vault);
+        }
+    }
+    vaults
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +213,82 @@ mod tests {
         setup_vault(&env, 11);
         let est = estimate_rent_days(&env, 11, 1).unwrap();
         assert_eq!(est.ledgers, LEDGERS_PER_DAY);
+    }
+
+    #[test]
+    fn get_vaults_returns_existing_in_order() {
+        let env = Env::default();
+        setup_vault(&env, 1);
+        setup_vault(&env, 2);
+        setup_vault(&env, 3);
+
+        let mut ids = Vec::new(&env);
+        ids.push_back(3);
+        ids.push_back(1);
+        ids.push_back(2);
+
+        let vaults = get_vaults(&env, ids);
+        assert_eq!(vaults.len(), 3);
+        assert_eq!(vaults.get(0).unwrap().id, 3);
+        assert_eq!(vaults.get(1).unwrap().id, 1);
+        assert_eq!(vaults.get(2).unwrap().id, 2);
+    }
+
+    #[test]
+    fn get_vaults_skips_missing() {
+        let env = Env::default();
+        setup_vault(&env, 1);
+        setup_vault(&env, 3);
+
+        let mut ids = Vec::new(&env);
+        ids.push_back(1);
+        ids.push_back(2);
+        ids.push_back(3);
+
+        let vaults = get_vaults(&env, ids);
+        assert_eq!(vaults.len(), 2);
+        assert_eq!(vaults.get(0).unwrap().id, 1);
+        assert_eq!(vaults.get(1).unwrap().id, 3);
+    }
+
+    #[test]
+    fn get_vaults_empty_ids_returns_empty() {
+        let env = Env::default();
+        let ids: Vec<u64> = Vec::new(&env);
+        let vaults = get_vaults(&env, ids);
+        assert_eq!(vaults.len(), 0);
+    }
+
+    #[test]
+    fn get_vaults_all_missing_returns_empty() {
+        let env = Env::default();
+        let mut ids = Vec::new(&env);
+        ids.push_back(100);
+        ids.push_back(200);
+        let vaults = get_vaults(&env, ids);
+        assert_eq!(vaults.len(), 0);
+    }
+
+    #[test]
+    fn get_vaults_at_max_length_succeeds() {
+        let env = Env::default();
+        let mut ids = Vec::new(&env);
+        for id in 0..MAX_BATCH_GET_VAULTS as u64 {
+            setup_vault(&env, id);
+            ids.push_back(id);
+        }
+        let vaults = get_vaults(&env, ids);
+        assert_eq!(vaults.len(), MAX_BATCH_GET_VAULTS);
+    }
+
+    #[test]
+    #[should_panic(expected = "batch too large")]
+    fn get_vaults_rejects_oversized_batch() {
+        let env = Env::default();
+        let mut ids = Vec::new(&env);
+        for id in 0..(MAX_BATCH_GET_VAULTS as u64 + 1) {
+            ids.push_back(id);
+        }
+        get_vaults(&env, ids);
     }
 }
