@@ -226,6 +226,148 @@ If it returns an admin, the contract is already initialized.
 - [ ] Performance review
 - [ ] Backup verification
 
+## Kubernetes Deployment (Helm)
+
+The backend service (`backend/`) can be deployed to Kubernetes with a Helm chart. The chart
+layout below is the reference for that deployment; it is not yet vendored in this repository.
+
+### Probes
+
+The backend exposes two probe endpoints on port `3000`:
+
+| Endpoint | Probe | Behaviour |
+|---|---|---|
+| `/health` | `livenessProbe` | Returns `200 OK` if the process is serving. No dependency checks, so it does not flap when the DB or RPC is down. |
+| `/ready` | `readinessProbe` | Checks DB and Soroban RPC reachability. Failing pods are removed from the Service until the dependencies recover. |
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+### Chart Layout
+
+```
+charts/ttl-legacy-backend/
+├── Chart.yaml
+├── values.yaml
+└── templates/
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── secret.yaml
+    └── hpa.yaml
+```
+
+Minimal `values.yaml`:
+
+```yaml
+image:
+  repository: ghcr.io/<org>/ttl-legacy-backend
+  tag: "<release-tag>"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  type: ClusterIP
+  port: 3000
+
+config:
+  APP_ENV: production
+  LOG_FORMAT: json
+  SOROBAN_RPC_URL: https://mainnet.sorobanrpc.com
+  CORS_ALLOWED_ORIGINS: https://app.example.com
+
+# Secret values are never stored in values.yaml. Reference an existing Secret instead.
+existingSecret: ttl-legacy-backend-secrets
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+```
+
+Container spec in `templates/deployment.yaml`:
+
+```yaml
+containers:
+  - name: backend
+    image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+    ports:
+      - name: http
+        containerPort: 3000
+    envFrom:
+      - configMapRef:
+          name: {{ include "ttl-legacy-backend.fullname" . }}
+      - secretRef:
+          name: {{ .Values.existingSecret }}
+    # livenessProbe and readinessProbe: use the /health and /ready blocks from "Probes" above
+    resources:
+      {{- toYaml .Values.resources | nindent 6 }}
+```
+
+### Secret Management
+
+Sensitive values are stored in a Kubernetes Secret and injected as environment variables.
+Do not put them in `values.yaml`, a ConfigMap, or the Helm release history.
+
+| Secret key | Purpose |
+|---|---|
+| `JWT_SECRET` | Signs auth tokens |
+| `TOTP_ENCRYPTION_KEY` | Encrypts TOTP seeds at rest |
+| `TOTP_ENCRYPTION_KEY_PREVIOUS` | Previous key, kept during rotation (optional) |
+| `ADMIN_API_KEY` | Authenticates admin endpoints |
+| `REDIS_URL` | Rate-limit store, if `RATE_LIMIT_STORE=redis` (may embed credentials) |
+
+Create the Secret out-of-band, from a secret manager or a sealed/encrypted source
+(e.g. External Secrets Operator, Sealed Secrets, or SOPS):
+
+```bash
+kubectl create secret generic ttl-legacy-backend-secrets \
+  --namespace ttl-legacy \
+  --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
+  --from-literal=TOTP_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  --from-literal=ADMIN_API_KEY="$(openssl rand -hex 32)"
+```
+
+Rules:
+
+- [ ] Secrets are created by an operator or a secret manager, never committed to Git
+- [ ] RBAC restricts `get`/`list` on Secrets in the namespace to deployers
+- [ ] Encryption at rest is enabled for etcd (or the cluster's KMS provider is configured)
+- [ ] Secret rotation is performed with a new Secret version and a rolling restart
+
+### Install and Verify
+
+```bash
+helm upgrade --install ttl-legacy-backend ./charts/ttl-legacy-backend \
+  --namespace ttl-legacy --create-namespace \
+  --values values.production.yaml
+
+kubectl -n ttl-legacy rollout status deploy/ttl-legacy-backend
+kubectl -n ttl-legacy port-forward svc/ttl-legacy-backend 3000:3000 &
+curl -f http://localhost:3000/health
+curl -f http://localhost:3000/ready
+```
+
+A `/ready` failure after rollout usually means the DB or `SOROBAN_RPC_URL` is unreachable from
+the cluster; check the pod logs and the Secret/ConfigMap values before rolling back.
+
 ## Support & Escalation
 
 For deployment issues:
