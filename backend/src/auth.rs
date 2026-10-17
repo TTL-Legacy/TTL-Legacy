@@ -171,17 +171,21 @@ pub async fn refresh(
         .ok_or_else(|| AppError::Unauthorized("unknown refresh token".into()))?;
     let (family_id, sub, revoked) = record;
 
-    if revoked {
-        // Reuse of an already-rotated token — treat the whole family as
-        // compromised and force re-authentication.
+    // Reuse of an already-rotated token — treat the whole family as
+    // compromised and force re-authentication. The conditional revoke below
+    // also covers the race where two requests present the same token: only
+    // one of them can flip `revoked_at`, the other is treated as reuse.
+    let rotated = !revoked
+        && db
+            .revoke_refresh_token(&claims.jti)
+            .map_err(|e| AppError::Unauthorized(format!("failed to rotate refresh token: {e}")))?;
+
+    if !rotated {
         let _ = db.revoke_refresh_token_family(&family_id);
         return Err(AppError::Unauthorized(
             "refresh token reuse detected; all sessions in this family have been revoked".into(),
         ));
     }
-
-    db.revoke_refresh_token(&claims.jti)
-        .map_err(|e| AppError::Unauthorized(format!("failed to rotate refresh token: {e}")))?;
 
     let access_token = issue_access_token(&secret, &sub, vec![])?;
     let new_refresh_token = issue_refresh_token(&db, &secret, &sub, &family_id)?;

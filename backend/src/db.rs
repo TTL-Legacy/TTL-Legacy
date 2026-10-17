@@ -1410,12 +1410,15 @@ impl Db {
         }
     }
 
-    pub fn revoke_refresh_token(&self, jti: &str) -> Result<(), rusqlite::Error> {
-        self.conn.lock().unwrap().execute(
+    /// Atomically revokes a single refresh token. Returns `false` if it was
+    /// already revoked (e.g. by a concurrent refresh), so callers can treat
+    /// the loser of a rotation race as a reuse.
+    pub fn revoke_refresh_token(&self, jti: &str) -> Result<bool, rusqlite::Error> {
+        let updated = self.conn.lock().unwrap().execute(
             "UPDATE refresh_tokens SET revoked_at = ?1 WHERE jti = ?2 AND revoked_at IS NULL",
             params![chrono::Utc::now().to_rfc3339(), jti],
         )?;
-        Ok(())
+        Ok(updated > 0)
     }
 
     /// Revokes every token in a rotation family — used when a refresh token
