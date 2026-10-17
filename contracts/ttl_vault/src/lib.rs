@@ -181,7 +181,7 @@ pub use types::{
     PENDING_MULTISIG_OP_EXPIRED_TOPIC,
     PENDING_MULTISIG_OP_EXPIRY,
     PING_EXPIRY_TOPIC,
-    POOL_CREATED_TOPIC,
+    POOL_CREATED_TOPIC, POOL_REDIST_TOPIC,
     PROOF_OF_LIFE_TOPIC,
     PROTOCOL_CONFIG_APPLIED_TOPIC,
     PROTOCOL_CONFIG_PROPOSED_TOPIC,
@@ -17761,6 +17761,8 @@ impl TtlVaultContract {
             pool_id,
             members: members.clone(),
             total_bps,
+            claim_deadline: 0,
+            claimed: Vec::new(&env),
         };
         env.storage()
             .persistent()
@@ -17776,6 +17778,145 @@ impl TtlVaultContract {
         env.events()
             .publish((POOL_CREATED_TOPIC, pool_id), (members, total_bps));
         Ok(())
+    }
+
+    /// Sets the claim deadline for a pool. Only the vault owner may call this.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`           - caller is not the vault owner
+    /// * `ContractError::InvalidBeneficiary` - pool does not exist
+    /// * `ContractError::InvalidDeadline`    - deadline is not in the future
+    pub fn set_pool_claim_deadline(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        pool_id: u64,
+        claim_deadline: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if claim_deadline <= env.ledger().timestamp() {
+            return Err(ContractError::InvalidDeadline);
+        }
+        let key = StorageKey::BeneficiaryPool(pool_id);
+        let mut pool: BeneficiaryPool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+        pool.claim_deadline = claim_deadline;
+        env.storage().persistent().set(&key, &pool);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Records that `member` has claimed their pool share before the claim deadline.
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidBeneficiary` - pool does not exist
+    /// * `ContractError::NotBeneficiary`     - member is not in the pool
+    /// * `ContractError::InvalidDeadline`    - the claim deadline has already passed
+    pub fn claim_pool_share(
+        env: Env,
+        pool_id: u64,
+        member: Address,
+    ) -> Result<(), ContractError> {
+        member.require_auth();
+        Self::assert_not_paused(&env);
+        let key = StorageKey::BeneficiaryPool(pool_id);
+        let mut pool: BeneficiaryPool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+        if !pool.members.contains(&member) {
+            return Err(ContractError::NotBeneficiary);
+        }
+        if pool.claim_deadline != 0 && env.ledger().timestamp() > pool.claim_deadline {
+            return Err(ContractError::InvalidDeadline);
+        }
+        if !pool.claimed.contains(&member) {
+            pool.claimed.push_back(member);
+        }
+        env.storage().persistent().set(&key, &pool);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Redistributes unclaimed pool shares to the members that claimed, proportionally
+    /// to their BPS, once the pool's claim deadline has passed.
+    ///
+    /// The resulting BPS per claimed member (aligned with `pool.claimed`) is stored under
+    /// `BeneficiaryPoolAlloc(pool_id)` and sums to the pool's `total_bps` (rounding dust
+    /// goes to the first claimed member). Callable by anyone.
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidBeneficiary` - pool missing, or nobody claimed
+    /// * `ContractError::NotExpired`         - no deadline set or deadline not yet passed
+    pub fn redistribute_unclaimed_pool_shares(
+        env: Env,
+        vault_id: u64,
+        pool_id: u64,
+    ) -> Result<Vec<u128>, ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        let pool: BeneficiaryPool = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::BeneficiaryPool(pool_id))
+            .ok_or(ContractError::InvalidBeneficiary)?;
+        if pool.claim_deadline == 0 || env.ledger().timestamp() <= pool.claim_deadline {
+            return Err(ContractError::NotExpired);
+        }
+        if pool.claimed.is_empty() {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let mut claimed_bps: u128 = 0;
+        let mut own_bps: Vec<u128> = Vec::new(&env);
+        for member in pool.claimed.iter() {
+            let mut bps: u128 = 0;
+            for entry in vault.beneficiaries.iter() {
+                if entry.address == member {
+                    bps = entry.bps as u128;
+                    break;
+                }
+            }
+            claimed_bps += bps;
+            own_bps.push_back(bps);
+        }
+        if claimed_bps == 0 {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let total = pool.total_bps as u128;
+        let mut alloc: Vec<u128> = Vec::new(&env);
+        let mut assigned: u128 = 0;
+        for bps in own_bps.iter() {
+            let share = total * bps / claimed_bps;
+            assigned += share;
+            alloc.push_back(share);
+        }
+        if let Some(first) = alloc.get(0) {
+            alloc.set(0, first + (total - assigned));
+        }
+
+        let key = StorageKey::BeneficiaryPoolAlloc(pool_id);
+        env.storage().persistent().set(&key, &alloc);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.events()
+            .publish((POOL_REDIST_TOPIC, pool_id), alloc.clone());
+        Ok(alloc)
     }
 
     /// Returns the pool record for `pool_id`, if it exists.

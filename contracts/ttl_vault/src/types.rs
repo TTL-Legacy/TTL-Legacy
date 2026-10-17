@@ -245,6 +245,7 @@ pub const TOKEN_REBALANCED_TOPIC: Symbol = symbol_short!("tok_rebd");
 
 // Issue #529: beneficiary pooling
 pub const POOL_CREATED_TOPIC: Symbol = symbol_short!("pool_crt");
+pub const POOL_REDIST_TOPIC: Symbol = symbol_short!("pool_rdst");
 
 // Issue #813: admin transfer timelock
 pub const ADMIN_TRANSFER_PROPOSED_TOPIC: Symbol = symbol_short!("adm_prop");
@@ -1684,6 +1685,10 @@ pub struct BeneficiaryPool {
     pub pool_id: u64,
     pub members: Vec<Address>,
     pub total_bps: u32,
+    /// Unix timestamp after which unclaimed shares are redistributed (0 = no deadline).
+    pub claim_deadline: u64,
+    /// Members that have claimed their share before the deadline.
+    pub claimed: Vec<Address>,
 }
 
 /// Beneficiary-specific vesting schedule - Issue #525.
