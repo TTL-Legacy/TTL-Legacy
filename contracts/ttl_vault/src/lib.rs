@@ -7818,12 +7818,12 @@ impl TtlVaultContract {
             return Ok(());
         }
 
-        // Find highest bidder
+        // Find highest bidder; on equal amounts the earliest bid wins
         let winner_idx = auction
             .bids
             .iter()
             .enumerate()
-            .max_by_key(|(_, bid)| bid.bid_amount)
+            .max_by_key(|(idx, bid)| (bid.bid_amount, core::cmp::Reverse(*idx)))
             .map(|(idx, _)| idx)
             .ok_or(ContractError::AuctionNotFound)?;
 
