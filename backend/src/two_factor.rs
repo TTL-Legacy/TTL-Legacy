@@ -34,6 +34,11 @@ static PENDING_OTPS: once_cell::sync::Lazy<Mutex<HashMap<String, Vec<PendingOtp>
 static SESSION_VERIFIED: once_cell::sync::Lazy<Mutex<HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
+// Latest TOTP time step consumed per vault. A code is only accepted once its
+// time step is strictly newer than this, so a replayed code is rejected.
+static USED_TOTP_STEPS: once_cell::sync::Lazy<Mutex<HashMap<String, u64>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+
 // ── TOTP secret encryption at rest ───────────────────────────────────────────
 //
 // TOTP secrets must never be persisted in plaintext. Secrets are encrypted with
@@ -214,11 +219,9 @@ fn generate_provisioning_uri(secret: &str, label: &str) -> String {
     )
 }
 
-fn verify_totp_code(secret: &str, code: &str) -> bool {
-    let secret_bytes = match base32_decode(secret) {
-        Some(b) => b,
-        None => return false,
-    };
+/// Returns the matching TOTP time step, or `None` if the code does not match.
+fn verify_totp_code(secret: &str, code: &str) -> Option<u64> {
+    let secret_bytes = base32_decode(secret)?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -239,7 +242,7 @@ fn verify_totp_code(secret: &str, code: &str) -> bool {
         let counter_be = counter.to_be_bytes();
         let mut mac = match Hmac::<Sha1>::new_from_slice(&secret_bytes) {
             Ok(m) => m,
-            Err(_) => return false,
+            Err(_) => return None,
         };
         mac.update(&counter_be);
         let result = mac.finalize();
@@ -253,10 +256,23 @@ fn verify_totp_code(secret: &str, code: &str) -> bool {
         let totp = binary % 1_000_000;
 
         if format!("{:06}", totp) == code {
-            return true;
+            return Some(counter);
         }
     }
-    false
+    None
+}
+
+/// Marks a TOTP time step as consumed for a vault. Returns `false` if that step
+/// (or a later one) was already consumed, which rejects replayed codes.
+fn claim_totp_step(vault_id: &str, step: u64) -> bool {
+    let mut used = USED_TOTP_STEPS.lock().unwrap();
+    if let Some(&last) = used.get(vault_id) {
+        if step <= last {
+            return false;
+        }
+    }
+    used.insert(vault_id.to_string(), step);
+    true
 }
 
 fn base32_decode(input: &str) -> Option<Vec<u8>> {
@@ -483,7 +499,10 @@ pub async fn verify_2fa(
                 .as_deref()
                 .ok_or_else(|| AppError::Internal("missing TOTP secret".into()))?;
             let secret = decrypt_secret(stored)?;
-            verify_totp_code(&secret, &body.code)
+            match verify_totp_code(&secret, &body.code) {
+                Some(step) => claim_totp_step(&vault_id, step),
+                None => false,
+            }
         }
         TwoFactorMethod::Sms | TwoFactorMethod::Email => verify_pending_otp(&vault_id, &body.code),
     };
