@@ -2645,6 +2645,7 @@ pub async fn submit_signed_transaction(
     let result = body
         .get("result")
         .ok_or_else(|| AppError::Rpc("RPC response is missing result".to_string()))?;
+    crate::otel::log_soroban_result("sendTransaction", result);
     if result.get("status").and_then(serde_json::Value::as_str) == Some("ERROR") {
         return Err(AppError::Rpc(
             result

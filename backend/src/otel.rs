@@ -198,3 +198,24 @@ pub fn stellar_rpc_span(operation: &str, contract_id: &str) -> tracing::Span {
         stellar.contract_id = contract_id,
     )
 }
+
+/// Emits a structured log event for the result of a Soroban contract
+/// interaction.
+///
+/// The RPC `result` payload is recorded as the `soroban.result` field so log
+/// pipelines can index it directly instead of parsing free-form messages.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// let result = serde_json::json!({ "status": "PENDING", "hash": "…" });
+/// crate::otel::log_soroban_result("sendTransaction", &result);
+/// ```
+pub fn log_soroban_result(operation: &str, result: &serde_json::Value) {
+    tracing::info!(
+        db.system = "stellar/soroban",
+        db.operation = operation,
+        soroban.result = %result,
+        "soroban contract interaction completed"
+    );
+}
