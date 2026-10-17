@@ -5,7 +5,7 @@ use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::{interval, sleep_until, Duration, Instant};
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -13,6 +13,18 @@ use tokio_tungstenite::WebSocketStream;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const RATE_LIMIT_MSG_PER_SEC: u32 = 10;
+const CLOSE_CODE_UNAUTHORIZED: u16 = 4001;
+
+/// Converts a JWT `exp` (unix seconds) into a tokio deadline.
+/// Already-expired tokens yield a deadline in the past, so the stream closes immediately.
+fn token_deadline(token_exp: usize) -> Instant {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let remaining = (token_exp as u64).saturating_sub(now_unix);
+    Instant::now() + Duration::from_secs(remaining)
+}
 
 struct MessageRateLimiter {
     count: u32,
@@ -156,11 +168,17 @@ pub async fn handle_vault_stream_with_heartbeat(
     mut rx: broadcast::Receiver<VaultEvent>,
     mut ws_sink: WsSink,
     mut ws_source: WsSource,
+    token_exp: usize,
 ) {
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     let mut last_pong = Instant::now();
     let mut awaiting_pong = false;
     let mut rate_limiter = MessageRateLimiter::new();
+
+    // Close with 4001 (unauthorized) once the JWT expires so clients can tell an
+    // auth expiry apart from a normal closure and re-authenticate.
+    let expiry = sleep_until(token_deadline(token_exp));
+    tokio::pin!(expiry);
 
     loop {
         tokio::select! {
@@ -199,6 +217,13 @@ pub async fn handle_vault_stream_with_heartbeat(
                     }
                     _ => {}
                 }
+            }
+            _ = &mut expiry => {
+                let _ = ws_sink.send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Library(CLOSE_CODE_UNAUTHORIZED),
+                    reason: "token expired".into(),
+                }))).await;
+                break;
             }
             _ = heartbeat.tick() => {
                 if awaiting_pong && last_pong.elapsed() > HEARTBEAT_INTERVAL + PONG_TIMEOUT {
