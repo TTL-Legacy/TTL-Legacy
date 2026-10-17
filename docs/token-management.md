@@ -19,6 +19,10 @@ TTL-Legacy now supports advanced token management capabilities that allow vault 
 
 This section explains how various fees are calculated in TTL-Legacy token management operations, enabling users to predict transaction costs and understand fee distribution.
 
+### Network Transaction Fees
+
+Stellar network fees (the XLM fee attached to every transaction) are paid by the transaction's source account, not out of the vault. Vault balances are only debited by the withdrawn or released amount, so a SEP-41 vault holding exactly the withdrawal amount can be withdrawn in full. The source account must still hold enough XLM to pay the network fee; the vault balance does not need to cover it.
+
 ### Swap Fees
 
 Swap fees are charged when converting one token to another.
