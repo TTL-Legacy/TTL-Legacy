@@ -216,7 +216,7 @@ proptest! {
 
 proptest! {
     #[test]
-    fn prop_bps_split_preserves_balance_and_assigns_remainder_to_first(
+    fn prop_bps_split_preserves_balance_and_assigns_remainder_to_last(
         balance in 1i128..(i128::MAX / 100 + 1),
         weights in prop::collection::vec(1u32..10_001u32, 1..21),
     ) {
@@ -242,7 +242,7 @@ proptest! {
             10_000,
         );
         let distributed: i128 = shares.iter().sum();
-        let non_first_shares: i128 = (1..bps.len())
+        let non_last_shares: i128 = (0..bps.len() - 1)
             .map(|index| {
                 TtlVaultContract::weighted_share(balance, bps.get(index).unwrap(), 10_000)
             })
@@ -250,6 +250,6 @@ proptest! {
 
         prop_assert!(distributed <= balance);
         prop_assert_eq!(distributed, balance);
-        prop_assert_eq!(shares.get(0).unwrap(), balance - non_first_shares);
+        prop_assert_eq!(shares.get(bps.len() - 1).unwrap(), balance - non_last_shares);
     }
 }

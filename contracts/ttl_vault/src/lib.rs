@@ -4251,19 +4251,14 @@ impl TtlVaultContract {
             return shares;
         }
 
-        let mut first_share = amount;
-        for i in 1..weights.len() {
-            first_share -= Self::weighted_share(amount, weights.get(i).unwrap(), total_weight);
+        // Floor-divide every share; the last beneficiary absorbs the rounding remainder.
+        let mut last_share = amount;
+        for i in 0..weights.len() - 1 {
+            let share = Self::weighted_share(amount, weights.get(i).unwrap(), total_weight);
+            last_share -= share;
+            shares.push_back(share);
         }
-        shares.push_back(first_share);
-
-        for i in 1..weights.len() {
-            shares.push_back(Self::weighted_share(
-                amount,
-                weights.get(i).unwrap(),
-                total_weight,
-            ));
-        }
+        shares.push_back(last_share);
         shares
     }
 
