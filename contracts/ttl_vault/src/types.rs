@@ -1002,6 +1002,7 @@ pub struct VaultHealthSummary {
     pub ttl_remaining: Option<u64>,
     pub balance: i128,
     pub is_paused: bool,
+    pub check_in_streak: CheckInStreak,
 }
 
 #[contracttype]

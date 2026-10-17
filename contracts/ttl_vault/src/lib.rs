@@ -17567,6 +17567,7 @@ impl TtlVaultContract {
             ttl_remaining,
             balance: vault.balance,
             is_paused: vault.is_paused,
+            check_in_streak: Self::get_check_in_streak(env.clone(), vault_id),
         })
     }
 
