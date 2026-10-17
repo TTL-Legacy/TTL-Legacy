@@ -14569,6 +14569,38 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    /// Removes every withdrawal audit record stored for a vault: the legacy
+    /// unbounded log and the ring buffer (head, length and all entry slots).
+    fn remove_withdrawal_audit_records(env: &Env, vault_id: u64) {
+        let storage = env.storage().persistent();
+        storage.remove(&StorageKey::WithdrawalAuditLog(vault_id));
+        storage.remove(&StorageKey::WithdrawalHistoryHead(vault_id));
+        storage.remove(&StorageKey::WithdrawalHistoryLen(vault_id));
+        for slot in 0..MAX_WITHDRAWAL_HISTORY {
+            storage.remove(&StorageKey::WithdrawalHistoryEntry(vault_id, slot));
+        }
+    }
+
+    /// Prunes a Released or Cancelled vault from persistent storage, including
+    /// its withdrawal audit records so they stop accruing ledger fees.
+    ///
+    /// Admin-only. The archived snapshot (if any) is kept for historical queries.
+    pub fn prune_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        if vault.status == ReleaseStatus::Locked {
+            return Err(ContractError::NotExpired);
+        }
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::Vault(vault_id));
+        Self::remove_withdrawal_audit_records(&env, vault_id);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
     // ── Issue #470: Vault Capacity Limits ────────────────────────────────────
 
     /// Sets the maximum number of active vaults an owner may hold.
