@@ -22,6 +22,9 @@
 #   AWS_ACCESS_KEY_ID     S3 credentials
 #   AWS_SECRET_ACCESS_KEY S3 credentials
 #   AWS_REGION            AWS region                    (default: us-east-1)
+#
+# Every artefact is verified against its detached GPG signature (<key>.sig)
+# before it is used. The signing public key must be in the local GPG keyring.
 
 set -euo pipefail
 
@@ -91,19 +94,41 @@ run() {
 # ---------------------------------------------------------------------------
 
 MANIFEST_FILE=$(mktemp /tmp/manifest_XXXXXX.json)
-trap 'rm -f "${MANIFEST_FILE}" "${WASM_FILE:-}" "${DB_FILE:-}"' EXIT
+SIG_DIR=$(mktemp -d /tmp/dr_sig_XXXXXX)
+trap 'rm -f "${MANIFEST_FILE}" "${WASM_FILE:-}" "${DB_FILE:-}"; rm -rf "${SIG_DIR}"' EXIT
+
+# Download an artefact and its detached signature, then abort unless the
+# signature verifies. Nothing is read or restored from an unverified file.
+download_verified() {
+    local s3_key="$1"
+    local local_path="$2"
+    local sig_path="${SIG_DIR}/$(basename "${local_path}").sig"
+
+    aws s3 cp \
+        "s3://${DR_S3_BUCKET}/${s3_key}" \
+        "${local_path}" \
+        --endpoint-url "${DR_S3_ENDPOINT}" \
+        --region "${AWS_REGION}" \
+        || die "Failed to download ${s3_key}"
+
+    aws s3 cp \
+        "s3://${DR_S3_BUCKET}/${s3_key}.sig" \
+        "${sig_path}" \
+        --endpoint-url "${DR_S3_ENDPOINT}" \
+        --region "${AWS_REGION}" \
+        || die "Failed to download signature for ${s3_key}"
+
+    gpg --batch --verify "${sig_path}" "${local_path}" \
+        || die "GPG signature verification failed for ${s3_key} — refusing to restore"
+    log "Signature verified: ${s3_key}"
+}
 
 log "Downloading manifest from s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/manifest.json ..."
 if $DRY_RUN; then
     log "[DRY-RUN] Would download manifest"
     MANIFEST_NETWORK="${STELLAR_NETWORK}"
 else
-    aws s3 cp \
-        "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/manifest.json" \
-        "${MANIFEST_FILE}" \
-        --endpoint-url "${DR_S3_ENDPOINT}" \
-        --region "${AWS_REGION}" \
-        || die "Failed to download manifest"
+    download_verified "${BACKUP_PREFIX}/manifest.json" "${MANIFEST_FILE}"
 
     MANIFEST_NETWORK=$(python3 -c "import json,sys; d=json.load(open('${MANIFEST_FILE}')); print(d['network'])" 2>/dev/null || echo "")
     log "Manifest network: ${MANIFEST_NETWORK}"
@@ -124,12 +149,7 @@ if $DRY_RUN; then
     log "[DRY-RUN] Would download s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/backend_db.sqlite3"
     log "[DRY-RUN] Would restore to ${DR_DB_PATH}"
 else
-    aws s3 cp \
-        "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/backend_db.sqlite3" \
-        "${DB_FILE}" \
-        --endpoint-url "${DR_S3_ENDPOINT}" \
-        --region "${AWS_REGION}" \
-        || die "Failed to download database snapshot"
+    download_verified "${BACKUP_PREFIX}/backend_db.sqlite3" "${DB_FILE}"
 
     log "Database snapshot downloaded ($(wc -c < "${DB_FILE}") bytes)"
 
@@ -155,12 +175,7 @@ if $DRY_RUN; then
     log "[DRY-RUN] Would download s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/ttl_vault.wasm"
     log "[DRY-RUN] Would run: stellar contract deploy --wasm <wasm> --source ${DEPLOYER_IDENTITY} --network ${STELLAR_NETWORK}"
 else
-    aws s3 cp \
-        "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/ttl_vault.wasm" \
-        "${WASM_FILE}" \
-        --endpoint-url "${DR_S3_ENDPOINT}" \
-        --region "${AWS_REGION}" \
-        || die "Failed to download WASM artefact"
+    download_verified "${BACKUP_PREFIX}/ttl_vault.wasm" "${WASM_FILE}"
 
     log "WASM downloaded ($(wc -c < "${WASM_FILE}") bytes). Deploying contract..."
 

@@ -20,6 +20,10 @@
 #   AWS_SECRET_ACCESS_KEY S3 credentials
 #   AWS_REGION            AWS region                     (default: us-east-1)
 #   DR_WASM_PATH          Path to compiled WASM          (default: auto-detected)
+#
+# Every uploaded artefact gets a detached GPG signature (<key>.sig) so that
+# dr_restore.sh can verify it before restoring.
+#   DR_GPG_KEY_ID         GPG key ID or email used to sign artefacts (required)
 
 set -euo pipefail
 
@@ -54,6 +58,7 @@ run() {
 : "${CONTRACT_TTL_VAULT:?CONTRACT_TTL_VAULT is required}"
 : "${STELLAR_NETWORK:?STELLAR_NETWORK is required}"
 : "${DR_DB_PATH:?DR_DB_PATH is required}"
+: "${DR_GPG_KEY_ID:?DR_GPG_KEY_ID is required}"
 
 DR_S3_PREFIX="${DR_S3_PREFIX:-backups}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -89,7 +94,8 @@ fi
 # ---------------------------------------------------------------------------
 
 CONTRACT_STATE_FILE=$(mktemp /tmp/contract_state_XXXXXX.json)
-trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"' EXIT
+SIG_DIR=$(mktemp -d /tmp/dr_sig_XXXXXX)
+trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"; rm -rf "${SIG_DIR}"' EXIT
 
 log "Exporting contract state for contract ${CONTRACT_TTL_VAULT} on ${STELLAR_NETWORK}..."
 if $DRY_RUN; then
@@ -137,14 +143,26 @@ upload_to_s3() {
         --region "${AWS_REGION}"
 }
 
-upload_to_s3 "${CONTRACT_STATE_FILE}" "${BACKUP_KEY_PREFIX}/contract_state.json"
+# Sign the artefact with a detached GPG signature, then upload both files.
+upload_signed() {
+    local local_path="$1"
+    local s3_key="$2"
+    local sig_path="${SIG_DIR}/$(basename "${local_path}").sig"
+
+    run gpg --batch --yes --local-user "${DR_GPG_KEY_ID}" \
+        --detach-sign --output "${sig_path}" "${local_path}"
+    upload_to_s3 "${local_path}" "${s3_key}"
+    upload_to_s3 "${sig_path}" "${s3_key}.sig"
+}
+
+upload_signed "${CONTRACT_STATE_FILE}" "${BACKUP_KEY_PREFIX}/contract_state.json"
 
 if ! $SKIP_DB; then
-    upload_to_s3 "${DB_SNAPSHOT_FILE}" "${BACKUP_KEY_PREFIX}/backend_db.sqlite3"
+    upload_signed "${DB_SNAPSHOT_FILE}" "${BACKUP_KEY_PREFIX}/backend_db.sqlite3"
 fi
 
 if ! $SKIP_WASM; then
-    upload_to_s3 "${WASM_PATH}" "${BACKUP_KEY_PREFIX}/ttl_vault.wasm"
+    upload_signed "${WASM_PATH}" "${BACKUP_KEY_PREFIX}/ttl_vault.wasm"
 fi
 
 # ---------------------------------------------------------------------------
@@ -165,7 +183,7 @@ cat > "${MANIFEST_FILE}" <<EOF
 }
 EOF
 
-upload_to_s3 "${MANIFEST_FILE}" "${BACKUP_KEY_PREFIX}/manifest.json"
+upload_signed "${MANIFEST_FILE}" "${BACKUP_KEY_PREFIX}/manifest.json"
 rm -f "${MANIFEST_FILE}"
 
 log "Backup complete — prefix: s3://${DR_S3_BUCKET}/${BACKUP_KEY_PREFIX}/"
