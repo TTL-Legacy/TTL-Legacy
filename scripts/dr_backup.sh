@@ -20,6 +20,9 @@
 #   AWS_SECRET_ACCESS_KEY S3 credentials
 #   AWS_REGION            AWS region                     (default: us-east-1)
 #   DR_WASM_PATH          Path to compiled WASM          (default: auto-detected)
+#   DR_REPLICA_BUCKET     Second bucket in another region for cross-region
+#                         replication (3-2-1). Replication is skipped if unset.
+#   DR_REPLICA_REGION     Region of the replica bucket   (required with DR_REPLICA_BUCKET)
 
 set -euo pipefail
 
@@ -55,6 +58,10 @@ run() {
 : "${STELLAR_NETWORK:?STELLAR_NETWORK is required}"
 : "${DR_DB_PATH:?DR_DB_PATH is required}"
 
+if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
+    : "${DR_REPLICA_REGION:?DR_REPLICA_REGION is required when DR_REPLICA_BUCKET is set}"
+fi
+
 DR_S3_PREFIX="${DR_S3_PREFIX:-backups}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
@@ -64,6 +71,9 @@ log "Starting disaster-recovery backup"
 log "  Network   : ${STELLAR_NETWORK}"
 log "  Contract  : ${CONTRACT_TTL_VAULT}"
 log "  Bucket    : s3://${DR_S3_BUCKET}/${BACKUP_KEY_PREFIX}/"
+if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
+    log "  Replica   : s3://${DR_REPLICA_BUCKET}/${BACKUP_KEY_PREFIX}/ (${DR_REPLICA_REGION})"
+fi
 log "  Timestamp : ${TIMESTAMP}"
 
 # ---------------------------------------------------------------------------
@@ -135,6 +145,13 @@ upload_to_s3() {
     run aws s3 cp "${local_path}" "s3://${DR_S3_BUCKET}/${s3_key}" \
         --endpoint-url "${DR_S3_ENDPOINT}" \
         --region "${AWS_REGION}"
+
+    if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
+        log "Replicating ${s3_key} -> s3://${DR_REPLICA_BUCKET}/${s3_key} (${DR_REPLICA_REGION})"
+        run aws s3 cp "${local_path}" "s3://${DR_REPLICA_BUCKET}/${s3_key}" \
+            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --region "${DR_REPLICA_REGION}"
+    fi
 }
 
 upload_to_s3 "${CONTRACT_STATE_FILE}" "${BACKUP_KEY_PREFIX}/contract_state.json"
