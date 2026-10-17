@@ -339,6 +339,7 @@ impl NotificationService {
             status: DeliveryStatus::Pending,
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
+            ttl_hours: None,
         });
     }
 
@@ -380,7 +381,38 @@ impl NotificationService {
             status: DeliveryStatus::Pending,
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
+            ttl_hours: None,
         });
+        true
+    }
+
+    /// Enqueue an immediate `ExpiryWarning` for a crossed countdown threshold,
+    /// quoting the hours left on the vault TTL (#1773).
+    ///
+    /// Respects the owner's `expiry_warning_enabled` preference and global
+    /// unsubscribe. Returns `true` if the warning was enqueued, `false` if the
+    /// owner opted out.
+    #[instrument(skip(self))]
+    pub fn enqueue_countdown_warning(&self, vault_id: &str, owner: &str, ttl_secs: u64) -> bool {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.expiry_warning_enabled {
+            return false;
+        }
+
+        self.schedule
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ScheduledNotification {
+                id: Uuid::new_v4().to_string(),
+                vault_id: vault_id.to_string(),
+                owner: owner.to_string(),
+                notification_type: NotificationType::ExpiryWarning,
+                scheduled_at: Utc::now(),
+                status: DeliveryStatus::Pending,
+                max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+                sent_at: None,
+                ttl_hours: Some(ttl_secs / 3_600),
+            });
         true
     }
 
@@ -416,6 +448,7 @@ impl NotificationService {
             status: DeliveryStatus::Pending,
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
+            ttl_hours: None,
         });
     }
 
@@ -478,6 +511,7 @@ impl NotificationService {
             status: DeliveryStatus::Pending,
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
+            ttl_hours: None,
         });
 
         tracing::info!(
@@ -575,7 +609,7 @@ impl NotificationService {
         }
 
         let (title, body, data) =
-            notification_content(&notif.notification_type, &notif.vault_id, None);
+            notification_content(&notif.notification_type, &notif.vault_id, notif.ttl_hours);
 
         let mut last_err = String::new();
         let mut any_ok = false;
@@ -948,7 +982,7 @@ impl NotificationService {
                     return false;
                 }
                 let (title, body, data) =
-                    notification_content(&notif.notification_type, &notif.vault_id, None);
+                    notification_content(&notif.notification_type, &notif.vault_id, notif.ttl_hours);
                 for device in &tokens {
                     if self
                         .fcm

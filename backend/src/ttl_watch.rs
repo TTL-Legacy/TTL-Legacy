@@ -163,6 +163,66 @@ impl TtlArchivalWatcher {
     }
 }
 
+/// Countdown thresholds (seconds before expiry), matching the contract's
+/// `get_countdown_config` defaults. The backend cannot read per-vault config
+/// from the contract yet, so these apply to every vault.
+pub const COUNTDOWN_THRESHOLDS_SECS: [u64; 3] = [7 * 24 * 3_600, 3 * 24 * 3_600, 24 * 3_600];
+
+/// Warns owners once per countdown threshold as their vault TTL crosses it
+/// (#1773). A threshold re-arms once the TTL is extended back above it,
+/// mirroring the contract's fired-flag reset on `check_in`.
+#[derive(Default)]
+pub struct CountdownWatcher {
+    /// `(vault_id, threshold_secs)` pairs already warned in the current cycle.
+    fired: Mutex<HashSet<(String, u64)>>,
+}
+
+impl CountdownWatcher {
+    /// Poll the TTL of every tracked vault once and warn owners for each
+    /// newly crossed threshold. Returns the number of warnings enqueued.
+    #[tracing::instrument(skip_all)]
+    pub fn poll_once(&self, db: &Db, notifications: &NotificationService) -> usize {
+        let tracked: Vec<(String, String, Option<u64>)> = db
+            .vault_store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|v| is_tracked(v))
+            .map(|v| (v.id.clone(), v.owner.clone(), v.ttl_remaining))
+            .collect();
+
+        let mut fired = self.fired.lock().unwrap_or_else(PoisonError::into_inner);
+        fired.retain(|(id, _)| tracked.iter().any(|(tracked_id, ..)| tracked_id == id));
+
+        let mut enqueued = 0;
+        for (vault_id, owner, ttl) in &tracked {
+            // Unknown TTL: nothing to compare against yet.
+            let Some(ttl_secs) = *ttl else {
+                continue;
+            };
+            for threshold in COUNTDOWN_THRESHOLDS_SECS {
+                let key = (vault_id.clone(), threshold);
+                if ttl_secs > threshold {
+                    fired.remove(&key);
+                } else if !fired.contains(&key)
+                    && notifications.enqueue_countdown_warning(vault_id, owner, ttl_secs)
+                {
+                    fired.insert(key);
+                    enqueued += 1;
+                    tracing::info!(
+                        vault_id,
+                        owner,
+                        ttl_secs,
+                        threshold_secs = threshold,
+                        "countdown threshold crossed, owner warned"
+                    );
+                }
+            }
+        }
+        enqueued
+    }
+}
+
 /// Spawn the background polling loop.
 pub fn spawn(
     db: Arc<Db>,

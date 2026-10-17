@@ -242,6 +242,10 @@ pub struct ScheduledNotification {
     pub status: DeliveryStatus,
     pub max_retry_attempts: u32,
     pub sent_at: Option<DateTime<Utc>>,
+    /// Hours left on the vault TTL, quoted in `ExpiryWarning` bodies.
+    /// `None` falls back to a generic 24h figure.
+    #[serde(default)]
+    pub ttl_hours: Option<u64>,
 }
 
 /// Delivery record written after each send attempt.
