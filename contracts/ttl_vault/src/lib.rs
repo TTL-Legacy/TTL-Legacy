@@ -1644,11 +1644,13 @@ impl TtlVaultContract {
             .get(&StorageKey::PendingAdmin)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingAdmin));
         pending.require_auth();
+        // Fail closed: a missing proposal timestamp must never default to 0,
+        // which would make the timelock check pass immediately (Issue #1788).
         let proposed_at: u64 = env
             .storage()
             .instance()
             .get(&StorageKey::AdminTransferProposedAt)
-            .unwrap_or(0);
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingAdmin));
         if env.ledger().timestamp() < proposed_at + ADMIN_TRANSFER_TIMELOCK {
             panic_with_error!(&env, ContractError::AdminTransferTimeLocked);
         }
