@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # dr_backup.sh — Disaster Recovery Backup Script
 #
-# Snapshots the TTL-Legacy contract state and backend database to a
-# configurable S3-compatible bucket.
+# Snapshots the TTL-Legacy contract state, vault snapshots and backend
+# database to a configurable S3-compatible bucket.
 #
 # Usage:
 #   ./scripts/dr_backup.sh [--dry-run]
@@ -20,6 +20,8 @@
 #   AWS_SECRET_ACCESS_KEY S3 credentials
 #   AWS_REGION            AWS region                     (default: us-east-1)
 #   DR_WASM_PATH          Path to compiled WASM          (default: auto-detected)
+#   DR_VAULT_SNAPSHOTS    Comma-separated vault_id:timestamp pairs to back up
+#                         (e.g. 1:1700000000,2:1700003600)
 
 set -euo pipefail
 
@@ -89,7 +91,7 @@ fi
 # ---------------------------------------------------------------------------
 
 CONTRACT_STATE_FILE=$(mktemp /tmp/contract_state_XXXXXX.json)
-trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"' EXIT
+trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"; rm -rf "${VAULT_SNAPSHOT_DIR:-}"' EXIT
 
 log "Exporting contract state for contract ${CONTRACT_TTL_VAULT} on ${STELLAR_NETWORK}..."
 if $DRY_RUN; then
@@ -125,6 +127,46 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. Export vault snapshots
+# ---------------------------------------------------------------------------
+# The contract has no public index of snapshot timestamps, so the operator
+# lists the vault_id:timestamp pairs to back up. --send no simulates the
+# read-only get_vault_snapshot call without submitting a transaction.
+
+SKIP_VAULT_SNAPSHOTS=true
+VAULT_SNAPSHOT_FILES=()
+if [[ -z "${DR_VAULT_SNAPSHOTS:-}" ]]; then
+    warn "DR_VAULT_SNAPSHOTS not set. Skipping vault snapshot backup."
+else
+    SKIP_VAULT_SNAPSHOTS=false
+    VAULT_SNAPSHOT_DIR=$(mktemp -d /tmp/vault_snapshots_XXXXXX)
+    IFS=',' read -ra SNAPSHOT_REFS <<< "${DR_VAULT_SNAPSHOTS}"
+    for ref in "${SNAPSHOT_REFS[@]}"; do
+        [[ "${ref}" =~ ^[0-9]+:[0-9]+$ ]] || die "Invalid DR_VAULT_SNAPSHOTS entry '${ref}' (expected vault_id:timestamp)"
+        vault_id="${ref%%:*}"
+        timestamp="${ref##*:}"
+        snapshot_file="${VAULT_SNAPSHOT_DIR}/vault_${vault_id}_${timestamp}.json"
+        VAULT_SNAPSHOT_FILES+=("${snapshot_file}")
+
+        log "Exporting snapshot for vault ${vault_id} at ${timestamp}..."
+        if $DRY_RUN; then
+            log "[DRY-RUN] Would run: stellar contract invoke --send no --id ${CONTRACT_TTL_VAULT} --network ${STELLAR_NETWORK} -- get_vault_snapshot --vault_id ${vault_id} --timestamp ${timestamp} > ${snapshot_file}"
+        else
+            stellar contract invoke \
+                --id "${CONTRACT_TTL_VAULT}" \
+                --network "${STELLAR_NETWORK}" \
+                --send no \
+                -- get_vault_snapshot \
+                --vault_id "${vault_id}" \
+                --timestamp "${timestamp}" \
+                > "${snapshot_file}" \
+                || die "Failed to export snapshot for vault ${vault_id} at ${timestamp}"
+            log "Vault snapshot exported ($(wc -c < "${snapshot_file}") bytes)"
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # 4. Upload artefacts to S3-compatible storage
 # ---------------------------------------------------------------------------
 
@@ -147,6 +189,12 @@ if ! $SKIP_WASM; then
     upload_to_s3 "${WASM_PATH}" "${BACKUP_KEY_PREFIX}/ttl_vault.wasm"
 fi
 
+if ! $SKIP_VAULT_SNAPSHOTS; then
+    for snapshot_file in "${VAULT_SNAPSHOT_FILES[@]}"; do
+        upload_to_s3 "${snapshot_file}" "${BACKUP_KEY_PREFIX}/vault_snapshots/$(basename "${snapshot_file}")"
+    done
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Write backup manifest
 # ---------------------------------------------------------------------------
@@ -160,7 +208,8 @@ cat > "${MANIFEST_FILE}" <<EOF
   "artefacts": {
     "contract_state": "${BACKUP_KEY_PREFIX}/contract_state.json",
     "backend_db": "$(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi)",
-    "wasm": "$(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)"
+    "wasm": "$(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)",
+    "vault_snapshots": "$(if $SKIP_VAULT_SNAPSHOTS; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/vault_snapshots/\""; fi)"
   }
 }
 EOF
