@@ -281,6 +281,8 @@ mod beneficiary_vesting_tests;
 #[cfg(test)]
 mod bps_invariant_tests;
 #[cfg(test)]
+mod waterfall_proptests;
+#[cfg(test)]
 mod event_emission_tests;
 // Issue #1288: multi-beneficiary vault with percentage-based splits
 #[cfg(test)]
