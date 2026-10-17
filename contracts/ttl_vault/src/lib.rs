@@ -617,6 +617,8 @@ pub enum ContractError {
     WhitelistEntryExpired = 150,
     InvalidWhitelistExpiry = 151,
     CheckInTooEarly = 152,
+    // Issue #1806: beneficiary auction reserve price
+    ReserveNotMet = 153,
 }
 
 #[contract]
@@ -7732,6 +7734,43 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    /// Set the minimum winning bid for a beneficiary auction - Issue #1806
+    /// Finalization is rejected if the highest bid is below this amount.
+    pub fn set_auction_reserve_price(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        min_amount: i128,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if min_amount < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let auction = env
+            .storage()
+            .persistent()
+            .get::<_, BeneficiaryAuction>(&StorageKey::BeneficiaryAuction(vault_id))
+            .ok_or(ContractError::AuctionNotFound)?;
+        if auction.finalized {
+            return Err(ContractError::AuctionEnded);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryAuctionReserve(vault_id), &min_amount);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryAuctionReserve(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        Ok(())
+    }
+
     /// Place a bid in a beneficiary auction - Issue #527
     pub fn place_auction_bid(
         env: Env,
@@ -7827,7 +7866,17 @@ impl TtlVaultContract {
             .map(|(idx, _)| idx)
             .ok_or(ContractError::AuctionNotFound)?;
 
-        let winner = auction.bids.get(winner_idx as u32).unwrap().bidder.clone();
+        let winning_bid = auction.bids.get(winner_idx as u32).unwrap();
+        let reserve = env
+            .storage()
+            .persistent()
+            .get::<_, i128>(&StorageKey::BeneficiaryAuctionReserve(vault_id))
+            .unwrap_or(0);
+        if winning_bid.bid_amount < reserve {
+            return Err(ContractError::ReserveNotMet);
+        }
+
+        let winner = winning_bid.bidder.clone();
         auction.winner = Some(winner.clone());
         auction.finalized = true;
 

@@ -558,6 +558,8 @@ pub enum StorageKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
+    // Issue #1806: minimum winning bid required to finalize a beneficiary auction
+    BeneficiaryAuctionReserve(u64),
     // Issue #809: two-step protocol configuration
     PendingProtocolConfig,
     ProtocolConfigProposedAt,

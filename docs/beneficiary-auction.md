@@ -94,6 +94,32 @@ pub fn finalize_beneficiary_auction(env: Env, vault_id: u64) -> Result<(), Contr
 **Errors:**
 - `AuctionNotFound` - No auction for this vault
 - `AuctionNotEnded` - Auction window is still open
+- `ReserveNotMet` - Highest bid is below the auction reserve price (finalization reverts and the auction stays unfinalized; the owner can lower the reserve with `set_auction_reserve_price` and finalize again)
+
+### `set_auction_reserve_price`
+
+Set the minimum winning bid required to finalize an auction.
+
+```rust
+pub fn set_auction_reserve_price(
+    env: Env,
+    vault_id: u64,
+    caller: Address,                // must be vault owner
+    min_amount: i128,               // reserve in stroops (0 = no reserve)
+) -> Result<(), ContractError>
+```
+
+**Constraints:**
+- Caller must be the vault owner
+- `min_amount` must be >= 0
+- Auction must exist and not be finalized (may be set before or after `end_time`, until finalization)
+- Reserve defaults to 0 when never set
+
+**Errors:**
+- `NotOwner` - Caller is not the vault owner
+- `AuctionNotFound` - No auction for this vault
+- `AuctionEnded` - Auction is already finalized
+- `InvalidAmount` - `min_amount` is negative
 
 ### `get_beneficiary_auction`
 
