@@ -151,6 +151,15 @@ fi
 # 5. Write backup manifest
 # ---------------------------------------------------------------------------
 
+# Prints the SHA-256 of a file as a JSON string, or null if the file is absent.
+json_sha256() {
+    if [[ -f "$1" ]]; then
+        echo "\"$(sha256sum "$1" | cut -d' ' -f1)\""
+    else
+        echo null
+    fi
+}
+
 MANIFEST_FILE=$(mktemp /tmp/manifest_XXXXXX.json)
 cat > "${MANIFEST_FILE}" <<EOF
 {
@@ -161,6 +170,11 @@ cat > "${MANIFEST_FILE}" <<EOF
     "contract_state": "${BACKUP_KEY_PREFIX}/contract_state.json",
     "backend_db": "$(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi)",
     "wasm": "$(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)"
+  },
+  "sha256": {
+    "contract_state": $(json_sha256 "${CONTRACT_STATE_FILE}"),
+    "backend_db": $(json_sha256 "${DB_SNAPSHOT_FILE:-}"),
+    "wasm": $(json_sha256 "${WASM_PATH}")
   }
 }
 EOF

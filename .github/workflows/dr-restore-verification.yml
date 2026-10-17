@@ -94,6 +94,9 @@ jobs:
           NETWORK=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print(d.get('network', ''))" 2>/dev/null)
           CONTRACT=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print(d.get('contract', ''))" 2>/dev/null)
           TIMESTAMP=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print(d.get('timestamp', ''))" 2>/dev/null)
+          SHA_CONTRACT_STATE=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print((d.get('sha256') or {}).get('contract_state') or '')" 2>/dev/null)
+          SHA_BACKEND_DB=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print((d.get('sha256') or {}).get('backend_db') or '')" 2>/dev/null)
+          SHA_WASM=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print((d.get('sha256') or {}).get('wasm') or '')" 2>/dev/null)
 
           if [[ -z "${NETWORK}" ]] || [[ -z "${CONTRACT}" ]] || [[ -z "${TIMESTAMP}" ]]; then
             echo "ERROR: Manifest validation failed"
@@ -104,7 +107,53 @@ jobs:
           echo "network=${NETWORK}" >> $GITHUB_OUTPUT
           echo "contract=${CONTRACT}" >> $GITHUB_OUTPUT
           echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "sha_contract_state=${SHA_CONTRACT_STATE}" >> $GITHUB_OUTPUT
+          echo "sha_backend_db=${SHA_BACKEND_DB}" >> $GITHUB_OUTPUT
+          echo "sha_wasm=${SHA_WASM}" >> $GITHUB_OUTPUT
           rm -f "${MANIFEST_FILE}"
+
+      - name: Verify backup checksums
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          SHA_CONTRACT_STATE: ${{ steps.manifest.outputs.sha_contract_state }}
+          SHA_BACKEND_DB: ${{ steps.manifest.outputs.sha_backend_db }}
+          SHA_WASM: ${{ steps.manifest.outputs.sha_wasm }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          # Fails fast on corruption, before any restore work starts.
+          verify_checksum() {
+            local artefact="$1"
+            local expected="$2"
+            if [[ -z "${expected}" ]]; then
+              echo "⚠ No checksum recorded for ${artefact} (may have been skipped or predates checksum manifests)"
+              return 0
+            fi
+
+            local tmp_file
+            tmp_file=$(mktemp /tmp/checksum_XXXXXX)
+            aws s3 cp \
+              "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/${artefact}" \
+              "${tmp_file}" \
+              --endpoint-url "${DR_S3_ENDPOINT}" \
+              --region "${AWS_REGION}" \
+              || { rm -f "${tmp_file}"; exit 1; }
+
+            local actual
+            actual=$(sha256sum "${tmp_file}" | cut -d' ' -f1)
+            rm -f "${tmp_file}"
+
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "ERROR: SHA-256 mismatch for ${artefact} (expected ${expected}, got ${actual})"
+              exit 1
+            fi
+            echo "✓ ${artefact} checksum verified"
+          }
+
+          verify_checksum "contract_state.json" "${SHA_CONTRACT_STATE}"
+          verify_checksum "backend_db.sqlite3" "${SHA_BACKEND_DB}"
+          verify_checksum "ttl_vault.wasm" "${SHA_WASM}"
 
       - name: Restore and validate contract state
         env:
