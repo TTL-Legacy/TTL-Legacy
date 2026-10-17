@@ -9,6 +9,10 @@
 //    must include the token in the `X-CSRF-Token` header.
 // 3. The middleware reads the cookie value and the header value and rejects
 //    (403 Forbidden) the request when they are absent or do not match.
+// 4. After a request passes validation the token is rotated: the response
+//    carries a fresh `__Host-csrf` Set-Cookie and the new token in the
+//    `X-CSRF-Token` response header, so a leaked token is only valid until
+//    the next state-changing request (mitigates BREACH-style leakage).
 //
 // Safe methods (GET, HEAD, OPTIONS) are unconditionally allowed through.
 // The `/health`, `/ready`, and `/health/consensus` diagnostics paths are also
@@ -17,7 +21,10 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{Method, Request, StatusCode},
+    http::{
+        header::{HeaderValue, SET_COOKIE},
+        Method, Request, StatusCode,
+    },
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -113,9 +120,25 @@ pub async fn csrf_middleware(req: Request<Body>, next: Next) -> Response {
 
     match (cookie_token, header_token) {
         (Some(cookie), Some(header)) if !cookie.is_empty() && cookie == header => {
-            next.run(req).await
+            let mut response = next.run(req).await;
+            rotate_token(&mut response);
+            response
         }
         _ => csrf_forbidden(),
+    }
+}
+
+/// Replace the CSRF token after a validated state-mutating request.
+///
+/// The new token is written to the `__Host-csrf` cookie and returned in the
+/// `X-CSRF-Token` response header so the client can use it for its next request.
+fn rotate_token(response: &mut Response) {
+    let token = generate_token();
+    if let Ok(cookie) = HeaderValue::from_str(&csrf_cookie_header_value(&token)) {
+        response.headers_mut().append(SET_COOKIE, cookie);
+    }
+    if let Ok(value) = HeaderValue::from_str(&token) {
+        response.headers_mut().insert(CSRF_HEADER_NAME, value);
     }
 }
 
