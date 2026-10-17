@@ -276,6 +276,158 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // XSS / SQL injection / Unicode boundary tests (issue #1790)
+    //
+    // The middleware treats string values as opaque: it enforces size, key
+    // allow-list and length limits, but does not rewrite content.  These tests
+    // pin that behaviour for hostile payloads.
+    // -----------------------------------------------------------------------
+
+    const XSS_PAYLOADS: &[&str] = &[
+        "<script>alert(1)</script>",
+        "<img src=x onerror=alert(1)>",
+        "<svg/onload=alert(1)>",
+        "javascript:alert(1)",
+        "\"><script>alert(document.cookie)</script>",
+        "<iframe src=\"javascript:alert(1)\"></iframe>",
+        "&lt;script&gt;alert(1)&lt;/script&gt;",
+    ];
+
+    const SQLI_PAYLOADS: &[&str] = &[
+        "'; DROP TABLE--",
+        "'; DROP TABLE users; --",
+        "' OR '1'='1",
+        "' OR 1=1 --",
+        "1; SELECT * FROM vaults",
+        "' UNION SELECT NULL, password FROM users --",
+        "admin'/*",
+    ];
+
+    /// XSS payloads inside known string fields within the length limit are
+    /// passed through to the handler unmodified (200 OK).
+    #[tokio::test]
+    async fn test_xss_payloads_in_known_fields_pass_through() {
+        for payload in XSS_PAYLOADS {
+            let body = json!({ "message": payload });
+            let res = post_json(test_app(), body.to_string()).await;
+            assert_eq!(res.status(), StatusCode::OK, "payload: {payload}");
+        }
+    }
+
+    /// SQL injection payloads inside known string fields within the length
+    /// limit are passed through to the handler unmodified (200 OK).
+    #[tokio::test]
+    async fn test_sqli_payloads_in_known_fields_pass_through() {
+        for payload in SQLI_PAYLOADS {
+            let body = json!({ "note": payload });
+            let res = post_json(test_app(), body.to_string()).await;
+            assert_eq!(res.status(), StatusCode::OK, "payload: {payload}");
+        }
+    }
+
+    /// Hostile payloads used as top-level *keys* are rejected as unexpected
+    /// fields (400).
+    #[tokio::test]
+    async fn test_injection_payloads_as_keys_rejected() {
+        for payload in XSS_PAYLOADS.iter().chain(SQLI_PAYLOADS) {
+            let mut map = serde_json::Map::new();
+            map.insert(payload.to_string(), json!("x"));
+            let res = post_json(test_app(), Value::Object(map).to_string()).await;
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "key: {payload}");
+        }
+    }
+
+    /// An injection payload does not bypass the length limit: padding a
+    /// script tag past the maximum is still rejected (400).
+    #[tokio::test]
+    async fn test_oversized_xss_payload_rejected() {
+        let payload = format!(
+            "<script>{}</script>",
+            "a".repeat(MAX_STRING_FIELD_LEN)
+        );
+        let body = json!({ "message": payload });
+        let res = post_json(test_app(), body.to_string()).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// An injection payload does not bypass the length limit for SQL either.
+    #[tokio::test]
+    async fn test_oversized_sqli_payload_rejected() {
+        let payload = format!("'; DROP TABLE--{}", " ".repeat(MAX_STRING_FIELD_LEN));
+        let body = json!({ "note": payload });
+        let res = post_json(test_app(), body.to_string()).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Length is measured in characters, not bytes: a string of exactly
+    /// MAX_STRING_FIELD_LEN multi-byte characters is accepted.
+    #[tokio::test]
+    async fn test_multibyte_string_at_char_limit_accepted() {
+        // Each of these is 4 bytes in UTF-8, so the byte length is 4x the limit.
+        let s = "😀".repeat(MAX_STRING_FIELD_LEN);
+        assert!(s.len() > MAX_STRING_FIELD_LEN);
+        let body = json!({ "message": s });
+        let res = post_json(test_app(), body.to_string()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// One multi-byte character over the limit is rejected.
+    #[tokio::test]
+    async fn test_multibyte_string_over_char_limit_rejected() {
+        let s = "😀".repeat(MAX_STRING_FIELD_LEN + 1);
+        let body = json!({ "message": s });
+        let res = post_json(test_app(), body.to_string()).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Combining characters count individually: a base char plus combining
+    /// accents pushes the count over the limit even though it renders as one
+    /// grapheme.
+    #[tokio::test]
+    async fn test_combining_characters_counted_individually() {
+        let at_limit = format!("e{}", "\u{0301}".repeat(MAX_STRING_FIELD_LEN - 1));
+        let res = post_json(test_app(), json!({ "message": at_limit }).to_string()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let over_limit = format!("e{}", "\u{0301}".repeat(MAX_STRING_FIELD_LEN));
+        let res = post_json(test_app(), json!({ "message": over_limit }).to_string()).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Zero-width, RTL-override, BOM and NUL characters are opaque to the
+    /// sanitizer and accepted when within the limit.
+    #[tokio::test]
+    async fn test_special_unicode_characters_accepted() {
+        for s in [
+            "a\u{200B}b",
+            "\u{202E}txt.exe",
+            "\u{FEFF}bom",
+            "nul\u{0000}byte",
+            "\u{FF1C}script\u{FF1E}",
+            "\u{10FFFF}",
+        ] {
+            let res = post_json(test_app(), json!({ "message": s }).to_string()).await;
+            assert_eq!(res.status(), StatusCode::OK, "input: {s:?}");
+        }
+    }
+
+    /// JSON-escaped payloads (`<script>`) are decoded before the
+    /// length check, so the decoded string is what is measured.
+    #[tokio::test]
+    async fn test_escaped_unicode_payload_decoded_before_length_check() {
+        let raw = r#"{"message":"<script>alert(1)</script>"}"#;
+        let res = post_json(test_app(), raw).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // 513 escaped characters decode to 513 chars and must be rejected.
+        let escaped = "\\u0061".repeat(MAX_STRING_FIELD_LEN + 1);
+        let raw = format!(r#"{{"message":"{escaped}"}}"#);
+        assert!(raw.len() < MAX_BODY_BYTES);
+        let res = post_json(test_app(), raw).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
     // Property-based tests (issue #1500)
     //
     // These fuzz the sanitizer with arbitrary strings to catch bypasses.
