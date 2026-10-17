@@ -1,0 +1,27 @@
+{
+  "checkIn": {
+    "button": "Registrar presencia",
+    "pending": "Pendiente…",
+    "success": "Registro de presencia exitoso",
+    "failed": "Error al registrar presencia",
+    "error": "Error al enviar el registro de presencia",
+    "connectWallet": "Conecta tu billetera para registrar presencia"
+  },
+  "vault": {
+    "statusHealthy": "Bóveda en buen estado",
+    "statusDegraded": "Bóveda degradada",
+    "statusDown": "Bóveda fuera de servicio",
+    "statusUnknown": "Estado de la bóveda desconocido",
+    "create": "Crear bóveda",
+    "beneficiaryLabel": "Dirección del beneficiario",
+    "checkInIntervalLabel": "Intervalo de registro de presencia (segundos)",
+    "idLabel": "ID de la bóveda"
+  },
+  "common": {
+    "loading": "Cargando…",
+    "error": "Se produjo un error",
+    "retry": "Reintentar",
+    "confirm": "Confirmar",
+    "cancel": "Cancelar"
+  }
+}

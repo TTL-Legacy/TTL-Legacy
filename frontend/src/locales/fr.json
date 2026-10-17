@@ -1,0 +1,27 @@
+{
+  "checkIn": {
+    "button": "Signaler ma présence",
+    "pending": "En attente…",
+    "success": "Présence signalée avec succès",
+    "failed": "Échec du signalement de présence",
+    "error": "Erreur lors de l'envoi du signalement de présence",
+    "connectWallet": "Connectez votre portefeuille pour signaler votre présence"
+  },
+  "vault": {
+    "statusHealthy": "Coffre-fort en bon état",
+    "statusDegraded": "Coffre-fort dégradé",
+    "statusDown": "Coffre-fort hors service",
+    "statusUnknown": "État du coffre-fort inconnu",
+    "create": "Créer un coffre-fort",
+    "beneficiaryLabel": "Adresse du bénéficiaire",
+    "checkInIntervalLabel": "Intervalle de signalement (secondes)",
+    "idLabel": "ID du coffre-fort"
+  },
+  "common": {
+    "loading": "Chargement…",
+    "error": "Une erreur s'est produite",
+    "retry": "Réessayer",
+    "confirm": "Confirmer",
+    "cancel": "Annuler"
+  }
+}
