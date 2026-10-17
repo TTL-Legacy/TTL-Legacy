@@ -241,12 +241,12 @@ impl VaultCache {
 
     /// Invalidate cache entries in response to an indexed contract event.
     ///
-    /// Check-ins and withdrawals mutate vault state, so any cached data for the
-    /// affected vault must be dropped to avoid serving stale values.  Unknown
-    /// event kinds are ignored.  TTL expiry remains in place as a fallback.
+    /// Check-ins, withdrawals and releases mutate vault state, so any cached data
+    /// for the affected vault must be dropped to avoid serving stale values.
+    /// Unknown event kinds are ignored.  TTL expiry remains in place as a fallback.
     pub fn invalidate_on_event(&self, event_kind: &str, vault_id: &str) {
         match event_kind {
-            "check_in" | "withdrawal" => self.invalidate(vault_id),
+            "check_in" | "withdrawal" | "release" => self.invalidate(vault_id),
             _ => {}
         }
     }
