@@ -31,9 +31,10 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/bin/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ci-
 
       - name: Build contracts
         run: cargo build --workspace
@@ -173,9 +174,10 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/bin/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
