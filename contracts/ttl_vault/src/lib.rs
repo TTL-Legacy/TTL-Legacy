@@ -17359,7 +17359,8 @@ impl TtlVaultContract {
     ///
     /// # Errors
     /// * `ContractError::NotOwner` - If caller is not the vault owner
-    /// * `ContractError::InvalidBps` - If weights do not sum to 10000
+    /// * `ContractError::InvalidBps` - If weights are empty, any weight exceeds 10000, or weights do not sum to 10000
+    /// * `ContractError::InvalidThreshold` - If `rebalance_threshold_bps` exceeds 10000
     pub fn set_token_rebalance(
         env: Env,
         vault_id: u64,
@@ -17373,8 +17374,50 @@ impl TtlVaultContract {
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
+        if target_weights.is_empty() {
+            return Err(ContractError::InvalidBps);
+        }
+        let mut total_bps: u64 = 0;
+        for weight in target_weights.iter() {
+            if weight.target_bps as i128 > BASIS_POINTS_100_PERCENT {
+                return Err(ContractError::InvalidBps);
+            }
+            total_bps += weight.target_bps as u64;
+        }
+        if total_bps != BASIS_POINTS_100_PERCENT as u64 {
+            return Err(ContractError::InvalidBps);
+        }
+        if rebalance_threshold_bps as i128 > BASIS_POINTS_100_PERCENT {
+            return Err(ContractError::InvalidThreshold);
+        }
 
-        // TODO: Implement token rebalance logic
+        let key = StorageKey::TokenRebalance(vault_id);
+        let (last_rebalance, total_rebalances) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, TokenRebalanceConfig>(&key)
+            .map(|existing| (existing.last_rebalance, existing.total_rebalances))
+            .unwrap_or((0, 0));
+
+        let config = TokenRebalanceConfig {
+            vault_id,
+            target_weights,
+            last_rebalance,
+            rebalance_threshold_bps,
+            total_rebalances,
+        };
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (TOKEN_REBALANCE_TOPIC, vault_id),
+            (rebalance_threshold_bps, config.target_weights.len()),
+        );
         Ok(())
     }
 
