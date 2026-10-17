@@ -199,7 +199,7 @@ All contract storage entries are defined in the `StorageKey` enum (`contracts/tt
 | `VestingCatchUp(u64)` | `VestingCatchUpConfig` | Catch-up vesting config |
 | `VestingBonus(u64)` | `VestingBonusConfig` | Vesting bonus config |
 | `YieldDistributionConfig(u64)` | `YieldDistributionConfig` | Yield distribution config |
-| `TokenLending(u64)` | `TokenLending` | Token lending config |
+| `Lending(u64)` | `TokenLending` | Token loan record (see [token-management.md](token-management.md#data-model-and-lifecycle)) |
 | `TokenCollateral(u64)` | `TokenCollateral` | Token collateral config |
 | `TokenHedge(u64)` | `TokenHedge` | Token hedging config |
 | `TokenRebalance(u64)` | `TokenRebalanceConfig` | Token rebalance config |

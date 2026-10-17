@@ -10,7 +10,7 @@ TTL-Legacy now supports advanced token management capabilities that allow vault 
 2. **Validate token whitelisting** in batch operations (Issue #582)
 3. **Stake tokens** for yield while locked (Issue #583)
 4. **Distribute or reinvest yield** (Issue #584)
-5. **Lend vault tokens** for interest income (Issue #585)
+5. **Receive loans against locked vaults** from a lender, repayable with a late penalty (Issue #585)
 6. **Use tokens as collateral** for loans (Issue #586)
 7. **Hedge token price risk** using derivatives (Issue #587)
 8. **Rebalance multi-token portfolios** based on target weights (Issue #588)
@@ -454,7 +454,7 @@ pub fn enable_token_staking(
 
 **Requirements:**
 - Caller must be the vault owner
-- Annual yield must be between 0 and 10000 basis points
+- `annual_yield_bps` is stored as given; the contract does not currently validate its range
 
 **Events:**
 - `TOKEN_STAKING_TOPIC`: Emitted when staking is enabled
@@ -477,6 +477,31 @@ pub fn get_token_staking(env: Env, vault_id: u64) -> Option<TokenStaking>
 ```
 
 Returns the staking configuration for a vault.
+
+### Data Model and Lifecycle
+
+The `TokenStaking` record is stored per vault under `StorageKey::TokenStaking(vault_id)`.
+
+| Field | Meaning |
+|-------|---------|
+| `vault_id` | Vault the record belongs to |
+| `staking_pool` | Staking pool contract address supplied at enable time |
+| `staked_amount` | Principal staked. Set to `0` on enable; no current contract function increments it |
+| `staking_start` | Ledger timestamp used as the start of yield accrual |
+| `annual_yield_bps` | Annual yield in basis points |
+| `is_active` | Whether yield distribution is allowed |
+
+Lifecycle:
+
+1. **Not configured.** `get_token_staking` returns `None`. `distribute_yield` panics because it requires a staking record.
+2. **Enabled.** `enable_token_staking` writes a new record with `staked_amount = 0`, `staking_start = now` and `is_active = true`.
+3. **Yield accrues.** `distribute_yield` computes `staked_amount × annual_yield_bps × seconds_elapsed / (10000 × 365 × 86400)`, measured from `staking_start`. It returns without transferring anything when the result is `0`. It panics if `is_active` is `false`.
+4. **Disabled.** `disable_token_staking` sets `is_active = false` and keeps the record, so `get_token_staking` still returns it. It emits `TOKEN_UNSTAKING_TOPIC` even when no record exists.
+
+Notes:
+
+- Calling `enable_token_staking` again on a vault overwrites the existing record. This resets `staked_amount` to `0` and `staking_start` to the current time, with no guard.
+- `staked_amount` is never increased by the current contract. Until a stake-deposit path exists, every `distribute_yield` call computes zero yield.
 
 ### Example Usage
 
@@ -645,7 +670,7 @@ println!("Reinvested: {}", config.total_reinvested);
 
 ### Purpose
 
-Allow vault owners to lend vault tokens to a borrower and earn interest income.
+Allow a lender to advance tokens into a locked vault as a loan. The vault owner repays the principal, plus a late penalty if repayment is past the deadline.
 
 ### API
 
@@ -655,41 +680,73 @@ Allow vault owners to lend vault tokens to a borrower and earn interest income.
 pub fn enable_token_lending(
     env: Env,
     vault_id: u64,
-    caller: Address,
-    borrower: Address,
+    lender: Address,
     amount: i128,
-    interest_rate_bps: u32,
-    duration_seconds: u64,
+    repayment_deadline: u64,
+    late_penalty_bps: u32,
 ) -> Result<(), ContractError>
 ```
 
 **Parameters:**
 - `vault_id`: The vault ID
-- `caller`: Must be the vault owner
-- `borrower`: Address of the borrower
-- `amount`: Amount to lend (must be ≤ vault balance)
-- `interest_rate_bps`: Annual interest rate in basis points (e.g., 500 = 5%)
-- `duration_seconds`: Loan duration in seconds
+- `lender`: Address advancing the tokens. Must authorize the call
+- `amount`: Principal to advance. Must be positive
+- `repayment_deadline`: Ledger timestamp by which the loan should be repaid. Must be in the future
+- `late_penalty_bps`: Penalty in basis points of the principal, applied if repaid after the deadline. Must be ≤ 10000
+
+**Errors:**
+- `ContractError::Paused`: Contract is paused
+- `ContractError::InvalidAmount`: `amount` is not positive
+- `ContractError::InvalidBps`: `late_penalty_bps` exceeds 10000
+- `ContractError::InvalidDeadline`: `repayment_deadline` is not in the future
+- `ContractError::AlreadyReleased`: Vault is not in `Locked` status
+- `ContractError::LoanAlreadyExists`: The vault has an unrepaid loan
 
 **Events:**
-- `TOKEN_LENDING_TOPIC`: Emitted when lending is enabled
+- `LOAN_ENABLED_TOPIC`: Emitted when lending is enabled
 
 #### Repay Token Loan
 
 ```rust
-pub fn repay_token_loan(env: Env, vault_id: u64, caller: Address) -> Result<i128, ContractError>
+pub fn repay_token_loan(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError>
 ```
 
-Returns the accrued interest earned.
+Repays the outstanding loan. `caller` must be the vault owner. Repayment is `amount`, plus `amount × late_penalty_bps / 10000` if the ledger timestamp is after `repayment_deadline`.
 
 **Events:**
-- `TOKEN_LEND_REPAY_TOPIC`: Emitted on repayment
+- `LOAN_REPAID_TOPIC`: Emitted on repayment, with `(amount, penalty, now)`
 
 #### Get Token Lending
 
 ```rust
 pub fn get_token_lending(env: Env, vault_id: u64) -> Option<TokenLending>
 ```
+
+Returns the loan record for a vault, if one has been written.
+
+### Data Model and Lifecycle
+
+The `TokenLending` record is stored per vault under `StorageKey::Lending(vault_id)`.
+
+| Field | Meaning |
+|-------|---------|
+| `lender` | Address that advanced the principal |
+| `amount` | Principal advanced |
+| `repayment_deadline` | Ledger timestamp after which the late penalty applies |
+| `late_penalty_bps` | Late penalty in basis points of `amount` |
+| `repaid` | Whether the loan has been settled |
+
+Lifecycle:
+
+1. **No loan.** `get_token_lending` returns `None`, and `repay_token_loan` fails with `LoanNotFound`.
+2. **Open.** `enable_token_lending` transfers `amount` from the lender into the contract, adds it to `vault.balance`, and writes a record with `repaid = false`.
+3. **Repaid.** `repay_token_loan` transfers `amount` plus any penalty from the vault balance to the lender and sets `repaid = true`. The record is kept.
+
+Notes:
+
+- A new loan can be enabled only when no unrepaid loan exists. The repaid record is then overwritten.
+- Nothing changes the loan state when the deadline passes. The penalty is applied only when the owner repays. These functions do not liquidate or default a vault.
+- Repayment requires `vault.balance ≥ amount + penalty`, otherwise it fails with `InsufficientBalance`.
 
 ## Issue #586: Token Collateral
 
