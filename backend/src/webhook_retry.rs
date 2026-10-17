@@ -146,6 +146,38 @@ pub fn enqueue(
     Ok(delivery)
 }
 
+/// Event type sent to owner endpoints when an on-chain withdrawal escrow is
+/// verified and released (`WITHDRAWAL_ESCROW_VERIFIED_TOPIC`).
+pub const WITHDRAWAL_ESCROW_VERIFIED_EVENT: &str = "withdrawal_escrow_verified";
+
+/// Queue a release-confirmation webhook for every owner endpoint subscribed to
+/// the vault for `WITHDRAWAL_ESCROW_VERIFIED_EVENT`. Returns the number of
+/// deliveries queued. Called by whatever ingests the on-chain verified event.
+pub fn notify_withdrawal_escrow_verified(
+    db: &Arc<Db>,
+    vault_id: &str,
+    amount: i128,
+) -> Result<usize, String> {
+    let subscriptions = db
+        .get_webhook_subscriptions_for_vault(vault_id)
+        .map_err(|e| e.to_string())?;
+
+    let mut queued = 0;
+    for sub in subscriptions.iter().filter(|s| {
+        s.event_types.is_empty()
+            || s.event_types.iter().any(|t| t == WITHDRAWAL_ESCROW_VERIFIED_EVENT)
+    }) {
+        let payload = serde_json::json!({
+            "event": WITHDRAWAL_ESCROW_VERIFIED_EVENT,
+            "vault_id": vault_id,
+            "amount": amount.to_string(),
+        });
+        enqueue(db, vault_id, WITHDRAWAL_ESCROW_VERIFIED_EVENT, payload, &sub.endpoint_url)?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
 /// Process all pending and due-retry webhook deliveries. Called from the
 /// scheduler loop.
 pub async fn flush(db: &Arc<Db>) {

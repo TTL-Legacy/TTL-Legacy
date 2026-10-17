@@ -2,7 +2,7 @@ use crate::models::{
     AuditEntry, AuditLogEntry, AuditLogQuery, Channel, Frequency, Passkey, RecoveryCode,
     RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult, Subscription,
     SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
-    VaultNotificationPreferences, VaultShare, VaultStatus,
+    VaultNotificationPreferences, VaultShare, VaultStatus, WebhookSubscription,
 };
 
 use chrono::Utc;
@@ -1081,6 +1081,30 @@ impl Db {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn get_webhook_subscriptions_for_vault(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<WebhookSubscription>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT id, vault_id, endpoint_url, event_types, created_at
+               FROM webhook_subscriptions
+               WHERE vault_id = ?1"#,
+        )?;
+        let rows = stmt.query_map(params![vault_id], |r| {
+            let event_types_str: String = r.get(3)?;
+            let created_at_str: String = r.get(4)?;
+            Ok(WebhookSubscription {
+                id: r.get(0)?,
+                vault_id: r.get(1)?,
+                endpoint_url: r.get(2)?,
+                event_types: serde_json::from_str(&event_types_str).unwrap_or_default(),
+                created_at: created_at_str.parse().unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+        rows.collect()
     }
 
     // ── Idempotency (#825) ──────────────────────────────────────────────────

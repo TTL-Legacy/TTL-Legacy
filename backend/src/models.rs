@@ -1154,6 +1154,17 @@ pub struct WebhookDelivery {
     pub attempts: Vec<WebhookAttempt>,
 }
 
+/// Owner-registered endpoint for vault events. An empty `event_types` list
+/// subscribes to every event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub vault_id: String,
+    pub endpoint_url: String,
+    pub event_types: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── Two-factor authentication (2FA) ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
