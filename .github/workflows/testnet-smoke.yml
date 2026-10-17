@@ -46,6 +46,32 @@ jobs:
           sudo mv /tmp/stellar /usr/local/bin/stellar
           stellar --version
 
+      # Testnet RPC intermittently returns 503 under load. Retry transient
+      # failures instead of failing the whole nightly run.
+      - name: Install retry helper
+        run: |
+          cat > "${RUNNER_TEMP}/retry.sh" <<'EOF'
+          # retry <command> [args...]: runs the command up to 3 times with
+          # exponential backoff, echoing its stdout on success.
+          retry() {
+            local max=3 attempt=1 delay=10 out
+            while true; do
+              if out=$("$@"); then
+                printf '%s\n' "$out"
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::Command failed after ${max} attempts: $1 ..." >&2
+                return 1
+              fi
+              echo "::warning::Attempt ${attempt}/${max} failed (possible RPC 503), retrying in ${delay}s: $1 ..." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          EOF
+
       # Generate per-run key names so parallel runs don't collide in the
       # local stellar-cli config store.
       - name: Set up test accounts
@@ -91,7 +117,8 @@ jobs:
       - name: Deploy contract
         run: |
           set -euo pipefail
-          CONTRACT_ID=$(stellar contract deploy \
+          source "${RUNNER_TEMP}/retry.sh"
+          CONTRACT_ID=$(retry stellar contract deploy \
             --wasm target/wasm32-unknown-unknown/release/ttl_vault.wasm \
             --source "smoke-admin-${KEY_SUFFIX}" \
             --network testnet)
@@ -119,10 +146,11 @@ jobs:
       - name: Initialize contract
         run: |
           set -euo pipefail
-          XLM_TOKEN=$(stellar contract id asset --asset native --network testnet)
+          source "${RUNNER_TEMP}/retry.sh"
+          XLM_TOKEN=$(retry stellar contract id asset --asset native --network testnet)
           echo "XLM_TOKEN=${XLM_TOKEN}" >> "$GITHUB_ENV"
 
-          stellar contract invoke \
+          retry stellar contract invoke \
             --id "${CONTRACT_ID}" \
             --source "smoke-admin-${KEY_SUFFIX}" \
             --network testnet \
@@ -135,7 +163,8 @@ jobs:
       - name: Smoke — create vault
         run: |
           set -euo pipefail
-          VAULT_ID=$(stellar contract invoke \
+          source "${RUNNER_TEMP}/retry.sh"
+          VAULT_ID=$(retry stellar contract invoke \
             --id "${CONTRACT_ID}" \
             --source "smoke-owner-${KEY_SUFFIX}" \
             --network testnet \
@@ -153,8 +182,9 @@ jobs:
       - name: Smoke — deposit
         run: |
           set -euo pipefail
+          source "${RUNNER_TEMP}/retry.sh"
           # 10 XLM expressed in stroops (1 XLM = 10_000_000 stroops)
-          stellar contract invoke \
+          retry stellar contract invoke \
             --id "${CONTRACT_ID}" \
             --source "smoke-owner-${KEY_SUFFIX}" \
             --network testnet \
@@ -168,9 +198,10 @@ jobs:
         run: |
           set -euo pipefail
           # Any deterministic 32-byte value works as a passkey hash in the smoke test
+          source "${RUNNER_TEMP}/retry.sh"
           PASSKEY_HASH=$(echo -n "ttl-legacy-smoke-test" | sha256sum | awk '{print $1}')
 
-          stellar contract invoke \
+          retry stellar contract invoke \
             --id "${CONTRACT_ID}" \
             --source "smoke-owner-${KEY_SUFFIX}" \
             --network testnet \
@@ -184,7 +215,8 @@ jobs:
       - name: Smoke — get TTL remaining
         run: |
           set -euo pipefail
-          TTL=$(stellar contract invoke \
+          source "${RUNNER_TEMP}/retry.sh"
+          TTL=$(retry stellar contract invoke \
             --id "${CONTRACT_ID}" \
             --source "smoke-owner-${KEY_SUFFIX}" \
             --network testnet \
@@ -208,7 +240,8 @@ jobs:
             echo "Nothing to clean up (vault or contract not created)"
             exit 0
           fi
-          stellar contract invoke \
+          source "${RUNNER_TEMP}/retry.sh"
+          retry stellar contract invoke \
             --id "${CONTRACT_ID}" \
             --source "smoke-owner-${KEY_SUFFIX}" \
             --network testnet \
