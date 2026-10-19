@@ -217,6 +217,102 @@ fn test_migrate_vault_preserves_custom_metadata() {
     assert_eq!(vault_after.custom_metadata, custom_meta_before);
 }
 
+// ========== Test: migrate_vault_preserves_custom_metadata_entries ==========
+
+#[test]
+fn test_migrate_vault_preserves_custom_metadata_entries() {
+    let (env, owner, beneficiary, _, vault_id, client) = setup_migration_vault_env();
+    let new_owner = Address::generate(&env);
+
+    // Set several custom metadata entries before migration
+    let key_a = soroban_sdk::String::from_str(&env, "key_a");
+    let key_b = soroban_sdk::String::from_str(&env, "key_b");
+    let key_c = soroban_sdk::String::from_str(&env, "key_c");
+    let value_a = soroban_sdk::Bytes::from_slice(&env, b"value-a");
+    let value_b = soroban_sdk::Bytes::from_slice(&env, b"value-b");
+    let value_c = soroban_sdk::Bytes::from_slice(&env, b"value-c");
+
+    client.set_custom_metadata_entry(&vault_id, &owner, &key_a, &value_a);
+    client.set_custom_metadata_entry(&vault_id, &owner, &key_b, &value_b);
+    client.set_custom_metadata_entry(&vault_id, &owner, &key_c, &value_c);
+
+    // Also set the vault-level custom_metadata field
+    let custom_meta = soroban_sdk::Bytes::from_slice(&env, b"custom-metadata-bytes");
+    client.set_custom_metadata(&vault_id, &owner, &custom_meta);
+
+    let vault_before = client.get_vault(&vault_id);
+    let custom_meta_before = vault_before.custom_metadata.clone();
+
+    // Migrate vault
+    client.migrate_vault(&vault_id, &owner, &new_owner, &beneficiary);
+
+    let vault_after = client.get_vault(&vault_id);
+
+    // Assert vault-level custom metadata is preserved
+    assert_eq!(vault_after.custom_metadata, custom_meta_before);
+
+    // Assert every CustomMetadataEntry is readable under the new vault key
+    assert_eq!(
+        client.get_custom_metadata_entry(&vault_id, &key_a),
+        Some(value_a)
+    );
+    assert_eq!(
+        client.get_custom_metadata_entry(&vault_id, &key_b),
+        Some(value_b)
+    );
+    assert_eq!(
+        client.get_custom_metadata_entry(&vault_id, &key_c),
+        Some(value_c)
+    );
+}
+
+// ========== Test: migrate_vault_preserves_versioned_custom_metadata_history ==========
+
+#[test]
+fn test_migrate_vault_preserves_versioned_custom_metadata_history() {
+    let (env, owner, beneficiary, _, vault_id, client) = setup_migration_vault_env();
+    let new_owner = Address::generate(&env);
+
+    let key = soroban_sdk::String::from_str(&env, "versioned_key");
+    let value_v1 = soroban_sdk::Bytes::from_slice(&env, b"version-1");
+    let value_v2 = soroban_sdk::Bytes::from_slice(&env, b"version-2");
+
+    // Create versioned history for the entry
+    client.set_custom_metadata_entry(&vault_id, &owner, &key, &value_v1);
+    client.set_custom_metadata_entry(&vault_id, &owner, &key, &value_v2);
+
+    let history_before = client.get_custom_metadata_history(&vault_id, &key);
+    assert!(history_before.len() >= 2);
+
+    // Migrate vault
+    client.migrate_vault(&vault_id, &owner, &new_owner, &beneficiary);
+
+    // Assert the current entry is preserved
+    assert_eq!(
+        client.get_custom_metadata_entry(&vault_id, &key),
+        Some(value_v2)
+    );
+
+    // Assert the versioned history is preserved
+    let history_after = client.get_custom_metadata_history(&vault_id, &key);
+    assert_eq!(history_after, history_before);
+}
+
+// ========== Test: migrate_vault_with_no_custom_metadata_succeeds ==========
+
+#[test]
+fn test_migrate_vault_with_no_custom_metadata_succeeds() {
+    let (env, owner, beneficiary, _, vault_id, client) = setup_migration_vault_env();
+    let new_owner = Address::generate(&env);
+
+    // No custom metadata entries set; migration should still succeed
+    client.migrate_vault(&vault_id, &owner, &new_owner, &beneficiary);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.owner, new_owner);
+    assert_eq!(vault.beneficiary, beneficiary);
+}
+
 // ========== Test: migrate_vault_allows_new_owner_to_manage_vault ==========
 
 #[test]

@@ -8581,12 +8581,191 @@ impl TtlVaultContract {
         Self::load_release_memo(&env, vault_id)
     }
 
+    // --- Issue #1817: Geo-fenced check-in support ---
+
+    /// Configures the geo-fence for a vault (owner-only).
+    ///
+    /// When enabled, check-ins must supply a country code present in the
+    /// approved set. Country codes are expected to be ISO 3166-1 alpha-2
+    /// (e.g. "US", "GB") but any short string is accepted.
+    pub fn set_geo_fence(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        approved_countries: Vec<String>,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if enabled && approved_countries.is_empty() {
+            return Err(ContractError::InvalidAmount);
+        }
+        let key = StorageKey::GeoFence(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage()
+            .persistent()
+            .set(&key, &(approved_countries, enabled));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Enables or disables the geo-fence without changing the approved set.
+    pub fn set_geo_fence_enabled(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        enabled: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let key = StorageKey::GeoFence(vault_id);
+        let (countries, _) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, (Vec<String>, bool)>(&key)
+            .unwrap_or_else(|| (Vec::new(&env), false));
+        if enabled && countries.is_empty() {
+            return Err(ContractError::InvalidAmount);
+        }
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &(countries, enabled));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Returns the geo-fence configuration: approved country codes + enabled flag.
+    pub fn get_geo_fence(env: Env, vault_id: u64) -> (Vec<String>, bool) {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, (Vec<String>, bool)>(&StorageKey::GeoFence(vault_id))
+            .unwrap_or_else(|| (Vec::new(&env), false))
+    }
+
+    /// Returns the geo-fenced check-in history for a vault.
+    pub fn get_geo_check_in_history(env: Env, vault_id: u64) -> Vec<GeoCheckInEntry> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::GeoCheckInHistory(vault_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Validates a supplied country code against the vault's geo-fence.
+    fn validate_geo_fence(
+        env: &Env,
+        vault_id: u64,
+        country_code: &String,
+    ) -> Result<(), ContractError> {
+        let (countries, enabled) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, (Vec<String>, bool>>(&StorageKey::GeoFence(vault_id))
+            .unwrap_or_else(|| (Vec::new(env), false));
+        if !enabled {
+            return Ok(());
+        }
+        for approved in countries.iter() {
+            if approved == *country_code {
+                return Ok(());
+            }
+        }
+        Err(ContractError::InvalidBeneficiary)
+    }
+
+    /// Records a geo-fenced check-in entry in the vault's history (100-entry cap).
+    fn record_geo_check_in(env: &Env, vault_id: u64, entry: GeoCheckInEntry) {
+        let key = StorageKey::GeoCheckInHistory(vault_id);
+        let mut history: Vec<GeoCheckInEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        history.push_back(entry);
+        if history.len() > 100 {
+            let total = history.len();
+            let start = total - 100;
+            let mut trimmed: Vec<GeoCheckInEntry> = Vec::new(env);
+            for i in start..total {
+                trimmed.push_back(history.get(i).unwrap());
+            }
+            history = trimmed;
+        }
+        env.storage().persistent().set(&key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+    }
+
     /// Returns the custom metadata history (bytes + timestamp) for a vault.
     pub fn get_custom_metadata_history(env: Env, vault_id: u64) -> Vec<CustomMetadataEntry> {
         env.storage()
             .persistent()
             .get(&StorageKey::CustomMetadataHistory(vault_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Migrates the `CustomMetadataEntry` history from one vault to another.
+    ///
+    /// Issue #1814: vault migration must preserve `CustomMetadataEntry` records.
+    /// Copies the `CustomMetadataHistory` vector stored under the old vault's
+    /// key to the new vault's key, then removes the old entries. Idempotent:
+    /// if the old key no longer exists (already migrated) it is a no-op, and
+    /// existing entries under the new key are preserved (old entries appended).
+    fn migrate_custom_metadata_history(env: &Env, old_vault_id: u64, new_vault_id: u64) {
+        if old_vault_id == new_vault_id {
+            return;
+        }
+        let old_key = StorageKey::CustomMetadataHistory(old_vault_id);
+        let old_history: Vec<CustomMetadataEntry> = match env.storage().persistent().get(&old_key) {
+            Some(h) => h,
+            None => return,
+        };
+
+        let new_key = StorageKey::CustomMetadataHistory(new_vault_id);
+        let mut new_history: Vec<CustomMetadataEntry> = env
+            .storage()
+            .persistent()
+            .get(&new_key)
+            .unwrap_or_else(|| Vec::new(env));
+
+        // Append the old entries, preserving their original order and timestamps.
+        for entry in old_history.iter() {
+            new_history.push_back(entry);
+        }
+
+        // Trim to the same 100-entry cap used by `set_vault_metadata`.
+        if new_history.len() > 100 {
+            let total = new_history.len();
+            let start = total - 100;
+            let mut trimmed: Vec<CustomMetadataEntry> = Vec::new(env);
+            for i in start..total {
+                trimmed.push_back(new_history.get(i).unwrap());
+            }
+            new_history = trimmed;
+        }
+
+        env.storage().persistent().set(&new_key, &new_history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&new_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+
+        // Remove the old entries so they are not double-counted on re-run.
+        env.storage().persistent().remove(&old_key);
     }
 
     /// Gets custom metadata for a vault.
@@ -8600,6 +8779,54 @@ impl TtlVaultContract {
     pub fn get_vault_metadata(env: Env, vault_id: u64) -> Bytes {
         let vault = Self::load_vault(&env, vault_id);
         vault.custom_metadata
+    }
+
+    // --- Issue #1815: Vault Description ---
+
+    /// Sets a human-readable description for a vault.
+    ///
+    /// The description is owner-supplied free text used to annotate the
+    /// purpose of the vault. It is capped at `MAX_DESCRIPTION_LEN` bytes.
+    /// Passing an empty string clears the description.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`        - If caller is not the vault owner
+    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::InvalidAmount`   - If description exceeds `MAX_DESCRIPTION_LEN`
+    pub fn set_vault_description(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        description: String,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        if description.len() > MAX_DESCRIPTION_LEN {
+            return Err(ContractError::InvalidAmount);
+        }
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        let key = StorageKey::VaultDescription(vault_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&key, &description);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Returns the human-readable description for a vault, if one has been set.
+    pub fn get_vault_description(env: Env, vault_id: u64) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, String>(&StorageKey::VaultDescription(vault_id))
     }
 
     // --- Issue #380: Vault Pause/Freeze ---
@@ -18851,6 +19078,57 @@ impl TtlVaultContract {
             .persistent()
             .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false)
+    }
+
+    /// Performs a geo-fenced check-in for a vault.
+    ///
+    /// Behaves like `check_in` but additionally validates the supplied
+    /// `country_code` against the vault's geo-fence (when enabled) and records
+    /// a `GeoCheckInEntry` in the vault's geo check-in history. Emits
+    /// `CHECKIN_GEO_TOPIC` on success.
+    pub fn geo_check_in(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        country_code: String,
+    ) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if vault.is_paused {
+            return Err(ContractError::Paused);
+        }
+
+        // Enforce the geo-fence when enabled.
+        Self::validate_geo_fence(&env, vault_id, &country_code)?;
+
+        let now = env.ledger().timestamp();
+        vault.last_check_in = now;
+        Self::save_vault(&env, vault_id, &vault);
+
+        let entry = GeoCheckInEntry {
+            timestamp: now,
+            country_code: country_code.clone(),
+            caller: caller.clone(),
+        };
+        Self::record_geo_check_in(&env, vault_id, entry);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (CHECKIN_GEO_TOPIC, vault_id),
+            (caller, country_code, now),
+        );
+        Ok(())
     }
 
     // ── Issue 3: Low-TTL warning threshold ───────────────────────────────────

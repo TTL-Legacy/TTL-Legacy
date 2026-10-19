@@ -1226,3 +1226,34 @@ pub struct SponsoredReleaseResponse {
 pub struct SponsoredReleaseListResponse {
     pub releases: Vec<serde_json::Value>,
 }
+
+// ── Check-in calendar export (#1816) ────────────────────────────────────────
+
+/// A single check-in deadline entry in the calendar export response.
+///
+/// All date fields are Unix timestamps in **milliseconds** since the Unix
+/// epoch (not ISO 8601 strings), matching the frontend `Calendar` component's
+/// expectation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckInCalendarEvent {
+    pub vault_id: String,
+    /// Deadline timestamp in milliseconds since the Unix epoch.
+    pub deadline: i64,
+    /// Timestamp of the last recorded check-in, in milliseconds since the
+    /// Unix epoch.
+    pub last_check_in: i64,
+    /// Check-in interval in seconds.
+    pub check_in_interval: u64,
+}
+
+/// Response body for `GET /checkin-calendar-export`.
+///
+/// Date fields are Unix timestamps in **milliseconds** since the Unix epoch,
+/// as required by the frontend `Calendar` component.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckInCalendarExportResponse {
+    /// Calendar events, one per vault check-in deadline.
+    pub events: Vec<CheckInCalendarEvent>,
+    /// When this export was generated, in milliseconds since the Unix epoch.
+    pub generated_at: i64,
+}

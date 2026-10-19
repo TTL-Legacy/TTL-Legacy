@@ -287,7 +287,12 @@ pub const INACTIVITY_PENALTY_TOPIC: Symbol = symbol_short!("inact_pen");
 pub const CHECK_IN_RECORDED_TOPIC: Symbol = symbol_short!("ci_rec");
 
 // Issue: Geographic Check-in Tracking
+/// Emitted when a check-in is recorded with geographic metadata (Issue #1817).
 pub const CHECKIN_GEO_TOPIC: Symbol = symbol_short!("ci_geo");
+/// Emitted when a vault's geo-fence configuration is updated (Issue #1817).
+pub const SET_GEO_FENCE_TOPIC: Symbol = symbol_short!("set_geo");
+/// Emitted when a check-in is rejected because it falls outside the geo-fence (Issue #1817).
+pub const GEO_FENCE_VIOLATION_TOPIC: Symbol = symbol_short!("geo_vio");
 
 // Issue #494: Beneficiary Succession Planning
 pub const SUCCESSION_SET_TOPIC: Symbol = symbol_short!("suc_set");
@@ -392,8 +397,15 @@ pub const MAX_METADATA_LEN: u32 = 256;
 /// Maximum length for vault name
 pub const MAX_NAME_LEN: u32 = 64;
 
-/// Maximum length for vault description
+/// Maximum length for vault description (single source of truth for
+/// `set_vault_description` validation - Issue #1815).
 pub const MAX_DESCRIPTION_LEN: u32 = 512;
+
+/// Maximum number of approved country codes in a `GeoFenceConfig` (Issue #1817).
+pub const MAX_GEO_FENCE_COUNTRIES: u32 = 32;
+
+/// Length of an ISO 3166-1 alpha-2 country code (Issue #1817).
+pub const COUNTRY_CODE_LEN: u32 = 2;
 
 /// Maximum length for vault notes
 pub const MAX_NOTES_LEN: u32 = 1024;
@@ -584,6 +596,10 @@ pub enum StorageKey {
     VaultLowTtlThreshold(u64),
     // Issue #1337: beneficiary archival notification contact info
     BeneficiaryContactInfo(u64, Address),
+    // Issue #1815: human-readable vault description (max MAX_DESCRIPTION_LEN bytes)
+    VaultDescription(u64),
+    // Issue #1817: geo-fence configuration for high-security vault check-ins
+    GeoFence(u64),
     // Issue #1283: on-chain secp256r1 public key for passkey signature verification.
     // Key: (vault_id, passkey_hash) → SEC-1 uncompressed 65-byte public key.
     PasskeyPublicKey(u64, BytesN<32>),
@@ -1513,6 +1529,12 @@ pub struct TtlBorrowRecord {
     pub repaid: bool,
 }
 
+/// A single geo-tagged check-in record (Issue #1817).
+///
+/// Coordinates are stored as integer micro-degrees (degrees × 1_000_000) to
+/// avoid floating point. `country_code` is an ISO 3166-1 alpha-2 code
+/// (e.g. `"US"`, `"GB"`). Records are appended to the per-vault geo log and
+/// emitted via `CHECKIN_GEO_TOPIC`.
 #[contracttype]
 #[derive(Clone)]
 pub struct GeoCheckInEntry {
@@ -1520,6 +1542,20 @@ pub struct GeoCheckInEntry {
     pub longitude_micro: i64,
     pub country_code: String,
     pub timestamp: u64,
+}
+
+/// Geo-fence configuration for high-security vaults (Issue #1817).
+///
+/// When `enabled` is `true`, a check-in must supply a `country_code` that is
+/// present in `approved_countries`, otherwise it is rejected with
+/// `ContractError::GeoFenceNotSatisfied`.
+#[contracttype]
+#[derive(Clone)]
+pub struct GeoFenceConfig {
+    /// Whether geo-fencing is enforced for this vault.
+    pub enabled: bool,
+    /// Approved ISO 3166-1 alpha-2 country codes (uppercase, 2 chars each).
+    pub approved_countries: Vec<String>,
 }
 
 #[contracttype]
@@ -2021,3 +2057,17 @@ pub const LOAN_REPAID_TOPIC: Symbol = symbol_short!("loan_rep");
 pub const TWO_FACTOR_ENABLED_TOPIC: Symbol = symbol_short!("2fa_en");
 pub const TWO_FACTOR_DISABLED_TOPIC: Symbol = symbol_short!("2fa_dis");
 pub const TWO_FACTOR_VERIFIED_TOPIC: Symbol = symbol_short!("2fa_vrf");
+
+/// Error variants for the vault description and geo-fence features
+/// (Issues #1815, #1817). These are returned by the corresponding
+/// contract functions in `lib.rs`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum FeatureError {
+    /// Description exceeds `MAX_DESCRIPTION_LEN` bytes.
+    DescriptionTooLong,
+    /// Check-in country code is not in the vault's approved list.
+    GeoFenceNotSatisfied,
+    /// Country code is not a valid ISO 3166-1 alpha-2 code.
+    InvalidCountryCode,
+}

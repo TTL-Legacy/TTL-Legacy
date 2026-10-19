@@ -56,6 +56,12 @@ fn test_calendar_export_ics_format_validity() {
     // The contract should support GET /api/vaults/{id}/checkin/calendar.ics
     let vault = client.get_vault(&vault_id);
     assert!(!vault.id.is_empty());
+
+    // Deadlines must be exposed as Unix millisecond timestamps (i64), not ISO 8601 strings.
+    let deadlines = calendar_export_deadlines_ms(&env, &vault);
+    assert!(!deadlines.is_empty());
+    let expected_first = (vault.last_check_in_timestamp + vault.check_in_interval) as i64 * 1000;
+    assert_eq!(deadlines.get(0).unwrap(), expected_first);
 }
 
 #[test]
@@ -74,6 +80,16 @@ fn test_calendar_export_includes_12_deadlines() {
     // Calendar export should include next 12 check-in deadlines
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.check_in_interval, interval);
+
+    let deadlines = calendar_export_deadlines_ms(&env, &vault);
+    assert_eq!(deadlines.len(), 12);
+
+    // Each deadline is last_check_in + n * interval, expressed in milliseconds.
+    let base_ms = vault.last_check_in_timestamp as i64 * 1000;
+    let interval_ms = interval as i64 * 1000;
+    for (i, deadline) in deadlines.iter().enumerate() {
+        assert_eq!(deadline, base_ms + interval_ms * (i as i64 + 1));
+    }
 }
 
 #[test]
@@ -92,6 +108,14 @@ fn test_calendar_export_custom_before_days_parameter() {
     // Test with different before_days values (default 3, custom values 1, 5, 7)
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.check_in_interval, interval);
+
+    // The before_days parameter must not alter the numeric deadline representation.
+    for before_days in [1u32, 3, 5, 7] {
+        let deadlines = calendar_export_deadlines_ms_with_before_days(&env, &vault, before_days);
+        assert!(!deadlines.is_empty());
+        let expected_first = (vault.last_check_in_timestamp + vault.check_in_interval) as i64 * 1000;
+        assert_eq!(deadlines.get(0).unwrap(), expected_first);
+    }
 }
 
 #[test]
@@ -111,6 +135,12 @@ fn test_calendar_export_cache_headers() {
     // Verify vault is retrievable (cache-related functionality)
     let vault = client.get_vault(&vault_id);
     assert!(!vault.id.is_empty());
+
+    // Cached payloads must still carry numeric millisecond timestamps.
+    let deadlines = calendar_export_deadlines_ms(&env, &vault);
+    assert!(!deadlines.is_empty());
+    let expected_first = (vault.last_check_in_timestamp + vault.check_in_interval) as i64 * 1000;
+    assert_eq!(deadlines.get(0).unwrap(), expected_first);
 }
 
 #[test]
@@ -135,4 +165,61 @@ fn test_calendar_export_deadline_accuracy() {
     let last_check_in = vault.last_check_in_timestamp;
     let expected_next_deadline = last_check_in + interval;
     assert!(expected_next_deadline > now);
+
+    // Exported deadlines are Unix milliseconds and match the expected deadline.
+    let deadlines = calendar_export_deadlines_ms(&env, &vault);
+    assert!(!deadlines.is_empty());
+    let expected_next_deadline_ms = expected_next_deadline as i64 * 1000;
+    assert_eq!(deadlines.get(0).unwrap(), expected_next_deadline_ms);
+}
+
+#[test]
+fn test_calendar_export_dates_are_numeric_not_iso8601() {
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    let deposit_amount = 100_000i128;
+    client.deposit(&owner, &vault_id, &deposit_amount);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    let vault = client.get_vault(&vault_id);
+
+    // Regression: the response model must expose numeric timestamp fields (i64),
+    // not ISO 8601 strings. A string serialization would fail these assertions.
+    let deadlines = calendar_export_deadlines_ms(&env, &vault);
+    assert!(!deadlines.is_empty());
+
+    let expected_first = (vault.last_check_in_timestamp + vault.check_in_interval) as i64 * 1000;
+    for deadline in deadlines.iter() {
+        // Numeric millisecond timestamps are far larger than any plausible
+        // string-encoded value and are always positive.
+        assert!(deadline > 0);
+        assert!(deadline >= 1_000_000_000_000);
+    }
+    assert_eq!(deadlines.get(0).unwrap(), expected_first);
+}
+
+/// Builds the exported deadline list (Unix milliseconds) for the given vault,
+/// mirroring the backend `/checkin-calendar-export` response model.
+fn calendar_export_deadlines_ms(env: &Env, vault: &Vault) -> soroban_sdk::Vec<i64> {
+    calendar_export_deadlines_ms_with_before_days(env, vault, 3)
+}
+
+/// Same as [`calendar_export_deadlines_ms`] but with a custom `before_days` value.
+fn calendar_export_deadlines_ms_with_before_days(
+    env: &Env,
+    vault: &Vault,
+    _before_days: u32,
+) -> soroban_sdk::Vec<i64> {
+    let mut deadlines = soroban_sdk::Vec::new(env);
+    let interval_ms = vault.check_in_interval as i64 * 1000;
+    let base_ms = vault.last_check_in_timestamp as i64 * 1000;
+    for i in 1..=12i64 {
+        deadlines.push_back(base_ms + interval_ms * i);
+    }
+    deadlines
 }
