@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "vault",
+    "ttl_vault",
 ]
 resolver = "2"
 

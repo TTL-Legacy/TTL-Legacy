@@ -59,7 +59,8 @@ pub use types::{
     TWO_FACTOR_DISABLED_TOPIC, TWO_FACTOR_ENABLED_TOPIC, TWO_FACTOR_VERIFIED_TOPIC,
     VestingAccelerationConfig, VestingForfeitureConfig, VestingMilestone,
     VestingRolloverConfig, VestingStaggerEntry, WithdrawalApprovalRequest,
-    BeneficiaryConditionalAcceptance, BeneficiaryConditionalDecline,
+    BeneficiaryConditionResponse,
+    BeneficiaryConditionResponseType,
     ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
     ADMIN_TRANSFER_COMPLETED_TOPIC,
     ADMIN_TRANSFER_PROPOSED_TOPIC,
@@ -159,12 +160,14 @@ pub use types::{
     PASSKEY_EXPIRED_TOPIC,
     PASSKEY_EXPIRY_EXTENDED_TOPIC,
     PASSKEY_LOCKOUT_TOPIC,
+    PASSKEY_LOCKOUT_THRESHOLD_SET_TOPIC,
     PASSKEY_RECOVERED_TOPIC,
     PASSKEY_RECOVERY_INITIATED_TOPIC,
     PASSKEY_ROTATION_ENFORCED_TOPIC,
     PASSKEY_ROTATION_REQUIRED_TOPIC,
     PASSKEY_UNLOCKED_TOPIC,
     PASSKEY_USAGE_TOPIC,
+    PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC,
     PAUSE_TOPIC,
     PAUSE_VAULT_TOPIC,
     PENDING_MULTISIG_OP_COSIGNED_TOPIC,
@@ -333,6 +336,7 @@ mod min_checkin_interval_tests;
 // Issue #1264 #1265 #1266 #1267: dedicated guard tests
 #[cfg(test)]
 mod bug_fix_tests_1264_1265_1266_1267;
+mod release_conditions_query_tests;
 
 #[cfg(test)]
 mod vault_archiving_tests;
@@ -2198,7 +2202,12 @@ impl TtlVaultContract {
             vault.inactivity_penalty_bps,
             vault.penalty_recipient.clone(),
         ) {
-            let elapsed = now.saturating_sub(original_last_check_in);
+            // Hibernating time is not a missed check-in, so exclude it from the gap.
+            let hibernated =
+                Self::hibernated_seconds_between(&env, vault_id, original_last_check_in, now);
+            let elapsed = now
+                .saturating_sub(original_last_check_in)
+                .saturating_sub(hibernated);
             let missed = (elapsed / vault.check_in_interval).saturating_sub(1);
             if missed > 0 && vault.balance > 0 {
                 let penalty_per = vault.balance * (penalty_bps as i128) / BASIS_POINTS_100_PERCENT;
@@ -3554,6 +3563,10 @@ impl TtlVaultContract {
         if Self::check_vault_frozen(&env, vault_id) {
             panic_with_error!(&env, ContractError::VaultFrozen);
         }
+        // Issue #1853: Owner lock must block beneficiary-triggered release
+        if Self::is_owner_vault_locked(env.clone(), vault_id) {
+            panic_with_error!(&env, ContractError::VaultOwnerLocked);
+        }
         if env
             .storage()
             .persistent()
@@ -3568,7 +3581,7 @@ impl TtlVaultContract {
         }
 
         // Load release conditions
-        let conditions = Self::get_release_conditions(env.clone(), vault_id);
+        let conditions = Self::stored_release_conditions(&env, vault_id);
         let mut condition_met = false;
         let mut ttl_expiry_met = false;
 
@@ -3666,8 +3679,8 @@ impl TtlVaultContract {
             }
         }
 
-        // Check beneficiary conditional acceptance threshold - Issue #503
-        if !Self::check_conditional_acceptance_threshold(&env, vault_id, total).unwrap_or(false) {
+        // Check beneficiary conditional acceptance/decline threshold - Issue #503, #1849
+        if !Self::check_beneficiary_condition_threshold(&env, vault_id, total).unwrap_or(false) {
             panic_with_error!(&env, ContractError::InsufficientBalance);
         }
 
@@ -9037,12 +9050,41 @@ impl TtlVaultContract {
     }
 
     /// Returns the release conditions attached to a vault.
-    /// Returns an empty vector if none have been set.
+    /// Vaults created before `set_release_conditions` existed have no stored
+    /// conditions and implicitly use `TTLExpiry`, so that is returned as the
+    /// default when nothing has been stored.
     pub fn get_release_conditions(env: Env, vault_id: u64) -> Vec<ReleaseCondition> {
         env.storage()
             .persistent()
             .get(&StorageKey::ReleaseConditions(vault_id))
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| vec![&env, ReleaseCondition::TTLExpiry])
+    }
+
+    /// Returns only the conditions explicitly stored via `set_release_conditions`.
+    /// Empty when none were stored; trigger logic relies on this to fall back to
+    /// the vault's `release_condition` field.
+    fn stored_release_conditions(env: &Env, vault_id: u64) -> Vec<ReleaseCondition> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ReleaseConditions(vault_id))
+            .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Returns how many seconds of the interval `[from, to)` fall inside the
+    /// vault's hibernation window. Hibernating time must not count as missed
+    /// check-ins, so callers subtract this from elapsed time.
+    fn hibernated_seconds_between(env: &Env, vault_id: u64, from: u64, to: u64) -> u64 {
+        match env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+        {
+            Some(h) => {
+                let window_end = h.started_at.saturating_add(h.duration_seconds);
+                to.min(window_end).saturating_sub(from.max(h.started_at))
+            }
+            None => 0,
+        }
     }
 
     /// Owner‑initiated panic release.
@@ -10002,6 +10044,134 @@ impl TtlVaultContract {
         } else {
             false
         }
+    }
+
+    /// Set the passkey lockout threshold (failed attempts before lockout) — Issue #1847.
+    ///
+    /// Only the vault owner can configure this. Default is 5 if not set.
+    pub fn set_passkey_lockout_threshold(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        threshold: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        if threshold == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        // Read existing lockout or create default with threshold
+        let mut lockout = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+            .unwrap_or(PasskeyLockout {
+                locked_at: 0,
+                unlock_at: 0,
+                failed_attempts: 0,
+                threshold,
+            });
+
+        lockout.threshold = threshold;
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+
+        env.events().publish(
+            (PASSKEY_LOCKOUT_THRESHOLD_SET_TOPIC, vault_id),
+            threshold,
+        );
+        Ok(())
+    }
+
+    /// Get the current passkey lockout threshold for a vault.
+    pub fn get_passkey_lockout_threshold(env: Env, vault_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+            .map(|l| l.threshold)
+            .unwrap_or(5) // Default threshold
+    }
+
+    /// Record a failed passkey attempt and check if lockout should be triggered — Issue #1847.
+    ///
+    /// Returns true if the vault is now locked out.
+    pub fn record_passkey_failed_attempt(
+        env: Env,
+        vault_id: u64,
+        lockout_duration_seconds: u64,
+    ) -> Result<bool, ContractError> {
+        let vault = Self::load_vault(&env, vault_id);
+
+        // Get or create lockout state
+        let mut lockout = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+            .unwrap_or(PasskeyLockout {
+                locked_at: 0,
+                unlock_at: 0,
+                failed_attempts: 0,
+                threshold: 5, // Default threshold
+            });
+
+        // If already locked out, don't increment
+        if env.ledger().timestamp() < lockout.unlock_at {
+            return Ok(true);
+        }
+
+        lockout.failed_attempts += 1;
+
+        // Check if threshold reached
+        if lockout.failed_attempts >= lockout.threshold {
+            // Trigger lockout
+            lockout.locked_at = env.ledger().timestamp();
+            lockout.unlock_at = env.ledger().timestamp() + lockout_duration_seconds;
+            lockout.failed_attempts = 0; // Reset counter after lockout
+
+            env.storage()
+                .persistent()
+                .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+
+            env.events().publish(
+                (PASSKEY_LOCKOUT_TOPIC, vault_id),
+                lockout_duration_seconds,
+            );
+
+            return Ok(true);
+        }
+
+        // Save updated attempt count
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+
+        Ok(false)
+    }
+
+    /// Reset failed passkey attempts counter (called on successful check-in).
+    pub fn reset_passkey_failed_attempts(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        if let Some(mut lockout) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+        {
+            lockout.failed_attempts = 0;
+            env.storage()
+                .persistent()
+                .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+        }
+
+        Ok(())
     }
 
     // --- Issue #561: Passkey Rotation Enforcement ---
@@ -11602,7 +11772,7 @@ impl TtlVaultContract {
             deprecated_at: None,
             usage_count: 0,
             last_used_timestamp: 0,
-            backup_eligible,
+            webauthn_backup_eligible: false,
         });
 
         env.storage().persistent().set(&key, &passkeys);
@@ -11615,6 +11785,55 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((ADD_PASSKEY_TOPIC, vault_id), (passkey_hash, backup_eligible));
+        Ok(())
+    }
+
+    /// Sets the WebAuthn credential backup eligibility flag for a passkey — Issue #1848.
+    ///
+    /// Only the vault owner can call this. When enabled, the passkey is marked as
+    /// eligible for WebAuthn credential backup, allowing it to be synced across
+    /// devices via platform authenticators (e.g., iCloud Keychain, Google Password Manager).
+    pub fn set_passkey_webauthn_backup_eligible(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+        eligible: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let key = StorageKey::VaultPasskeys(vault_id);
+        let mut passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut found = false;
+        for i in 0..passkeys.len() {
+            let mut pk = passkeys.get(i).unwrap();
+            if pk.hash == passkey_hash {
+                pk.webauthn_backup_eligible = eligible;
+                passkeys.set(i, pk);
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Err(ContractError::InvalidPasskey);
+        }
+
+        env.storage().persistent().set(&key, &passkeys);
+        env.events()
+            .publish((PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC, vault_id), (passkey_hash, eligible));
         Ok(())
     }
 
@@ -12027,6 +12246,7 @@ impl TtlVaultContract {
                 passkey_hash: pk.hash,
                 usage_count: pk.usage_count,
                 last_used_timestamp: pk.last_used_timestamp,
+                webauthn_backup_eligible: pk.webauthn_backup_eligible,
             });
         }
         result
@@ -12736,14 +12956,18 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidAmount);
         }
 
-        let acceptance = BeneficiaryConditionalAcceptance {
-            min_balance_threshold,
-            accepted_at: env.ledger().timestamp(),
+        let response = BeneficiaryConditionResponse {
+            response: BeneficiaryConditionResponseType::Accept,
+            threshold: min_balance_threshold,
+            timestamp: env.ledger().timestamp(),
+            reason: None,
         };
 
+        let response = BeneficiaryConditionResponse::Acceptance(acceptance);
+
         env.storage().persistent().set(
-            &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
-            &acceptance,
+            &StorageKey::BeneficiaryConditionResponse(vault_id),
+            &response,
         );
 
         env.events().publish(
@@ -12751,22 +12975,22 @@ impl TtlVaultContract {
             (vault_id, vault.beneficiary.clone(), min_balance_threshold),
         );
         env.storage().persistent().extend_ttl(
-            &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            &StorageKey::BeneficiaryConditionResponse(vault_id),
             VAULT_TTL_THRESHOLD,
             vault_ttl_ledgers(vault.check_in_interval),
         );
         Ok(())
     }
 
-    /// Gets beneficiary conditional acceptance if it exists.
-    pub fn get_beneficiary_cond_acceptance(
+    /// Gets beneficiary conditional response if it exists.
+    pub fn get_beneficiary_cond_response(
         env: Env,
         vault_id: u64,
-    ) -> Option<BeneficiaryConditionalAcceptance> {
+    ) -> Option<BeneficiaryConditionResponse> {
         env.storage()
             .persistent()
-            .get::<StorageKey, BeneficiaryConditionalAcceptance>(
-                &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            .get::<StorageKey, BeneficiaryConditionResponse>(
+                &StorageKey::BeneficiaryConditionResponse(vault_id),
             )
     }
 
@@ -12805,15 +13029,18 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidAmount);
         }
 
-        let decline = BeneficiaryConditionalDecline {
-            max_balance_threshold,
-            declined_at: env.ledger().timestamp(),
-            reason,
+        let decline = BeneficiaryConditionResponse {
+            response: BeneficiaryConditionResponseType::Decline,
+            threshold: max_balance_threshold,
+            timestamp: env.ledger().timestamp(),
+            reason: Some(reason),
         };
+
+        let response = BeneficiaryConditionResponse::Decline(decline);
 
         env.storage()
             .persistent()
-            .set(&StorageKey::ConditionalDecline(vault_id), &decline);
+            .set(&StorageKey::BeneficiaryConditionResponse(vault_id), &decline);
 
         env.events().publish(
             (BENEFICIARY_DECLINED_TOPIC,),
@@ -12821,7 +13048,7 @@ impl TtlVaultContract {
         );
 
         env.storage().persistent().extend_ttl(
-            &StorageKey::ConditionalDecline(vault_id),
+            &StorageKey::BeneficiaryConditionResponse(vault_id),
             VAULT_TTL_THRESHOLD,
             vault_ttl_ledgers(vault.check_in_interval),
         );
@@ -12829,14 +13056,14 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Gets beneficiary conditional decline if it exists.
-    pub fn get_beneficiary_cond_decline(
+    /// Gets beneficiary conditional response if it exists.
+    pub fn get_beneficiary_cond_response(
         env: Env,
         vault_id: u64,
-    ) -> Option<BeneficiaryConditionalDecline> {
+    ) -> Option<BeneficiaryConditionResponse> {
         env.storage()
             .persistent()
-            .get::<StorageKey, BeneficiaryConditionalDecline>(&StorageKey::ConditionalDecline(
+            .get::<StorageKey, BeneficiaryConditionResponse>(&StorageKey::BeneficiaryConditionResponse(
                 vault_id,
             ))
     }
@@ -12847,15 +13074,24 @@ impl TtlVaultContract {
         vault_id: u64,
         current_balance: i128,
     ) -> Result<bool, ContractError> {
-        if let Some(acceptance) = env
+        if let Some(response) = env
             .storage()
             .persistent()
-            .get::<StorageKey, BeneficiaryConditionalAcceptance>(
-                &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            .get::<StorageKey, BeneficiaryConditionResponse>(
+                &StorageKey::BeneficiaryConditionResponse(vault_id),
             )
         {
-            if current_balance < acceptance.min_balance_threshold {
-                return Ok(false);
+            match response.response {
+                BeneficiaryConditionResponseType::Accept => {
+                    if current_balance < response.threshold {
+                        return Ok(false);
+                    }
+                }
+                BeneficiaryConditionResponseType::Decline => {
+                    if current_balance > response.threshold {
+                        return Ok(false);
+                    }
+                }
             }
         }
 
@@ -12889,6 +13125,38 @@ impl TtlVaultContract {
         }
 
         Ok(true)
+    }
+
+    // Backward compatibility wrappers for existing tests and external callers
+    /// @deprecated Use get_beneficiary_condition_response instead
+    pub fn get_beneficiary_cond_acceptance(
+        env: Env,
+        vault_id: u64,
+    ) -> Option<BeneficiaryConditionalAcceptance> {
+        Self::get_beneficiary_condition_response(env, vault_id).and_then(|r| match r {
+            BeneficiaryConditionResponse::Acceptance(a) => Some(a),
+            _ => None,
+        })
+    }
+
+    /// @deprecated Use get_beneficiary_condition_response instead
+    pub fn get_beneficiary_cond_decline(
+        env: Env,
+        vault_id: u64,
+    ) -> Option<BeneficiaryConditionalDecline> {
+        Self::get_beneficiary_condition_response(env, vault_id).and_then(|r| match r {
+            BeneficiaryConditionResponse::Decline(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    /// @deprecated Use check_beneficiary_condition_threshold instead
+    fn check_conditional_acceptance_threshold(
+        env: &Env,
+        vault_id: u64,
+        current_balance: i128,
+    ) -> Result<bool, ContractError> {
+        Self::check_beneficiary_condition_threshold(env, vault_id, current_balance)
     }
 
     /// Sets escalating acceptance conditions for a vault's beneficiary release.
@@ -19797,6 +20065,14 @@ impl TtlVaultContract {
             new_ttls.push_back(new_deadline);
 
             Self::save_vault(&env, vault_id, &vault);
+            env.events().publish(
+                (CHECK_IN_RECORDED_TOPIC, vault_id),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_deadline,
+                    caller: caller.clone(),
+                },
+            );
             env.events().publish(
                 (BATCH_CHECKIN_TOPIC, vault_id),
                 (now, extension, new_deadline),

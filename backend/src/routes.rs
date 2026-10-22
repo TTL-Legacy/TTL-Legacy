@@ -369,3 +369,53 @@ pub struct AuditExportQuery {
 /// Exports the vault's audit trail. Only the vault owner may export. The
 
 /* … truncated 3428 chars — edit only what you need near the top … */
+
+// ── Issue #1852: Beneficiary proof-of-life endpoint ────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct ProofOfLifeSubmitRequest {
+    pub beneficiary: String,
+    pub proof: String,
+    pub validity_seconds: Option<u64>,
+}
+
+/// POST /api/vaults/:vault_id/proof-of-life
+///
+/// Submits a beneficiary proof-of-life attestation. The backend records
+/// the proof so that a periodic scheduler can request re-attestation from
+/// beneficiaries for high-value vaults.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn submit_proof_of_life(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<u64>,
+    body: Json<ProofOfLifeSubmitRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let vault_id = vault_id.into_inner();
+    let db = &state.db;
+
+    // Verify vault exists
+    match db.get(vault_id) {
+        Ok(vault) => {
+            if vault.beneficiary != body.beneficiary {
+                return Err(AppError::InvalidInput(
+                    "Only the beneficiary can submit proof of life".into(),
+                ));
+            }
+        }
+        Err(_) => return Err(AppError::NotFound),
+    }
+
+    // Record proof of life submission
+    db.store_proof_of_life(
+        vault_id,
+        &body.beneficiary,
+        &body.proof,
+        body.validity_seconds.unwrap_or(86400 * 30),
+    )?;
+
+    Ok(Json(serde_json::json!({
+        "status": "submitted",
+        "vault_id": vault_id,
+        "beneficiary": body.beneficiary,
+    })))
+}

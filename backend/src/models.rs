@@ -925,6 +925,42 @@ pub struct VaultReleaseHistory {
     pub sponsored_releases: Vec<crate::fee_sponsorship::SponsoredRelease>,
 }
 
+/// State transition entry for compliance reporting — Issue #1854.
+///
+/// Tracks vault status changes (Active -> Released, Active -> Paused, etc.)
+/// for audit and compliance purposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateTransitionEntry {
+    pub id: i64,
+    pub vault_id: String,
+    pub from_status: VaultStatus,
+    pub to_status: VaultStatus,
+    pub timestamp: DateTime<Utc>,
+    pub triggered_by: String, // "owner", "beneficiary", "system", "admin"
+    pub trigger_reason: Option<String>, // e.g., "owner_missing", "manual_release", "pause_requested"
+    pub details: Option<serde_json::Value>,
+}
+
+/// Query parameters for state transition history.
+#[derive(Debug, Default, Deserialize)]
+pub struct StateTransitionQuery {
+    pub vault_id: Option<String>,
+    pub from_status: Option<VaultStatus>,
+    pub to_status: Option<VaultStatus>,
+    pub triggered_by: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response for state transition history.
+#[derive(Debug, Serialize)]
+pub struct StateTransitionHistory {
+    pub vault_id: String,
+    pub transitions: Vec<StateTransitionEntry>,
+}
+
 // ── Auth: refresh token rotation (Issue #1177) ───────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

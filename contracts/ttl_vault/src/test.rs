@@ -7131,6 +7131,97 @@ fn test_multi_sig_passkey_withdrawal_flow() {
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
 }
 
+// ── Issue #1850: End-to-end test for multi-sig vault release ────────────────
+
+#[test]
+fn test_multisig_vault_release_e2e() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit funds
+    let deposit_amount = 10_000i128;
+    client.deposit(&vault_id, &owner, &deposit_amount);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount);
+
+    // Add passkeys for multi-sig
+    let passkey1 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey2 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey3 = BytesN::from_array(&env, &[3u8; 32]);
+    client.add_passkey(&vault_id, &owner, &passkey1);
+    client.add_passkey(&vault_id, &owner, &passkey2);
+    client.add_passkey(&vault_id, &owner, &passkey3);
+
+    // Configure multi-sig with 2-of-3 threshold
+    client.configure_multisig(&vault_id, &owner, &vec![&env, passkey1.clone(), passkey2.clone(), passkey3.clone()], &2u32);
+    let config = client.get_multisig_config(&vault_id).unwrap();
+    assert_eq!(config.threshold, 2);
+    assert_eq!(config.signers.len(), 3);
+
+    // Advance time past vault expiry (check_in_interval = 100, so advance 200)
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Verify vault is expired
+    assert!(client.is_expired(&vault_id));
+
+    // Test multi-sig withdrawal before release (should work with 2 signatures)
+    let withdrawal_amount = 1_000i128;
+    let sigs = soroban_sdk::vec![&env, passkey1.clone(), passkey2.clone()];
+    client.withdraw_multi_sig(&vault_id, &owner, &withdrawal_amount, &sigs);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount - withdrawal_amount);
+
+    // Verify multi-sig proposal flow for updating beneficiary
+    let new_beneficiary = Address::generate(&env);
+    let proposal_id = client.propose_multisig(
+        &vault_id,
+        &owner,
+        &types::MultiSigOperation::UpdateBeneficiary,
+        &soroban_sdk::Bytes::new(&env),
+        &None,
+    );
+    assert!(proposal_id > 0);
+
+    // First approval (proposer auto-approves)
+    let status = client.get_multisig_proposal_status(&vault_id, &proposal_id).unwrap();
+    assert_eq!(status, types::ProposalStatus::Pending);
+
+    // Second approval from another signer
+    env.mock_all_auths_allowing_non_root_auth();
+    client.approve_multisig(&vault_id, &proposal_id);
+    
+    // Check proposal is now approved
+    let status = client.get_multisig_proposal_status(&vault_id, &proposal_id).unwrap();
+    assert_eq!(status, types::ProposalStatus::Approved);
+
+    // Execute the multi-sig proposal
+    client.execute_multisig(&vault_id, &proposal_id);
+
+    // Verify beneficiary was updated
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.beneficiary, new_beneficiary);
+
+    // Now test the full release flow with multi-sig configured
+    // Deposit more funds
+    client.deposit(&vault_id, &owner, &5_000i128);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount - withdrawal_amount + 5_000i128);
+
+    // Trigger release (vault is expired, no multi-sig needed for release)
+    client.trigger_release(&vault_id);
+
+    // Verify vault is released and beneficiary received funds
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, types::ReleaseStatus::Released);
+    assert_eq!(vault.balance, 0);
+
+    let token_client = StellarAssetClient::new(&env, &token_address);
+    assert_eq!(token_client.balance(&new_beneficiary), deposit_amount - withdrawal_amount + 5_000i128);
+
+    // Verify state transition was recorded
+    let transitions = client.get_state_transition_log(&vault_id);
+    assert!(transitions.len() > 0);
+    let last_transition = transitions.get(transitions.len() - 1).unwrap();
+    assert_eq!(last_transition.to_status, types::ReleaseStatus::Released);
+}
+
 // ── Issue #1135: AdminTransferred event on accept_admin ─────────────────────
 
 #[test]

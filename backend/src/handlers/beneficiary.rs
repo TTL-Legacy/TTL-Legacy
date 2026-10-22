@@ -663,3 +663,54 @@ mod tests {
             .any(|e| e.action == "vault_accessed_via_share"));
     }
 }
+
+// ── Issue #1852: Beneficiary proof-of-life periodic vote ─────────────────────
+
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct SubmitProofOfLifeRequest {
+    pub vault_id: u64,
+    pub beneficiary: String,
+    pub proof: String,
+    pub validity_seconds: Option<u64>,
+}
+
+/// POST /vaults/{id}/proof-of-life
+///
+/// Submits a beneficiary proof-of-life attestation for a vault.
+/// The backend records the proof and can be used by a periodic scheduler
+/// to request re-attestation from beneficiaries for high-value vaults.
+#[instrument(skip(store), fields(vault_id = %vault_id))]
+pub fn submit_proof_of_life_handler(
+    store: &VaultStore,
+    audit_store: &AuditStore,
+    vault_id: u64,
+    request: SubmitProofOfLifeRequest,
+) -> Result<(), String> {
+    let vaults = store.lock().unwrap();
+    let vault = vaults
+        .get(&vault_id.to_string())
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    if vault.beneficiary != request.beneficiary {
+        return Err("Only the beneficiary can submit proof of life".to_string());
+    }
+
+    let validity = request.validity_seconds.unwrap_or(86400 * 30); // default 30 days
+
+    append_audit_entry(
+        audit_store,
+        "proof_of_life_submitted",
+        &request.beneficiary,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "beneficiary": request.beneficiary,
+            "validity_seconds": validity,
+            "submitted_at": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+
+    Ok(())
+}
