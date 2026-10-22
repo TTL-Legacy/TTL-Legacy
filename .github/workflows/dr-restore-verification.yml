@@ -19,8 +19,14 @@ on:
           - "true"
           - "false"
 
+permissions:
+  contents: read
+  issues: write
+
 env:
   STELLAR_NETWORK: testnet
+  # Release assets are versioned, so releases/latest/download/... 404s.
+  STELLAR_CLI_VERSION: "28.1.0"
 
 jobs:
   verify-dr-restore:
@@ -33,8 +39,8 @@ jobs:
       - name: Install Stellar CLI
         run: |
           curl -sSfL \
-            "https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C /usr/local/bin
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin stellar
           stellar --version
 
       - name: Install SQLite tools

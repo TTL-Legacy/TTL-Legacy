@@ -21,6 +21,10 @@ permissions:
 
 env:
   STELLAR_NETWORK: mainnet
+  # Pin the CLI. Release assets are versioned
+  # (stellar-cli-<version>-<target>.tar.gz), so the unversioned
+  # releases/latest/download/... URL returns 404.
+  STELLAR_CLI_VERSION: "28.1.0"
 
 jobs:
   dr-backup:
@@ -30,12 +34,80 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
+      # Fail fast, naming every missing secret, instead of failing later
+      # with a vague error from the AWS, GPG or Stellar tooling.
+      - name: Check required secrets
+        env:
+          DR_AWS_ACCESS_KEY_ID: ${{ secrets.DR_AWS_ACCESS_KEY_ID }}
+          DR_AWS_SECRET_ACCESS_KEY: ${{ secrets.DR_AWS_SECRET_ACCESS_KEY }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          CONTRACT_TTL_VAULT: ${{ secrets.CONTRACT_TTL_VAULT }}
+          DR_DB_PATH: ${{ secrets.DR_DB_PATH }}
+          DR_GPG_PRIVATE_KEY: ${{ secrets.DR_GPG_PRIVATE_KEY }}
+          DR_GPG_KEY_ID: ${{ secrets.DR_GPG_KEY_ID }}
+          DR_STELLAR_RPC_URL: ${{ secrets.DR_STELLAR_RPC_URL }}
+        run: |
+          required=(
+            DR_AWS_ACCESS_KEY_ID
+            DR_AWS_SECRET_ACCESS_KEY
+            DR_S3_BUCKET
+            DR_S3_ENDPOINT
+            CONTRACT_TTL_VAULT
+            DR_DB_PATH
+            DR_GPG_PRIVATE_KEY
+            DR_GPG_KEY_ID
+          )
+          # The CLI ships no RPC URL for mainnet ("Bring Your Own"), so one
+          # must be provided.
+          if [[ "${STELLAR_NETWORK}" == "mainnet" ]]; then
+            required+=(DR_STELLAR_RPC_URL)
+          fi
+
+          missing=()
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || missing+=("${name}")
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            {
+              echo "## DR backup not run: missing repository secrets"
+              echo
+              echo "Set these under Settings → Secrets and variables → Actions:"
+              echo
+              for name in "${missing[@]}"; do echo "- \`${name}\`"; done
+              echo
+              echo "See docs/disaster-recovery-runbook.md (Nightly Backup Workflow)."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error title=DR backup misconfigured::Missing required secrets: ${missing[*]}. See docs/disaster-recovery-runbook.md."
+            exit 1
+          fi
+          echo "All required secrets are set."
+
       - name: Install Stellar CLI
         run: |
           curl -sSfL \
-            "https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C /usr/local/bin
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin stellar
           stellar --version
+
+      - name: Configure Stellar RPC
+        if: env.STELLAR_NETWORK == 'mainnet'
+        env:
+          DR_STELLAR_RPC_URL: ${{ secrets.DR_STELLAR_RPC_URL }}
+        run: |
+          stellar network add mainnet \
+            --rpc-url "${DR_STELLAR_RPC_URL}" \
+            --network-passphrase "Public Global Stellar Network ; September 2015"
+
+      - name: Import GPG signing key
+        env:
+          DR_GPG_PRIVATE_KEY: ${{ secrets.DR_GPG_PRIVATE_KEY }}
+          DR_GPG_KEY_ID: ${{ secrets.DR_GPG_KEY_ID }}
+        run: |
+          printf '%s\n' "${DR_GPG_PRIVATE_KEY}" | gpg --batch --import
+          gpg --batch --list-secret-keys "${DR_GPG_KEY_ID}" > /dev/null \
+            || { echo "::error::DR_GPG_PRIVATE_KEY does not contain a secret key for DR_GPG_KEY_ID"; exit 1; }
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -52,10 +124,15 @@ jobs:
           CONTRACT_TTL_VAULT: ${{ secrets.CONTRACT_TTL_VAULT }}
           STELLAR_NETWORK: ${{ env.STELLAR_NETWORK }}
           DR_DB_PATH: ${{ secrets.DR_DB_PATH }}
+          DR_GPG_KEY_ID: ${{ secrets.DR_GPG_KEY_ID }}
+          DR_REPLICA_BUCKET: ${{ secrets.DR_REPLICA_BUCKET }}
+          DR_REPLICA_REGION: ${{ secrets.DR_REPLICA_REGION }}
+          DR_VAULT_SNAPSHOTS: ${{ secrets.DR_VAULT_SNAPSHOTS }}
           AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           DRY_RUN_FLAG=""
-          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]]; then
+          if [[ "${DRY_RUN}" == "true" ]]; then
             DRY_RUN_FLAG="--dry-run"
           fi
           bash scripts/dr_backup.sh ${DRY_RUN_FLAG}
@@ -69,6 +146,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `[DR] Nightly backup failed — ${new Date().toISOString().slice(0,10)}`,
-              body: `The nightly disaster-recovery backup workflow failed.\n\nRun: ${context.runId}\nSee: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              body: `The nightly disaster-recovery backup workflow failed.\n\nRun: ${context.runId}\nSee: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\nIf the "Check required secrets" step failed, the run summary lists the repository secrets that must be set (see docs/disaster-recovery-runbook.md).`,
               labels: ['disaster-recovery', 'bug']
             });
