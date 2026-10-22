@@ -332,6 +332,7 @@ mod min_checkin_interval_tests;
 // Issue #1264 #1265 #1266 #1267: dedicated guard tests
 #[cfg(test)]
 mod bug_fix_tests_1264_1265_1266_1267;
+mod release_conditions_query_tests;
 
 #[cfg(test)]
 mod vault_archiving_tests;
@@ -3561,7 +3562,7 @@ impl TtlVaultContract {
         }
 
         // Load release conditions
-        let conditions = Self::get_release_conditions(env.clone(), vault_id);
+        let conditions = Self::stored_release_conditions(&env, vault_id);
         let mut condition_met = false;
         let mut ttl_expiry_met = false;
 
@@ -9028,12 +9029,24 @@ impl TtlVaultContract {
     }
 
     /// Returns the release conditions attached to a vault.
-    /// Returns an empty vector if none have been set.
+    /// Vaults created before `set_release_conditions` existed have no stored
+    /// conditions and implicitly use `TTLExpiry`, so that is returned as the
+    /// default when nothing has been stored.
     pub fn get_release_conditions(env: Env, vault_id: u64) -> Vec<ReleaseCondition> {
         env.storage()
             .persistent()
             .get(&StorageKey::ReleaseConditions(vault_id))
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| vec![&env, ReleaseCondition::TTLExpiry])
+    }
+
+    /// Returns only the conditions explicitly stored via `set_release_conditions`.
+    /// Empty when none were stored; trigger logic relies on this to fall back to
+    /// the vault's `release_condition` field.
+    fn stored_release_conditions(env: &Env, vault_id: u64) -> Vec<ReleaseCondition> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ReleaseConditions(vault_id))
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     /// Owner‑initiated panic release.
