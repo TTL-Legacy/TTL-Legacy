@@ -52,6 +52,7 @@ jobs:
           CONTRACT_TTL_VAULT: ${{ secrets.CONTRACT_TTL_VAULT }}
           STELLAR_NETWORK: ${{ env.STELLAR_NETWORK }}
           DR_DB_PATH: ${{ secrets.DR_DB_PATH }}
+          DR_GPG_KEY_ID: ${{ secrets.DR_GPG_KEY_ID }}
           AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
         run: |
           DRY_RUN_FLAG=""
