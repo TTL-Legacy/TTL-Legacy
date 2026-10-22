@@ -196,6 +196,8 @@ pub const PASSKEY_RECOVERED_TOPIC: Symbol = symbol_short!("pk_rcvd");
 // Issue #562: passkey compromise response
 pub const PASSKEY_LOCKOUT_TOPIC: Symbol = symbol_short!("pk_lock");
 pub const PASSKEY_UNLOCKED_TOPIC: Symbol = symbol_short!("pk_unlk");
+/// Issue #1848: emitted when passkey backup eligibility is updated
+pub const SET_PASSKEY_BACKUP_ELIGIBLE_TOPIC: Symbol = symbol_short!("pk_bk_el");
 // Issue #561: passkey rotation enforcement
 pub const PASSKEY_ROTATION_REQUIRED_TOPIC: Symbol = symbol_short!("pk_rot_r");
 pub const PASSKEY_ROTATION_ENFORCED_TOPIC: Symbol = symbol_short!("pk_rot_e");
@@ -863,6 +865,8 @@ pub struct PasskeyHash {
     pub deprecated_at: Option<u64>,
     pub usage_count: u64,
     pub last_used_timestamp: u64,
+    /// Whether this WebAuthn credential is eligible for cloud backup/sync (Issue #1848).
+    pub backup_eligible: bool,
 }
 
 /// Backup code entry - Issue #393
@@ -1904,6 +1908,8 @@ pub struct PasskeyLockout {
     pub locked_at: u64,
     pub unlock_at: u64,
     pub failed_attempts: u32,
+    /// Maximum failed attempts before auto-lockout (Issue #1847).
+    pub threshold: u32,
 }
 
 /// Pending passkey recovery request initiated via approved contacts (Issue #563).
