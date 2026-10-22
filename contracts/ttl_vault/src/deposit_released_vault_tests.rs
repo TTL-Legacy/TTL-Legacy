@@ -15,7 +15,6 @@ extern crate alloc;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::StellarAssetClient,
     Address, Env,
 };
 
@@ -23,35 +22,7 @@ use soroban_sdk::{
 // Shared setup
 // ---------------------------------------------------------------------------
 
-fn setup() -> (
-    Env,
-    Address, // owner
-    Address, // beneficiary
-    Address, // admin
-    Address, // token_address
-    TtlVaultContractClient<'static>,
-) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
-    let admin = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_address = env
-        .register_stellar_asset_contract_v2(token_admin)
-        .address();
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &10_000_000);
-
-    let contract_address = env.register_contract(None, TtlVaultContract);
-    let client = TtlVaultContractClient::new(&env, &contract_address);
-    client.initialize(&token_address, &admin);
-
-    let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
-
-    (env, owner, beneficiary, admin, token_address, client)
-}
+use crate::tests::common::setup_with_roles_and_balance;
 
 // ---------------------------------------------------------------------------
 // Released vault
@@ -68,7 +39,8 @@ fn setup() -> (
 #[test]
 #[should_panic(expected = "VaultReleased")]
 fn test_deposit_on_released_vault_panics_with_vault_released() {
-    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
@@ -95,7 +67,8 @@ fn test_deposit_on_released_vault_panics_with_vault_released() {
 /// matching ContractError::VaultReleased (97).
 #[test]
 fn test_try_deposit_on_released_vault_returns_vault_released_error() {
-    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
@@ -127,7 +100,8 @@ fn test_try_deposit_on_released_vault_returns_vault_released_error() {
 #[test]
 #[should_panic(expected = "VaultReleased")]
 fn test_deposit_on_cancelled_vault_panics_with_vault_released() {
-    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (_env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
@@ -146,7 +120,8 @@ fn test_deposit_on_cancelled_vault_panics_with_vault_released() {
 /// Issue #1282: try_deposit on a Cancelled vault returns Err(VaultReleased).
 #[test]
 fn test_try_deposit_on_cancelled_vault_returns_vault_released_error() {
-    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (_env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
@@ -174,7 +149,8 @@ fn test_try_deposit_on_cancelled_vault_returns_vault_released_error() {
 #[test]
 #[should_panic(expected = "VaultFrozen")]
 fn test_deposit_on_emergency_frozen_vault_panics_with_vault_frozen() {
-    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
@@ -200,7 +176,8 @@ fn test_deposit_on_emergency_frozen_vault_panics_with_vault_frozen() {
 /// Issue #1282: try_deposit on an EmergencyFrozen vault returns Err(VaultFrozen).
 #[test]
 fn test_try_deposit_on_emergency_frozen_vault_returns_vault_frozen_error() {
-    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
@@ -232,7 +209,8 @@ fn test_try_deposit_on_emergency_frozen_vault_returns_vault_frozen_error() {
 /// Guards against over-eager state checks breaking the happy path.
 #[test]
 fn test_deposit_on_active_locked_vault_succeeds() {
-    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let (_env, owner, beneficiary, _admin, _token_address, client) =
+        setup_with_roles_and_balance(10_000_000);
 
     let interval = 1_000u64;
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);

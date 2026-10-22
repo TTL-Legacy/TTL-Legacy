@@ -273,6 +273,10 @@ use constants::{
     MAX_PERSISTENT_TTL, MAX_SNAPSHOTS_PER_VAULT, MAX_VAULT_BATCH_SIZE, SECONDS_PER_DAY,
     SECONDS_PER_HOUR,
 };
+// Shared test fixtures (#1751). Must be declared before the test modules that
+// import `crate::tests::common`.
+#[cfg(test)]
+mod tests;
 #[cfg(test)]
 mod beneficiary_auction_tests;
 // Issues #1323, #1324, #1325, #1326: structured event emission tests
