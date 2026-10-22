@@ -5,8 +5,8 @@
 //!  - claim_beneficiary_conflict lets any address file a competing claim
 //!  - dispute window is initialised on the first claim
 //!  - set_conflict_dispute_window is owner-only and validates bounds
-//!  - set_conflict_priority_beneficiary is owner-only and stores the priority
-//!  - auto_resolve_beneficiary_conflict enforces the dispute window
+//!  - set_conflict_priority is owner-only and stores the priority
+//!  - auto_resolve_conflict enforces the dispute window
 //!  - auto_resolve: first-registered rule when no priority set
 //!  - auto_resolve: owner-designated priority overrides filing order
 //!  - auto_resolve: falls back to first-registered when priority claimant
@@ -277,7 +277,7 @@ fn test_set_conflict_dispute_window_applied_on_first_claim() {
 }
 
 // ---------------------------------------------------------------------------
-// set_conflict_priority_beneficiary
+// set_conflict_priority
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -285,7 +285,7 @@ fn test_set_priority_beneficiary_owner_only() {
     let f = setup();
     let priority = Address::generate(&f.env);
     f.client
-        .set_conflict_priority_beneficiary(&f.vault_id, &f.owner, &priority)
+        .set_conflict_priority(&f.vault_id, &f.owner, &priority)
         .unwrap();
 
     let conflict = f.client.get_beneficiary_conflict(&f.vault_id).unwrap();
@@ -303,7 +303,7 @@ fn test_set_priority_beneficiary_non_owner_fails() {
     let priority = Address::generate(&f.env);
     let result =
         f.client
-            .try_set_conflict_priority_beneficiary(&f.vault_id, &stranger, &priority);
+            .try_set_conflict_priority(&f.vault_id, &stranger, &priority);
     assert!(result.is_err(), "Non-owner must not set priority beneficiary");
 }
 
@@ -328,7 +328,7 @@ fn test_set_priority_beneficiary_after_resolution_fails() {
     let priority = Address::generate(&f.env);
     let result =
         f.client
-            .try_set_conflict_priority_beneficiary(&f.vault_id, &f.owner, &priority);
+            .try_set_conflict_priority(&f.vault_id, &f.owner, &priority);
     assert!(
         result.is_err(),
         "Should not set priority after conflict resolved"
@@ -336,7 +336,7 @@ fn test_set_priority_beneficiary_after_resolution_fails() {
 }
 
 // ---------------------------------------------------------------------------
-// auto_resolve_beneficiary_conflict — happy paths
+// auto_resolve_conflict — happy paths
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -370,7 +370,7 @@ fn test_auto_resolve_first_registered_wins() {
         .set_timestamp(f.env.ledger().timestamp() + DEFAULT_CONFLICT_DISPUTE_WINDOW + 1);
 
     f.client
-        .auto_resolve_beneficiary_conflict(&f.vault_id)
+        .auto_resolve_conflict(&f.vault_id)
         .unwrap();
 
     let conflict = f.client.get_beneficiary_conflict(&f.vault_id).unwrap();
@@ -407,7 +407,7 @@ fn test_auto_resolve_owner_priority_wins() {
 
     // Owner designates B as priority.
     f.client
-        .set_conflict_priority_beneficiary(&f.vault_id, &f.owner, &claimant_b)
+        .set_conflict_priority(&f.vault_id, &f.owner, &claimant_b)
         .unwrap();
 
     // Advance past the dispute window.
@@ -416,7 +416,7 @@ fn test_auto_resolve_owner_priority_wins() {
         .set_timestamp(f.env.ledger().timestamp() + DEFAULT_CONFLICT_DISPUTE_WINDOW + 1);
 
     f.client
-        .auto_resolve_beneficiary_conflict(&f.vault_id)
+        .auto_resolve_conflict(&f.vault_id)
         .unwrap();
 
     let conflict = f.client.get_beneficiary_conflict(&f.vault_id).unwrap();
@@ -448,7 +448,7 @@ fn test_auto_resolve_priority_fallback_to_first_registered() {
 
     // Owner sets a priority address that has no claim on record.
     f.client
-        .set_conflict_priority_beneficiary(&f.vault_id, &f.owner, &priority_candidate)
+        .set_conflict_priority(&f.vault_id, &f.owner, &priority_candidate)
         .unwrap();
 
     // Advance past window.
@@ -457,7 +457,7 @@ fn test_auto_resolve_priority_fallback_to_first_registered() {
         .set_timestamp(f.env.ledger().timestamp() + DEFAULT_CONFLICT_DISPUTE_WINDOW + 1);
 
     f.client
-        .auto_resolve_beneficiary_conflict(&f.vault_id)
+        .auto_resolve_conflict(&f.vault_id)
         .unwrap();
 
     let conflict = f.client.get_beneficiary_conflict(&f.vault_id).unwrap();
@@ -473,7 +473,7 @@ fn test_auto_resolve_priority_fallback_to_first_registered() {
 }
 
 // ---------------------------------------------------------------------------
-// auto_resolve_beneficiary_conflict — error paths
+// auto_resolve_conflict — error paths
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -492,7 +492,7 @@ fn test_auto_resolve_dispute_window_active_fails() {
     // Do NOT advance time past the window.
     let result = f
         .client
-        .try_auto_resolve_beneficiary_conflict(&f.vault_id);
+        .try_auto_resolve_conflict(&f.vault_id);
     assert!(
         result.is_err(),
         "Auto-resolve should be blocked while dispute window is active"
@@ -504,7 +504,7 @@ fn test_auto_resolve_no_conflict_record_fails() {
     let f = setup();
     let result = f
         .client
-        .try_auto_resolve_beneficiary_conflict(&f.vault_id);
+        .try_auto_resolve_conflict(&f.vault_id);
     assert!(result.is_err(), "Should fail when no conflict record exists");
 }
 
@@ -514,7 +514,7 @@ fn test_auto_resolve_no_claims_fails() {
     // Create a conflict record with a priority beneficiary but no claims yet.
     let priority = Address::generate(&f.env);
     f.client
-        .set_conflict_priority_beneficiary(&f.vault_id, &f.owner, &priority)
+        .set_conflict_priority(&f.vault_id, &f.owner, &priority)
         .unwrap();
 
     // Advance time well past the default window.
@@ -524,7 +524,7 @@ fn test_auto_resolve_no_claims_fails() {
 
     let result = f
         .client
-        .try_auto_resolve_beneficiary_conflict(&f.vault_id);
+        .try_auto_resolve_conflict(&f.vault_id);
     assert!(
         result.is_err(),
         "Auto-resolve with no claims should return an error"
@@ -549,13 +549,13 @@ fn test_auto_resolve_already_resolved_fails() {
         .ledger()
         .set_timestamp(f.env.ledger().timestamp() + DEFAULT_CONFLICT_DISPUTE_WINDOW + 1);
     f.client
-        .auto_resolve_beneficiary_conflict(&f.vault_id)
+        .auto_resolve_conflict(&f.vault_id)
         .unwrap();
 
     // Second call should fail.
     let result = f
         .client
-        .try_auto_resolve_beneficiary_conflict(&f.vault_id);
+        .try_auto_resolve_conflict(&f.vault_id);
     assert!(
         result.is_err(),
         "Auto-resolve should fail when conflict already resolved"
@@ -709,7 +709,7 @@ fn test_file_beneficiary_conflict_rejected_after_auto_resolve() {
         .ledger()
         .set_timestamp(f.env.ledger().timestamp() + DEFAULT_CONFLICT_DISPUTE_WINDOW + 1);
     f.client
-        .auto_resolve_beneficiary_conflict(&f.vault_id)
+        .auto_resolve_conflict(&f.vault_id)
         .unwrap();
 
     // Filing again should be rejected.
@@ -745,7 +745,7 @@ fn test_resolved_at_is_set_on_auto_resolve() {
     f.env.ledger().set_timestamp(resolution_time);
 
     f.client
-        .auto_resolve_beneficiary_conflict(&f.vault_id)
+        .auto_resolve_conflict(&f.vault_id)
         .unwrap();
 
     let conflict = f.client.get_beneficiary_conflict(&f.vault_id).unwrap();

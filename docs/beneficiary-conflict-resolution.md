@@ -10,7 +10,7 @@ Beneficiary Conflict Resolution provides **automated, deterministic** conflict r
 
 ### Resolution Rules (applied in order)
 
-1. **Owner-designated priority**: If the vault owner has called `set_conflict_priority_beneficiary` and the designated address has filed a claim, that address wins.
+1. **Owner-designated priority**: If the vault owner has called `set_conflict_priority` and the designated address has filed a claim, that address wins.
 2. **First-registered wins**: The claimant with the earliest `filed_at` timestamp wins.
 
 Admins retain the ability to override manually at any time during an active dispute window.
@@ -72,7 +72,7 @@ Sets the dispute window duration for a vault before any claims are filed. Once t
 
 ---
 
-### `set_conflict_priority_beneficiary(vault_id: u64, caller: Address, priority_beneficiary: Address) -> Result<(), ContractError>`
+### `set_conflict_priority(vault_id: u64, caller: Address, priority_beneficiary: Address) -> Result<(), ContractError>`
 
 **Caller**: Vault owner  
 **Auth**: Required (`caller` must be vault owner)
@@ -87,12 +87,12 @@ Can be called at any time while the conflict is `Pending`.
 
 **Example**:
 ```rust
-client.set_conflict_priority_beneficiary(&vault_id, &owner, &preferred_addr)?;
+client.set_conflict_priority(&vault_id, &owner, &preferred_addr)?;
 ```
 
 ---
 
-### `auto_resolve_beneficiary_conflict(vault_id: u64) -> Result<(), ContractError>`
+### `auto_resolve_conflict(vault_id: u64) -> Result<(), ContractError>`
 
 **Caller**: Anyone  
 **Auth**: None required
@@ -112,7 +112,7 @@ Deterministically resolves the conflict after the dispute window has closed. App
 **Example**:
 ```rust
 // After dispute window expires, anyone can trigger resolution
-client.auto_resolve_beneficiary_conflict(&vault_id)?;
+client.auto_resolve_conflict(&vault_id)?;
 ```
 
 ---
@@ -208,7 +208,7 @@ auto_resolve_...    resolve_beneficiary_conflict
 - Started when the **first** claim is filed, not when `set_conflict_dispute_window` is called.
 - Default is 72 hours; vault owner can customise before any claims are filed.
 - Once the first claim is filed, the deadline is fixed in `dispute_window_ends_at`.
-- `auto_resolve_beneficiary_conflict` is blocked until `now >= dispute_window_ends_at`.
+- `auto_resolve_conflict` is blocked until `now >= dispute_window_ends_at`.
 - Admin manual override (`resolve_beneficiary_conflict`) is **not** blocked by the window.
 
 ### First-Registered Rule
@@ -217,7 +217,7 @@ The claimant with the **lowest `filed_at` timestamp** wins when no priority is s
 
 ### Owner-Designated Priority
 
-The owner can call `set_conflict_priority_beneficiary` at any point while the conflict is Pending. The designated address wins during auto-resolution only if it has a matching claim entry. If the priority address never filed, the system falls back to first-registered.
+The owner can call `set_conflict_priority` at any point while the conflict is Pending. The designated address wins during auto-resolution only if it has a matching claim entry. If the priority address never filed, the system falls back to first-registered.
 
 ### Immutability After Resolution
 
@@ -230,8 +230,8 @@ Once resolved (`ConflictResolution::Approved(...)`), no new claims can be added 
 | `BENEFICIARY_CONFLICT_FILED_TOPIC` | `ben_conf` | `(vault_id, beneficiary)` | `file_beneficiary_conflict` |
 | `CONFLICT_CLAIMED_TOPIC` | `conf_clm` | `(vault_id, claimant)` | `claim_beneficiary_conflict` |
 | `CONFLICT_DISPUTE_WINDOW_SET_TOPIC` | `conf_dw` | `(vault_id, duration_seconds)` | `set_conflict_dispute_window` |
-| `CONFLICT_PRIORITY_SET_TOPIC` | `conf_pri` | `(vault_id, priority_address)` | `set_conflict_priority_beneficiary` |
-| `CONFLICT_AUTO_RESOLVED_TOPIC` | `conf_aut` | `(vault_id, winner)` | `auto_resolve_beneficiary_conflict` |
+| `CONFLICT_PRIORITY_SET_TOPIC` | `conf_pri` | `(vault_id, priority_address)` | `set_conflict_priority` |
+| `CONFLICT_AUTO_RESOLVED_TOPIC` | `conf_aut` | `(vault_id, winner)` | `auto_resolve_conflict` |
 | `BENEFICIARY_CONFLICT_RESOLVED_TOPIC` | `ben_res` | `(vault_id, approved_address)` | `resolve_beneficiary_conflict` (admin) |
 | `CONFLICT_EXPIRED_TOPIC` | `conf_exp` | `vault_id` | Admin resolve attempted on 30-day-old conflict |
 
@@ -247,7 +247,7 @@ client.claim_beneficiary_conflict(&vault_id, &bob, &String::from_str(&env, "Alte
 // --- 72+ hours later ---
 
 // Anyone can trigger deterministic resolution
-client.auto_resolve_beneficiary_conflict(&vault_id)?;
+client.auto_resolve_conflict(&vault_id)?;
 
 // Alice wins (first-registered)
 if let Some(conflict) = client.get_beneficiary_conflict(&vault_id) {
@@ -262,10 +262,10 @@ client.claim_beneficiary_conflict(&vault_id, &alice, &reason)?;
 client.claim_beneficiary_conflict(&vault_id, &bob, &reason)?;
 
 // Owner designates Bob as priority
-client.set_conflict_priority_beneficiary(&vault_id, &owner, &bob)?;
+client.set_conflict_priority(&vault_id, &owner, &bob)?;
 
 // After window expires, Bob wins
-client.auto_resolve_beneficiary_conflict(&vault_id)?;
+client.auto_resolve_conflict(&vault_id)?;
 ```
 
 ### Example 3: Custom dispute window
@@ -292,7 +292,7 @@ client.resolve_beneficiary_conflict(&vault_id, &alice)?;
 
 1. **Open claim filing**: `claim_beneficiary_conflict` allows any address to file — this is intentional to prevent the current beneficiary from blocking legitimate competing claims.
 2. **Dispute window**: Prevents race-condition resolution; competing parties have guaranteed time to respond.
-3. **Permissionless auto-resolution**: Anyone can call `auto_resolve_beneficiary_conflict` after the window closes. The outcome is deterministic and independent of who calls it.
+3. **Permissionless auto-resolution**: Anyone can call `auto_resolve_conflict` after the window closes. The outcome is deterministic and independent of who calls it.
 4. **Immutable resolution**: Once approved, the conflict record is final and cannot be reopened.
 5. **Owner priority requires a claim**: The owner cannot silently assign a winner who never filed; the priority address must have submitted a claim.
 6. **Admin 30-day cap**: The admin manual override rejects conflicts older than 30 days to force auto-resolution for stale records.

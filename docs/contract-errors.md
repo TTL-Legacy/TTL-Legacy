@@ -163,3 +163,13 @@ CI runs the same generator and fails if the committed table drifts from the enum
 | 150 | `WhitelistEntryExpired` |  |
 | 151 | `InvalidWhitelistExpiry` |  |
 | 152 | `CheckInTooEarly` |  |
+| 153 | `ReserveNotMet` |  |
+| 154 | `PasskeyRotationTooSoon` |  |
+| 155 | `PasskeyLockoutTriggered` | Passkey lockout triggered after exceeding failed attempt threshold (Issue #1847). |
+| 156 | `BridgeNotConfigured` | Cross-chain bridge configuration has not been set for the vault. |
+| 157 | `BridgeNotActive` | Cross-chain bridge configuration is currently inactive. |
+| 158 | `InvalidPercentage` | Split percentage is invalid or total does not equal 100%. |
+| 159 | `OracleAttestationStale` | Oracle attestation timestamp is stale or outside the allowable freshness window. |
+| 160 | `BeneficiaryNotVerified` | Beneficiary identity has not been verified by the vault's KYC oracle. |
+| 161 | `InvalidSignature` | Secp256r1 signature or signed message is invalid or missing. |
+| 162 | `IdentityOracleNotSet` | No identity oracle has been configured for the vault. |

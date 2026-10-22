@@ -190,12 +190,17 @@ pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
 pub const WITHDRAWAL_APPROVAL_REQUESTED_TOPIC: Symbol = symbol_short!("wd_req");
 pub const WITHDRAWAL_APPROVAL_GRANTED_TOPIC: Symbol = symbol_short!("wd_grant");
 pub const WITHDRAWAL_APPROVAL_DENIED_TOPIC: Symbol = symbol_short!("wd_deny");
+// Issue #1848: WebAuthn credential backup eligibility
+pub const PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC: Symbol = symbol_short!("pk_wbk");
+pub const SET_PASSKEY_BACKUP_ELIGIBLE_TOPIC: Symbol = PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC;
 // Issue #563: passkey recovery
 pub const PASSKEY_RECOVERY_INITIATED_TOPIC: Symbol = symbol_short!("pk_rec");
 pub const PASSKEY_RECOVERED_TOPIC: Symbol = symbol_short!("pk_rcvd");
 // Issue #562: passkey compromise response
 pub const PASSKEY_LOCKOUT_TOPIC: Symbol = symbol_short!("pk_lock");
 pub const PASSKEY_UNLOCKED_TOPIC: Symbol = symbol_short!("pk_unlk");
+// Issue #1847: passkey lockout threshold configuration
+pub const PASSKEY_LOCKOUT_THRESHOLD_SET_TOPIC: Symbol = symbol_short!("pk_lk_th");
 // Issue #561: passkey rotation enforcement
 pub const PASSKEY_ROTATION_REQUIRED_TOPIC: Symbol = symbol_short!("pk_rot_r");
 pub const PASSKEY_ROTATION_ENFORCED_TOPIC: Symbol = symbol_short!("pk_rot_e");
@@ -409,8 +414,7 @@ pub enum StorageKey {
     BeneficiaryDelegationChain(u64),
     WithdrawalSchedule(u64),
     DisputeStatus(u64),
-    ConditionalAcceptance(u64),
-    ConditionalDecline(u64),
+    BeneficiaryConditionResponse(u64),
     ArchivedVault(u64),
     MaxTtlSeconds,
     TtlDecayRate,
@@ -568,23 +572,23 @@ pub enum StorageKey {
     PasskeyPublicKey(u64, BytesN<32>),
     // Issue #1288: multi-beneficiary splits and previously-missing storage keys
     AcceptanceConditions(u64),
+    ConditionalAcceptance(u64),
     AdminTransferProposedAt,
     BeneficiaryClaimDelegation(u64),
-    BeneficiaryConditionalAcceptance(u64),
     BeneficiaryConflict(u64),
     // Issue #1297: automated conflict resolution
     /// Duration in seconds of the dispute window before auto-resolution.
     ConflictDisputeWindow(u64),
     /// Owner-designated priority beneficiary address for conflict tie-breaking.
     ConflictPriorityBeneficiary(u64),
-    /// Identity oracle contract address that KYC-gates beneficiary claims for a vault.
-    BeneficiaryIdentityOracle(u64),
     /// Marks a beneficiary of a vault as identity-verified by the vault's identity oracle.
     BeneficiaryIdentityVerified(u64, Address),
     BeneficiaryVaultLimit,
     CompromisedPasskeys(u64),
     CountdownConfig(u64),
     LastPasskeyRotation(u64, BytesN<32>),
+    // Ledger timestamp of the most recent `rotate_passkey` call for a vault.
+    LastVaultPasskeyRotation(u64),
     Lending(u64),
     PasskeyLockout(u64),
     PasskeyRecoveryRequest(u64),
@@ -861,6 +865,8 @@ pub struct PasskeyHash {
     pub deprecated_at: Option<u64>,
     pub usage_count: u64,
     pub last_used_timestamp: u64,
+    /// Whether this passkey is eligible for WebAuthn credential backup — Issue #1848
+    pub webauthn_backup_eligible: bool,
 }
 
 /// Backup code entry - Issue #393
@@ -1086,6 +1092,8 @@ pub struct PasskeyAnalytics {
     pub passkey_hash: BytesN<32>,
     pub usage_count: u64,
     pub last_used_timestamp: u64,
+    /// Whether this passkey is eligible for WebAuthn credential backup — Issue #1848
+    pub webauthn_backup_eligible: bool,
 }
 
 /// Beneficiary status enum - Issue #397
@@ -1162,22 +1170,25 @@ pub struct ConditionalAcceptanceEntry {
     pub min_balance_threshold: Option<i128>,
 }
 
-/// Beneficiary conditional acceptance with threshold - Issue #503
+/// Discriminant for beneficiary condition response type.
 #[contracttype]
 #[derive(Clone)]
-pub struct BeneficiaryConditionalAcceptance {
-    pub min_balance_threshold: i128,
-    pub accepted_at: u64,
+pub enum BeneficiaryConditionResponseType {
+    Accept,
+    Decline,
 }
 
-/// Beneficiary conditional decline with threshold - Issue #503
-/// Allows beneficiary to decline vault assignment if balance is below a configurable minimum threshold
+/// Unified beneficiary conditional response with threshold - Issue #1849.
+/// Combines the former `BeneficiaryConditionalAcceptance` and
+/// `BeneficiaryConditionalDecline` into a single type with a
+/// `response: Accept | Decline` discriminant.
 #[contracttype]
 #[derive(Clone)]
-pub struct BeneficiaryConditionalDecline {
-    pub max_balance_threshold: i128,
-    pub declined_at: u64,
-    pub reason: String,
+pub struct BeneficiaryConditionResponse {
+    pub response: BeneficiaryConditionResponseType,
+    pub threshold: i128,
+    pub timestamp: u64,
+    pub reason: Option<String>,
 }
 
 /// Beneficiary delegation of claim rights to a trusted proxy address - Issue #944
@@ -1902,6 +1913,8 @@ pub struct PasskeyLockout {
     pub locked_at: u64,
     pub unlock_at: u64,
     pub failed_attempts: u32,
+    /// Configurable threshold of failed attempts that triggers lockout - Issue #1847
+    pub threshold: u32,
 }
 
 /// Pending passkey recovery request initiated via approved contacts (Issue #563).

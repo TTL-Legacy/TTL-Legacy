@@ -134,6 +134,120 @@ groups:
           summary: "TTL-Legacy contract is paused"
 ```
 
+### Vault TTL Below 24 Hours
+
+Add this rule to alert when any vault's remaining TTL drops below 24 hours,
+giving owners a last-chance window to check in before their vault is released.
+
+#### PrometheusRule (Kubernetes CRD)
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ttl-legacy-vault-ttl-low
+  labels:
+    app: ttl-legacy
+    prometheus: kube-prometheus
+spec:
+  groups:
+    - name: ttl-legacy-vault-ttl
+      interval: 1m
+      rules:
+        - alert: VaultTtlBelow24Hours
+          expr: |
+            ttl_legacy_vault_ttl_remaining_seconds > 0
+              and
+            ttl_legacy_vault_ttl_remaining_seconds < 86400
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Vault TTL is below 24 hours (vault {{ $labels.vault_id }})"
+            description: >
+              Vault {{ $labels.vault_id }} has only
+              {{ $value | humanizeDuration }} of TTL remaining.
+              The owner must check in before the TTL expires to prevent
+              automatic fund release to the beneficiary.
+```
+
+> **Metric note**: `ttl_legacy_vault_ttl_remaining_seconds` is a Gauge that the
+> backend TTL-watch service (`ttl_watch.rs`) updates for every active vault each
+> polling cycle. Each time-series carries a `vault_id` label so alerts fire
+> per-vault rather than in aggregate.
+
+#### Grafana Alerting (JSON model)
+
+Import the following JSON via **Alerting → Alert rules → Import**:
+
+```json
+{
+  "title": "Vault TTL Below 24 Hours",
+  "condition": "C",
+  "data": [
+    {
+      "refId": "A",
+      "queryType": "range",
+      "relativeTimeRange": { "from": 300, "to": 0 },
+      "datasourceUid": "${DS_PROMETHEUS}",
+      "model": {
+        "expr": "ttl_legacy_vault_ttl_remaining_seconds",
+        "legendFormat": "vault {{ vault_id }}",
+        "intervalMs": 60000,
+        "maxDataPoints": 43200
+      }
+    },
+    {
+      "refId": "B",
+      "queryType": "instant",
+      "relativeTimeRange": { "from": 300, "to": 0 },
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "reduce",
+        "expression": "A",
+        "reducer": "last",
+        "conditions": []
+      }
+    },
+    {
+      "refId": "C",
+      "queryType": "instant",
+      "relativeTimeRange": { "from": 300, "to": 0 },
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "threshold",
+        "expression": "B",
+        "conditions": [
+          {
+            "evaluator": { "type": "lt", "params": [86400] },
+            "operator": { "type": "and" },
+            "query": { "params": ["B"] },
+            "reducer": { "type": "last", "params": [] }
+          }
+        ]
+      }
+    }
+  ],
+  "noDataState": "NoData",
+  "execErrState": "Error",
+  "for": "5m",
+  "labels": { "severity": "warning" },
+  "annotations": {
+    "summary": "Vault TTL dropping below 24 h — owner should check in immediately",
+    "description": "Vault {{ $labels.vault_id }} has {{ $values.B }} seconds of TTL remaining (threshold: 86 400 s / 24 h)."
+  }
+}
+```
+
+**Setup steps:**
+
+1. In Grafana go to **Alerting → Contact points** and add an email / Slack /
+   PagerDuty contact point for vault expiry warnings.
+2. Go to **Alerting → Alert rules → New alert rule** and paste the JSON above,
+   or create the rule manually using the query builder.
+3. Set the notification policy to route `severity=warning` alerts to the
+   contact point created in step 1.
+
 ### Grafana Alert (UI)
 
 1. Open a panel → **Alert** tab → **Create alert rule**

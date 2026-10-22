@@ -573,6 +573,24 @@ impl Db {
                     ON withdrawal_alert_preferences(owner);
                 "#,
             ),
+            (
+                "7",
+                r#"
+                CREATE TABLE IF NOT EXISTS state_transitions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id        TEXT NOT NULL,
+                    from_status     TEXT NOT NULL,
+                    to_status       TEXT NOT NULL,
+                    timestamp       TEXT NOT NULL,
+                    triggered_by    TEXT NOT NULL,
+                    trigger_reason  TEXT,
+                    details         TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_vault_id ON state_transitions(vault_id);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON state_transitions(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_triggered_by ON state_transitions(triggered_by);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -1063,6 +1081,141 @@ impl Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Record a vault state transition for compliance reporting — Issue #1854.
+    pub fn insert_state_transition(
+        &self,
+        entry: &crate::models::StateTransitionEntry,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO state_transitions (vault_id, from_status, to_status, timestamp, triggered_by, trigger_reason, details)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                entry.vault_id,
+                format!("{:?}", entry.from_status),
+                format!("{:?}", entry.to_status),
+                entry.timestamp.to_rfc3339(),
+                entry.triggered_by,
+                entry.trigger_reason.as_deref().unwrap_or(""),
+                entry.details.as_ref().map(|d| d.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Query state transitions for a vault — Issue #1854.
+    pub fn query_state_transitions(
+        &self,
+        query: &crate::models::StateTransitionQuery,
+    ) -> Result<Vec<crate::models::StateTransitionEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT id, vault_id, from_status, to_status, timestamp, triggered_by, trigger_reason, details FROM state_transitions WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref vault_id) = query.vault_id {
+            sql.push_str(" AND vault_id = ?");
+            param_values.push(Box::new(vault_id.clone()));
+        }
+        if let Some(ref from_status) = query.from_status {
+            sql.push_str(" AND from_status = ?");
+            param_values.push(Box::new(format!("{:?}", from_status)));
+        }
+        if let Some(ref to_status) = query.to_status {
+            sql.push_str(" AND to_status = ?");
+            param_values.push(Box::new(format!("{:?}", to_status)));
+        }
+        if let Some(ref triggered_by) = query.triggered_by {
+            sql.push_str(" AND triggered_by = ?");
+            param_values.push(Box::new(triggered_by.clone()));
+        }
+        if let Some(after) = query.after {
+            sql.push_str(" AND timestamp >= ?");
+            param_values.push(Box::new(after.to_rfc3339()));
+        }
+        if let Some(before) = query.before {
+            sql.push_str(" AND timestamp <= ?");
+            param_values.push(Box::new(before.to_rfc3339()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(100);
+        let offset = query.offset.unwrap_or(0);
+        sql.push_str(" LIMIT ? OFFSET ?");
+        param_values.push(Box::new(limit));
+        param_values.push(Box::new(offset));
+
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            let timestamp_str: String = r.get(4)?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let from_status_str: String = r.get(2)?;
+            let to_status_str: String = r.get(3)?;
+            let trigger_reason: Option<String> = r.get(6)?;
+            let details_str: Option<String> = r.get(7)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(crate::models::StateTransitionEntry {
+                id: r.get(0)?,
+                vault_id: r.get(1)?,
+                from_status: match from_status_str.as_str() {
+                    "Active" => crate::models::VaultStatus::Active,
+                    "Expired" => crate::models::VaultStatus::Expired,
+                    "Released" => crate::models::VaultStatus::Released,
+                    "Paused" => crate::models::VaultStatus::Paused,
+                    _ => crate::models::VaultStatus::Active,
+                },
+                to_status: match to_status_str.as_str() {
+                    "Active" => crate::models::VaultStatus::Active,
+                    "Expired" => crate::models::VaultStatus::Expired,
+                    "Released" => crate::models::VaultStatus::Released,
+                    "Paused" => crate::models::VaultStatus::Paused,
+                    _ => crate::models::VaultStatus::Active,
+                },
+                timestamp,
+                triggered_by: r.get(5)?,
+                trigger_reason: if trigger_reason.is_empty() { None } else { trigger_reason },
+                details,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Get state transition history for a specific vault — Issue #1854.
+    pub fn get_vault_state_transitions(
+        &self,
+        vault_id: &str,
+    ) -> Result<crate::models::StateTransitionHistory, rusqlite::Error> {
+        let transitions = self.query_state_transitions(&crate::models::StateTransitionQuery {
+            vault_id: Some(vault_id.to_string()),
+            ..Default::default()
+        })?;
+        Ok(crate::models::StateTransitionHistory {
+            vault_id: vault_id.to_string(),
+            transitions,
+        })
     }
 
     // ── Refresh token rotation (Issue #1177) ─────────────────────────────────

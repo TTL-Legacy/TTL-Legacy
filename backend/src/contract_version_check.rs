@@ -225,12 +225,21 @@ where
     Fut: std::future::Future<Output = Result<u32, String>>,
 {
     match get_version_fn().await {
-        Ok(version) => VersionCheckResult {
-            compatible: version >= min_required_version,
-            contract_version: Some(version),
-            min_required_version,
-            error: None,
-        },
+        Ok(version) => {
+            if version > min_required_version {
+                tracing::warn!(
+                    "Deployed contract version {} is higher than backend minimum {}. Accepting with warning.",
+                    version,
+                    min_required_version
+                );
+            }
+            VersionCheckResult {
+                compatible: version >= min_required_version,
+                contract_version: Some(version),
+                min_required_version,
+                error: None,
+            }
+        }
         Err(e) => VersionCheckResult {
             compatible: false,
             contract_version: None,
@@ -368,6 +377,20 @@ mod tests {
 
         assert!(result.compatible);
         assert_eq!(result.contract_version, Some(1));
+        assert_eq!(result.min_required_version, 1);
+        assert!(result.error.is_none());
+    }
+
+    // c) returns_compatible_true_with_warning_when_version_above_minimum
+    #[tokio::test]
+    async fn returns_compatible_true_with_warning_when_version_above_minimum() {
+        let min_required = 1u32;
+        let contract_version = 5u32;
+
+        let result = check_contract_version(|| async { Ok(contract_version) }, min_required).await;
+
+        assert!(result.compatible);
+        assert_eq!(result.contract_version, Some(5));
         assert_eq!(result.min_required_version, 1);
         assert!(result.error.is_none());
     }

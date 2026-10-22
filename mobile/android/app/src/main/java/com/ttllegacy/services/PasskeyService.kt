@@ -14,6 +14,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.util.Base64
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -78,6 +79,41 @@ class PasskeyService @Inject constructor(
             } else {
                 throw e
             }
+        }
+    }
+
+    /**
+     * Binds a biometric gate to the passkey identified by [credentialId].
+     *
+     * Shows the biometric / device-credential prompt. On success returns the
+     * 32-byte biometric hash (SHA-256 of `biometric:<credentialId>`) that the
+     * caller submits to `bind_passkey_biometric` together with the passkey hash.
+     *
+     * User cancellations are re-thrown as [CancellationException]; other
+     * biometric errors surface as a failed [Result].
+     */
+    suspend fun bindBiometricPasskey(activity: Activity, credentialId: String): Result<ByteArray> = runCatching {
+        require(activity is ComponentActivity) {
+            "BiometricHelper requires a ComponentActivity; got ${activity::class.simpleName}"
+        }
+
+        suspendCancellableCoroutine { cont ->
+            BiometricHelper(activity).authenticate(
+                title = "Bind biometric sign-in",
+                subtitle = "Confirm your identity to enable biometric sign-in for this passkey",
+                onSuccess = {
+                    val digest = MessageDigest.getInstance("SHA-256")
+                        .digest("biometric:$credentialId".toByteArray())
+                    cont.resume(digest)
+                },
+                onErrorWithCode = { errorCode, errorMessage ->
+                    if (fallbackManager.isUserCancellation(errorCode)) {
+                        cont.resumeWithException(CancellationException("Biometric binding cancelled by user"))
+                    } else {
+                        cont.resumeWithException(IllegalStateException(errorMessage))
+                    }
+                }
+            )
         }
     }
 
