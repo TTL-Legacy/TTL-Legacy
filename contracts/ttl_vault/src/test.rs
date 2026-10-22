@@ -7376,3 +7376,61 @@ fn test_withdraw_succeeds_when_2fa_enabled_and_verified() {
     client.withdraw(&vault_id, &owner, &100i128, &None, &None, &None);
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
 }
+
+// ── Issue #1763: Passkey Rotation Minimum Interval Tests ─────────────────────
+
+// rotate_passkey needs a primary passkey on the vault, which no public call seeds on a
+// fresh vault, so set it through storage the same way other tests do.
+fn seed_primary_passkey(env: &Env, client: &TtlVaultContractClient<'static>, vault_id: u64, passkey: &BytesN<32>) {
+    env.as_contract(&client.address, || {
+        let key = StorageKey::Vault(vault_id);
+        let mut v: Vault = env.storage().persistent().get(&key).unwrap();
+        v.passkey_hash = Some(Bytes::from_array(env, &passkey.to_array()));
+        env.storage().persistent().set(&key, &v);
+    });
+}
+
+#[test]
+fn test_rotate_passkey_enforces_min_rotation_interval() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let passkey_0 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey_1 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey_2 = BytesN::from_array(&env, &[3u8; 32]);
+    seed_primary_passkey(&env, &client, vault_id, &passkey_0);
+
+    client.set_passkey_rotation_policy(&vault_id, &owner, &30u32, &true);
+
+    // No rotation is on record yet, so the first rotation is allowed.
+    client.rotate_passkey(&vault_id, &owner, &passkey_0, &passkey_1);
+
+    // Rotating again straight away would defeat replay protection, so it is rejected.
+    let err = client
+        .try_rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::PasskeyRotationTooSoon as u32));
+
+    // Still rejected one day short of the 30-day minimum interval.
+    env.ledger().with_mut(|l| l.timestamp += 29 * 86_400);
+    assert!(client.try_rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2).is_err());
+
+    // Allowed once the full minimum interval has elapsed.
+    env.ledger().with_mut(|l| l.timestamp += 86_400);
+    client.rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2);
+}
+
+#[test]
+fn test_rotate_passkey_unrestricted_when_policy_not_enforced() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let passkey_0 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey_1 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey_2 = BytesN::from_array(&env, &[3u8; 32]);
+    seed_primary_passkey(&env, &client, vault_id, &passkey_0);
+
+    client.set_passkey_rotation_policy(&vault_id, &owner, &30u32, &false);
+
+    client.rotate_passkey(&vault_id, &owner, &passkey_0, &passkey_1);
+    client.rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2);
+}

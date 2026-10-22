@@ -235,6 +235,7 @@ All contract storage entries are defined in the `StorageKey` enum (`contracts/tt
 | `RecoveryContacts(u64)` | `Vec<Address>` | Recovery contacts |
 | `PasskeyRecoveryRequest(u64)` | `PasskeyRecoveryRequest` | Recovery request |
 | `PasskeyRotationPolicy(u64)` | `PasskeyRotationPolicy` | Rotation policy |
+| `LastVaultPasskeyRotation(u64)` | `u64` | Timestamp of last `rotate_passkey` (enforces policy minimum interval) |
 | `CustomMetadataHistory(u64)` | `Vec<Bytes>` | Custom metadata history |
 | `ReleaseVoteThreshold(u64)` | `u32` | Release vote threshold |
 | `VestingScheduleCount(u64)` | `u64` | Number of schedules |

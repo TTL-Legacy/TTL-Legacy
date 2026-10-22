@@ -584,6 +584,8 @@ pub enum ContractError {
     CheckInTooEarly = 152,
     // Issue #1806: beneficiary auction reserve price
     ReserveNotMet = 153,
+    // Passkey rotation policy: the active passkey was rotated too recently.
+    PasskeyRotationTooSoon = 154,
 }
 
 #[contract]
@@ -11294,6 +11296,8 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::InvalidPasskey` - If old passkey doesn't match
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::PasskeyRotationTooSoon` - If rotation enforcement is on and the
+    ///   previous rotation happened less than `rotation_period_days` ago
     pub fn rotate_passkey(
         env: Env,
         vault_id: u64,
@@ -11320,8 +11324,38 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidPasskey);
         }
 
+        // Enforce the minimum interval between rotations set by the owner's policy.
+        let now = env.ledger().timestamp();
+        let policy: PasskeyRotationPolicy = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::PasskeyRotationPolicy(vault_id))
+            .unwrap_or(PasskeyRotationPolicy {
+                rotation_period_days: 0,
+                enforce: false,
+            });
+        let rotated_key = StorageKey::LastVaultPasskeyRotation(vault_id);
+        if policy.enforce && policy.rotation_period_days > 0 {
+            if let Some(last_rotation) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&rotated_key)
+            {
+                let min_interval = policy.rotation_period_days as u64 * 86_400;
+                if now.saturating_sub(last_rotation) < min_interval {
+                    return Err(ContractError::PasskeyRotationTooSoon);
+                }
+            }
+        }
+
         vault.passkey_hash = Some(Bytes::from_array(&env, &new_passkey_hash.to_array()));
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().persistent().set(&rotated_key, &now);
+        env.storage().persistent().extend_ttl(
+            &rotated_key,
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);

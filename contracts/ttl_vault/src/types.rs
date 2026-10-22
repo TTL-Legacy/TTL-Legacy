@@ -585,6 +585,8 @@ pub enum StorageKey {
     CompromisedPasskeys(u64),
     CountdownConfig(u64),
     LastPasskeyRotation(u64, BytesN<32>),
+    // Ledger timestamp of the most recent `rotate_passkey` call for a vault.
+    LastVaultPasskeyRotation(u64),
     Lending(u64),
     PasskeyLockout(u64),
     PasskeyRecoveryRequest(u64),
