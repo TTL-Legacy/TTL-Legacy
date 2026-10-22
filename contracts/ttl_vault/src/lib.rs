@@ -2192,7 +2192,12 @@ impl TtlVaultContract {
             vault.inactivity_penalty_bps,
             vault.penalty_recipient.clone(),
         ) {
-            let elapsed = now.saturating_sub(original_last_check_in);
+            // Hibernating time is not a missed check-in, so exclude it from the gap.
+            let hibernated =
+                Self::hibernated_seconds_between(&env, vault_id, original_last_check_in, now);
+            let elapsed = now
+                .saturating_sub(original_last_check_in)
+                .saturating_sub(hibernated);
             let missed = (elapsed / vault.check_in_interval).saturating_sub(1);
             if missed > 0 && vault.balance > 0 {
                 let penalty_per = vault.balance * (penalty_bps as i128) / BASIS_POINTS_100_PERCENT;
@@ -9047,6 +9052,23 @@ impl TtlVaultContract {
             .persistent()
             .get(&StorageKey::ReleaseConditions(vault_id))
             .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Returns how many seconds of the interval `[from, to)` fall inside the
+    /// vault's hibernation window. Hibernating time must not count as missed
+    /// check-ins, so callers subtract this from elapsed time.
+    fn hibernated_seconds_between(env: &Env, vault_id: u64, from: u64, to: u64) -> u64 {
+        match env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+        {
+            Some(h) => {
+                let window_end = h.started_at.saturating_add(h.duration_seconds);
+                to.min(window_end).saturating_sub(from.max(h.started_at))
+            }
+            None => 0,
+        }
     }
 
     /// Owner‑initiated panic release.
