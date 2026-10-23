@@ -285,6 +285,17 @@ with an optional dry-run flag.
 | `DR_S3_ENDPOINT` | S3 endpoint URL |
 | `CONTRACT_TTL_VAULT` | Deployed contract address |
 | `DR_DB_PATH` | Path to the backend database on the runner |
+| `DR_GPG_PRIVATE_KEY` | ASCII-armored GPG private key used to sign every artefact (`gpg --armor --export-secret-keys <id>`). Must not be passphrase-protected, because `dr_backup.sh` signs with `gpg --batch`. Use a dedicated DR signing key. |
+| `DR_GPG_KEY_ID` | Key ID or fingerprint of that signing key |
+| `DR_STELLAR_RPC_URL` | Soroban RPC URL for mainnet. The Stellar CLI ships no default mainnet RPC (see https://developers.stellar.org/docs/data/rpc/rpc-providers) |
+
+**Optional secrets:** `DR_REPLICA_BUCKET` + `DR_REPLICA_REGION` (cross-region
+replica), `DR_VAULT_SNAPSHOTS` (comma-separated `vault_id:timestamp` pairs).
+
+The first step, "Check required secrets", fails before anything else runs if any
+required secret is missing. It lists the missing names in the run summary.
+The workflow pins the Stellar CLI with `STELLAR_CLI_VERSION`. Release assets are
+versioned, so the unversioned `releases/latest/download/` URL does not work.
 
 If the backup fails, the workflow automatically opens a GitHub issue labelled
 `disaster-recovery` and `bug` for visibility.

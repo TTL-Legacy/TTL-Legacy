@@ -245,8 +245,8 @@ cat > "${MANIFEST_FILE}" <<EOF
   "contract": "${CONTRACT_TTL_VAULT}",
   "artefacts": {
     "contract_state": "${BACKUP_KEY_PREFIX}/contract_state.json",
-    "backend_db": "$(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi)",
-    "wasm": "$(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)"
+    "backend_db": $(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi),
+    "wasm": $(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)
   },
   "sha256": {
     "contract_state": $(json_sha256 "${CONTRACT_STATE_FILE}"),
