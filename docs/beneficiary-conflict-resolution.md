@@ -2,7 +2,7 @@
 
 **Issue**: #502, #1297  
 **Status**: Implemented  
-**Last Updated**: 2026-09-01
+**Last Updated**: 2026-10-23
 
 ## Overview
 
@@ -206,7 +206,7 @@ auto_resolve_...    resolve_beneficiary_conflict
 ### Dispute Window
 
 - Started when the **first** claim is filed, not when `set_conflict_dispute_window` is called.
-- Default is 72 hours; vault owner can customise before any claims are filed.
+- Default is `DEFAULT_CONFLICT_DISPUTE_WINDOW` (72 hours); vault owner can customise before any claims are filed.
 - Once the first claim is filed, the deadline is fixed in `dispute_window_ends_at`.
 - `auto_resolve_conflict` is blocked until `now >= dispute_window_ends_at`.
 - Admin manual override (`resolve_beneficiary_conflict`) is **not** blocked by the window.
@@ -244,7 +244,7 @@ Once resolved (`ConflictResolution::Approved(...)`), no new claims can be added 
 client.claim_beneficiary_conflict(&vault_id, &alice, &String::from_str(&env, "Primary heir"))?;
 client.claim_beneficiary_conflict(&vault_id, &bob, &String::from_str(&env, "Alternate heir"))?;
 
-// --- 72+ hours later ---
+// --- DEFAULT_CONFLICT_DISPUTE_WINDOW (72 h) or more has elapsed ---
 
 // Anyone can trigger deterministic resolution
 client.auto_resolve_conflict(&vault_id)?;
@@ -295,7 +295,7 @@ client.resolve_beneficiary_conflict(&vault_id, &alice)?;
 3. **Permissionless auto-resolution**: Anyone can call `auto_resolve_conflict` after the window closes. The outcome is deterministic and independent of who calls it.
 4. **Immutable resolution**: Once approved, the conflict record is final and cannot be reopened.
 5. **Owner priority requires a claim**: The owner cannot silently assign a winner who never filed; the priority address must have submitted a claim.
-6. **Admin 30-day cap**: The admin manual override rejects conflicts older than 30 days to force auto-resolution for stale records.
+6. **Admin `MAX_CONFLICT_DISPUTE_WINDOW` cap**: The admin manual override rejects conflicts older than `MAX_CONFLICT_DISPUTE_WINDOW` (30 days) to force auto-resolution for stale records.
 
 ## Testing
 
