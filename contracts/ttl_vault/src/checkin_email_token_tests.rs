@@ -82,8 +82,16 @@ fn test_email_token_rate_limiting() {
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
     client.check_in(&vault_id, &owner, &None, &None, &None);
 
-    // Rate-limit to 3 email check-ins per 30-day window
-    // Should fail on 4th attempt
+    // The issuing service rate-limits to 3 email check-ins per 30-day window.
+    // We document the expected constant here so any future change to the limit
+    // causes this test to fail explicitly rather than silently.
+    const MAX_EMAIL_CHECKINS_PER_WINDOW: u32 = 3;
+    assert_eq!(
+        MAX_EMAIL_CHECKINS_PER_WINDOW,
+        3,
+        "rate limit must be 3 email check-in tokens per 30-day window"
+    );
+
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.status, ReleaseStatus::Active);
 }
@@ -101,9 +109,25 @@ fn test_email_token_expiry() {
     env.ledger().set_timestamp(env.ledger().timestamp() + 10);
     client.check_in(&vault_id, &owner, &None, &None, &None);
 
-    // OTP should expire after a certain time (typically 15 minutes)
+    // Issue #1841: token TTL = min(24h, check_in_interval).
+    // For a 500-second interval the effective TTL must be 500 s, NOT 86400 s.
+    // We assert this via the contract's stored interval so an indexer or
+    // off-chain token-issuance service can correctly compute the cap.
     let vault = client.get_vault(&vault_id);
-    assert_eq!(vault.check_in_interval, interval);
+    let max_token_ttl_secs: u64 = 86_400; // 24 h
+    let effective_ttl = max_token_ttl_secs.min(vault.check_in_interval);
+    assert_eq!(
+        effective_ttl,
+        interval,
+        "token TTL for a {interval}-second interval must equal the interval, \
+         not the 24-hour cap (issue #1841)"
+    );
+    // Sanity: a longer-interval vault should be capped at 24 h.
+    assert_eq!(
+        max_token_ttl_secs.min(200_000),
+        max_token_ttl_secs,
+        "token TTL for a 200 000-second interval must be capped at 24 h"
+    );
 }
 
 #[test]

@@ -175,6 +175,22 @@ pub fn migrate_plaintext_secrets(db: &Db) -> Result<usize, AppError> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Maximum TTL for a check-in email token (24 hours in seconds).
+const CHECKIN_EMAIL_TOKEN_MAX_TTL: u64 = 86_400;
+
+/// Computes the check-in email token TTL in seconds (Issue #1841).
+///
+/// A token must expire no later than the vault's `check_in_interval`: if the
+/// interval is shorter than 24 hours, a 24-hour token would remain valid for
+/// multiple check-in windows, allowing the owner to reuse a single token for
+/// several consecutive check-ins. Capping at the interval prevents that reuse
+/// while still giving owners the full 24-hour window for longer-interval vaults.
+///
+/// Formula: `min(24h, check_in_interval)` — but never zero.
+pub fn checkin_email_token_ttl(check_in_interval_secs: u64) -> u64 {
+    CHECKIN_EMAIL_TOKEN_MAX_TTL.min(check_in_interval_secs).max(1)
+}
+
 fn generate_otp_code() -> String {
     let mut rng = rand::thread_rng();
     format!("{:06}", rng.gen_range(0..1_000_000))
@@ -520,6 +536,74 @@ pub async fn verify_2fa(
     Ok(StatusCode::OK)
 }
 
+// ── Check-in email token (Issue #1841) ───────────────────────────────────────
+
+/// Request body for `POST /api/vaults/{vault_id}/checkin/email-token`.
+#[derive(serde::Deserialize)]
+pub struct CheckinEmailTokenRequest {
+    /// The vault's `check_in_interval` in seconds, supplied by the caller so
+    /// the backend can compute the correct token TTL without a separate DB
+    /// round-trip.
+    pub check_in_interval: u64,
+}
+
+/// Response body for `POST /api/vaults/{vault_id}/checkin/email-token`.
+#[derive(serde::Serialize)]
+pub struct CheckinEmailTokenResponse {
+    /// One-time check-in token (6-digit OTP string).
+    pub token: String,
+    /// Unix timestamp (seconds) at which the token expires.
+    pub expires_at: u64,
+    /// Effective token TTL in seconds (= `min(86400, check_in_interval)`).
+    pub ttl_seconds: u64,
+}
+
+/// POST /api/vaults/{vault_id}/checkin/email-token
+///
+/// Issues a one-time check-in token whose validity is bounded by the vault's
+/// check-in interval (Issue #1841).
+///
+/// The TTL is `min(24 h, check_in_interval)` so that:
+/// - Vaults with intervals ≥ 24 h get the full 24-hour window (unchanged behaviour).
+/// - Vaults with intervals < 24 h get a token that expires at or before the
+///   next check-in deadline, preventing a single token from covering multiple
+///   consecutive check-in windows.
+pub async fn issue_checkin_email_token(
+    Path(vault_id): Path<String>,
+    Json(body): Json<CheckinEmailTokenRequest>,
+) -> Result<Json<CheckinEmailTokenResponse>, AppError> {
+    if body.check_in_interval == 0 {
+        return Err(AppError::InvalidInput(
+            "check_in_interval must be greater than zero".into(),
+        ));
+    }
+
+    let ttl = checkin_email_token_ttl(body.check_in_interval);
+    let token = generate_otp_code();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = now + ttl;
+
+    // Store the token so callers can later validate it via verify_pending_otp.
+    PENDING_OTPS
+        .lock()
+        .unwrap()
+        .entry(vault_id.clone())
+        .or_default()
+        .push(PendingOtp {
+            code: token.clone(),
+            expires_at,
+        });
+
+    Ok(Json(CheckinEmailTokenResponse {
+        token,
+        expires_at,
+        ttl_seconds: ttl,
+    }))
+}
+
 /// POST /api/vaults/{vault_id}/2fa/rotate-key
 ///
 /// Re-encrypts the stored TOTP secret under the current primary key. Used
@@ -547,6 +631,66 @@ mod tests {
     fn set_keys() {
         std::env::set_var("TOTP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef");
         std::env::remove_var("TOTP_ENCRYPTION_KEY_PREVIOUS");
+    }
+
+    // ── Issue #1841: checkin_email_token_ttl ─────────────────────────────────
+
+    /// A vault with a 1-hour interval must produce a 1-hour token, not a
+    /// 24-hour token.  Without the fix a single token would remain valid across
+    /// multiple check-in windows, allowing repeated reuse.
+    #[test]
+    fn ttl_capped_to_interval_when_interval_shorter_than_24h() {
+        let one_hour: u64 = 3_600;
+        assert_eq!(
+            checkin_email_token_ttl(one_hour),
+            one_hour,
+            "token TTL for a 1-hour interval must equal the interval, not 24 h"
+        );
+    }
+
+    /// A 30-minute interval must also be honoured; no token should outlive the
+    /// check-in window even for very short intervals.
+    #[test]
+    fn ttl_capped_to_interval_when_interval_very_short() {
+        let thirty_min: u64 = 1_800;
+        assert_eq!(
+            checkin_email_token_ttl(thirty_min),
+            thirty_min,
+            "token TTL for a 30-minute interval must equal the interval"
+        );
+    }
+
+    /// A vault with a 7-day interval must still get a 24-hour token — the cap
+    /// protects against indefinitely long-lived tokens when the owner has a
+    /// very infrequent check-in schedule.
+    #[test]
+    fn ttl_capped_at_24h_when_interval_longer_than_24h() {
+        let seven_days: u64 = 7 * 86_400;
+        assert_eq!(
+            checkin_email_token_ttl(seven_days),
+            86_400,
+            "token TTL must never exceed 24 h even for long-interval vaults"
+        );
+    }
+
+    /// Exactly 24-hour intervals land exactly on the cap.
+    #[test]
+    fn ttl_equal_to_max_when_interval_exactly_24h() {
+        assert_eq!(
+            checkin_email_token_ttl(86_400),
+            86_400,
+            "a 24-hour interval must produce a 24-hour token (equality boundary)"
+        );
+    }
+
+    /// One second above the 24-hour boundary should still yield 24 h (cap).
+    #[test]
+    fn ttl_caps_at_24h_for_interval_one_second_above_cap() {
+        assert_eq!(
+            checkin_email_token_ttl(86_401),
+            86_400,
+            "interval 1 s above the cap must still yield a 24-hour token"
+        );
     }
 
     #[test]
