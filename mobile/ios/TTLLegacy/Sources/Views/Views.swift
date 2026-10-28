@@ -180,6 +180,8 @@ struct VaultDetailView: View {
     @State private var show2FAVerify = false
     @State private var twoFactorStatus: TwoFactorStatus?
     @State private var showShareLink = false
+    /// Controls the proof-of-life submission sheet (Issue #1842).
+    @State private var showProofOfLife = false
 
     var body: some View {
         List {
@@ -209,6 +211,9 @@ struct VaultDetailView: View {
                         .task { await load2FAStatus() }
                 }
             }
+
+            // ── Proof of Life (Issue #1842) ───────────────────────────────
+            proofOfLifeSection(showingSheet: $showProofOfLife)
 
             Section {
                 Button(action: checkIn) {
@@ -242,6 +247,13 @@ struct VaultDetailView: View {
                 provisioningUri: nil,
                 secret: nil,
                 onVerified: { Task { await load2FAStatus() } }
+            )
+        }
+        // Proof-of-life sheet (Issue #1842)
+        .sheet(isPresented: $showProofOfLife) {
+            ProofOfLifeView(
+                vaultID: vault.id,
+                beneficiaryAddress: vault.beneficiary
             )
         }
     }
