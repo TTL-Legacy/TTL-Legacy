@@ -1,0 +1,22 @@
+# Labels a pull request by the paths it changes (actions/labeler v5).
+# Applied by .github/workflows/labeler.yml.
+
+soroban:
+  - changed-files:
+      - any-glob-to-any-file: "contracts/**"
+
+backend:
+  - changed-files:
+      - any-glob-to-any-file: "backend/**"
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file: "frontend/**"
+
+mobile:
+  - changed-files:
+      - any-glob-to-any-file: "mobile/**"
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: "docs/**"
