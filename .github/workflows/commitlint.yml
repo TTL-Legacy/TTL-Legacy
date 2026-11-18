@@ -34,3 +34,33 @@ jobs:
       - name: Lint PR title
         run: |
           echo "${{ github.event.pull_request.title }}" | npx commitlint
+
+  commits:
+    name: Check Commit Messages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # the whole history, so the commits of the PR can be listed
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+
+      - name: Install commitlint CLI and conventional-commits config
+        run: |
+          npm install --no-save \
+            @commitlint/cli@19 \
+            @commitlint/config-conventional@19
+
+      # Every commit of the PR, not only the last one: --from HEAD~1 would skip
+      # the earlier commits of a PR that has several.
+      - name: Lint the commit messages of the PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
