@@ -5,23 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-<!-- This file is automatically updated by git-cliff on each release.
-     See cliff.toml for configuration. -->
-
 ## [Unreleased]
 
-### Bug Fixes
-- **check-in**: return structured `ContractError::VaultNotFound` instead of panicking with a raw string on non-existent vault (#1263)
-
 ### Features
-- **ci**: add git-cliff changelog automation with `cliff.toml` and `release.yml` workflow (#1197)
-- **ci**: enforce conventional commit format via commitlint on pull request titles (#1197)
-- **frontend**: add React `ErrorBoundary` component with fallback UI and retry button to dashboard (#1198)
-- **backend**: implement request input sanitization middleware — 64 KB body limit, 512-character field limit (#1199)
+
+- **ci**: Add git-cliff changelog automation with `cliff.toml` and `release.yml` workflow (#1197) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
+- **ci**: Enforce conventional commit format via commitlint on pull request titles (#1197) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
+- **frontend**: Add React `ErrorBoundary` component with fallback UI and retry button to dashboard (#1198) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
+- **backend**: Implement request input sanitization middleware — 64 KB body limit, 512-character field limit (#1199) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
+
+### Bug Fixes
+
+- **check-in**: Return structured `ContractError::VaultNotFound` instead of panicking with a raw string on non-existent vault (#1263) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
 
 ### Documentation
-- **contributing**: add conventional commit format requirement and examples (#1197)
-- **backend-api**: document request size and field-length limits (#1199)
+
+- **contributing**: Add conventional commit format requirement and examples (#1197) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
+- **backend-api**: Document request size and field-length limits (#1199) ([6df237a](https://github.com/OxDev-max/TTL-Legacy/commit/6df237a1c3952a2eb98fecb22a15434b6fb6d2e0))
 
 ## [1.0.0] - 2026-06-30
 
