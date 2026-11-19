@@ -190,17 +190,166 @@ mod tests {
 
         set_rank(&env, &admin, alice, 1);
 
-        assert!(env
-            .events()
-            .all()
-            .iter()
-            .any(|event| {
-                let topics: Vec<Val> = event.1.clone().into_val(&env);
-                topics
-                    .get(0)
-                    .and_then(|topic| topic.try_into_val(&env).ok())
-                    .map(|topic: soroban_sdk::Symbol| topic == RANKING_SET_TOPIC)
-                    .unwrap_or(false)
-            }));
+        assert!(env.events().all().iter().any(|event| {
+            let topics: Vec<Val> = event.1.clone().into_val(&env);
+            topics
+                .get(0)
+                .and_then(|topic| topic.try_into_val(&env).ok())
+                .map(|topic: soroban_sdk::Symbol| topic == RANKING_SET_TOPIC)
+                .unwrap_or(false)
+        }));
+    }
+
+    #[test]
+    fn set_rank_preserves_allocation_bps_on_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+
+        set_rank(&env, &admin, alice.clone(), 1);
+
+        let mut ranks: Map<Address, RankedBeneficiary> = env
+            .storage()
+            .persistent()
+            .get(&RankingKey::BeneficiaryRanks)
+            .unwrap();
+        let mut entry = ranks.get(alice.clone()).unwrap();
+        assert_eq!(entry.allocation_bps, FULL_ALLOCATION_BPS);
+        entry.allocation_bps = 2_500;
+        ranks.set(alice.clone(), entry);
+        env.storage()
+            .persistent()
+            .set(&RankingKey::BeneficiaryRanks, &ranks);
+
+        set_rank(&env, &admin, alice.clone(), 3);
+
+        let ranks: Map<Address, RankedBeneficiary> = env
+            .storage()
+            .persistent()
+            .get(&RankingKey::BeneficiaryRanks)
+            .unwrap();
+        let entry = ranks.get(alice).unwrap();
+        assert_eq!(entry.priority, 3);
+        assert_eq!(entry.allocation_bps, 2_500);
+    }
+
+    #[test]
+    fn set_rank_event_payload_matches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+
+        set_rank(&env, &admin, alice.clone(), 7);
+
+        let mut found = false;
+        for event in env.events().all().iter() {
+            let topics: Vec<Val> = event.1.clone().into_val(&env);
+            let is_rank_set = topics
+                .get(0)
+                .and_then(|topic| topic.try_into_val(&env).ok())
+                .map(|topic: soroban_sdk::Symbol| topic == RANKING_SET_TOPIC)
+                .unwrap_or(false);
+            if is_rank_set {
+                let payload: RankingSetEvent = event.2.clone().into_val(&env);
+                assert_eq!(payload.beneficiary, alice);
+                assert_eq!(payload.priority, 7);
+                found = true;
+            }
+        }
+        assert!(found);
+    }
+
+    #[test]
+    fn empty_ranking_map_distributes_nothing() {
+        let env = Env::default();
+        let result = distribute_by_rank(&env, 1_000);
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn zero_total_bps_tier_yields_zero_amounts() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        set_rank(&env, &admin, alice.clone(), 1);
+        set_rank(&env, &admin, bob.clone(), 1);
+
+        let mut ranks: Map<Address, RankedBeneficiary> = env
+            .storage()
+            .persistent()
+            .get(&RankingKey::BeneficiaryRanks)
+            .unwrap();
+        for addr in [alice.clone(), bob.clone()].iter() {
+            let mut entry = ranks.get(addr.clone()).unwrap();
+            entry.allocation_bps = 0;
+            ranks.set(addr.clone(), entry);
+        }
+        env.storage()
+            .persistent()
+            .set(&RankingKey::BeneficiaryRanks, &ranks);
+
+        let result = distribute_by_rank(&env, 1_000);
+
+        assert_eq!(result.get(alice).unwrap(), 0);
+        assert_eq!(result.get(bob).unwrap(), 0);
+    }
+
+    #[test]
+    fn remaining_exhausted_mid_tier() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let carol = Address::generate(&env);
+
+        set_rank(&env, &admin, alice.clone(), 1);
+        set_rank(&env, &admin, bob.clone(), 1);
+        set_rank(&env, &admin, carol.clone(), 2);
+
+        let result = distribute_by_rank(&env, 1_000);
+
+        assert_eq!(result.get(alice).unwrap(), 500);
+        assert_eq!(result.get(bob).unwrap(), 500);
+        assert_eq!(result.get(carol).unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn distribute_by_rank_event_payloads_match() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        set_rank(&env, &admin, alice.clone(), 1);
+        set_rank(&env, &admin, bob.clone(), 2);
+
+        let result = distribute_by_rank(&env, 400);
+
+        let mut seen = 0;
+        for event in env.events().all().iter() {
+            let topics: Vec<Val> = event.1.clone().into_val(&env);
+            let is_dist = topics
+                .get(0)
+                .and_then(|topic| topic.try_into_val(&env).ok())
+                .map(|topic: soroban_sdk::Symbol| topic == DISTRIBUTED_BY_RANK_TOPIC)
+                .unwrap_or(false);
+            if is_dist {
+                let payload: DistributedByRankEvent = event.2.clone().into_val(&env);
+                assert_eq!(payload.beneficiary, alice);
+                assert_eq!(payload.priority, 1);
+                assert_eq!(payload.amount, 400);
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 1);
+        assert_eq!(result.get(alice).unwrap(), 400);
+        assert_eq!(result.get(bob).unwrap_or(0), 0);
     }
 }

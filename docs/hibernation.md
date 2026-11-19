@@ -7,10 +7,10 @@ Hibernation lets a vault owner temporarily suspend the check-in requirement for 
 ## How It Works
 
 1. The owner calls `enter_hibernation(vault_id, caller, duration_seconds)`.
-2. A `HibernationEntry` is stored on-chain recording `started_at` and `duration_seconds`.
+2. A `HibernationEntry` is stored on-chain recording `started_at`, `duration_seconds`, and the effective TTL remaining at entry.
 3. While the hibernation window is open (`now < started_at + duration_seconds`), `is_expired` always returns `false` — the vault cannot be released.
 4. Once the window closes, the vault's effective expiry deadline is extended by the full `duration_seconds`, so the owner has their normal `check_in_interval` remaining before the vault expires.
-5. The owner can exit hibernation early by calling `exit_hibernation(vault_id, caller)`. The elapsed hibernation time is credited to `last_check_in`, preserving the remaining TTL.
+5. The owner can exit hibernation early by calling `exit_hibernation(vault_id, caller)`. The TTL snapshot from entry is restored, even if another check-in occurred during hibernation.
 
 ## Expiry Logic
 
@@ -36,9 +36,22 @@ enter_hibernation(vault_id: u64, caller: Address, duration_seconds: u64) -> Resu
 | `caller` is not the vault owner | `NotOwner` (6) |
 | Vault is not `Locked` | `AlreadyReleased` (7) |
 | Vault is already hibernating | `AlreadyHibernating` (55) |
-| `duration_seconds` is zero | `InvalidInterval` (2) |
+| `duration_seconds` is below the configured minimum | `HibernationDurationTooShort` (114) |
+| `duration_seconds` exceeds this vault's configured maximum | `HibernationDurationTooLong` (113) |
 
 Emits event: `hib_ent` with `(caller, started_at, duration_seconds)`
+
+### Configure Maximum Duration
+
+```rust
+set_max_hibernation_duration(
+    vault_id: u64,
+    caller: Address,
+    max_duration_seconds: u64,
+) -> Result<(), ContractError>
+```
+
+The vault owner or protocol admin can set a per-vault maximum from `MIN_HIBERNATION_SECONDS` through `MAX_HIBERNATION_SECONDS`. The default is the protocol maximum of 180 days.
 
 ### Exit Hibernation (Early)
 
@@ -66,6 +79,7 @@ Returns `Some(HibernationEntry)` if the vault is currently hibernating, `None` o
 pub struct HibernationEntry {
     pub started_at: u64,        // Unix timestamp when hibernation started
     pub duration_seconds: u64,  // Total hibernation duration
+    pub remaining_ttl_at_entry: u64, // TTL restored when hibernation ends
 }
 ```
 
@@ -79,7 +93,7 @@ client.enter_hibernation(&vault_id, &owner, &thirty_days)?;
 // Vault will not expire for 30 days regardless of check-ins.
 // Owner returns early after 10 days:
 client.exit_hibernation(&vault_id, &owner)?;
-// last_check_in is bumped by 10 days; normal TTL countdown resumes.
+// The remaining TTL captured at entry is restored; the interval is not reset.
 ```
 
 ## Events
@@ -94,4 +108,6 @@ client.exit_hibernation(&vault_id, &owner)?;
 - Only the vault owner can enter or exit hibernation.
 - Hibernation does not affect deposits, withdrawals, or check-ins — those remain available.
 - A vault cannot enter hibernation twice simultaneously; the existing entry must expire or be exited first.
-- Hibernation duration is bounded by the same `max_ttl_seconds` constraint applied to check-ins (the combined `check_in_interval + duration_seconds` is used when computing storage TTL).
+- Hibernation duration defaults to 180 days and can be capped per vault by its owner or protocol admin. The protocol hard maximum remains 180 days.
+- The entry snapshot prevents check-ins during hibernation from resetting the TTL restored on exit.
+- The combined `check_in_interval + duration_seconds` is used when computing storage TTL.

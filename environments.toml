@@ -12,3 +12,10 @@ VITE_STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 # Backend (reminder service)
 REMINDER_EMAIL_API_KEY=<your-key>
 REMINDER_SMS_API_KEY=<your-key>
+
+# Backend (metrics) - check-in latency histogram bucket boundaries in milliseconds
+CHECKIN_LATENCY_BUCKETS_MS=10,50,100,500,1000,5000
+
+# Backend (rate limiting) - comma-separated list of trusted reverse proxy IPs/CIDRs
+# whose X-Forwarded-For header is honored when extracting the client IP
+TRUSTED_PROXIES=127.0.0.1/32,::1/128

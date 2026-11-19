@@ -58,9 +58,9 @@ fn make_beneficiaries(env: &Env, n: u32) -> soroban_sdk::Vec<BeneficiaryEntry> {
     entries
 }
 
-/// Set up a vault with `n` beneficiaries, advance past TTL, then call
-/// `trigger_release` and return the budget snapshot.
-fn measure_trigger_release(n: u32) -> (u64, u64) {
+/// Set up a vault with `n` beneficiaries, optionally attach a vesting schedule,
+/// advance past TTL, then call `trigger_release` and return the budget snapshot.
+fn measure_trigger_release(n: u32, with_vesting: bool) -> (u64, u64) {
     let (env, owner, primary_beneficiary, _admin, client) = setup_bench();
     let interval = 1_000u64;
 
@@ -70,6 +70,12 @@ fn measure_trigger_release(n: u32) -> (u64, u64) {
     if n > 1 {
         let entries = make_beneficiaries(&env, n);
         client.set_beneficiaries(&vault_id, &owner, &entries).unwrap();
+    }
+
+    if with_vesting {
+        client
+            .set_vesting_schedule(&vault_id, &owner, &0u64, &100u64, &4u32, &1_000_000i128, &0u64)
+            .unwrap();
     }
 
     // Advance ledger past the check-in interval so the vault expires
@@ -91,7 +97,7 @@ const SOROBAN_CPU_LIMIT: u64 = 100_000_000;
 
 #[test]
 fn bench_trigger_release_1_beneficiary() {
-    let (cpu, mem) = measure_trigger_release(1);
+    let (cpu, mem) = measure_trigger_release(1, false);
     println!("trigger_release(n=1 ) → cpu={cpu:>12} mem={mem:>10}");
     assert!(
         cpu < SOROBAN_CPU_LIMIT,
@@ -101,7 +107,7 @@ fn bench_trigger_release_1_beneficiary() {
 
 #[test]
 fn bench_trigger_release_5_beneficiaries() {
-    let (cpu, mem) = measure_trigger_release(5);
+    let (cpu, mem) = measure_trigger_release(5, false);
     println!("trigger_release(n=5 ) → cpu={cpu:>12} mem={mem:>10}");
     assert!(
         cpu < SOROBAN_CPU_LIMIT,
@@ -111,7 +117,7 @@ fn bench_trigger_release_5_beneficiaries() {
 
 #[test]
 fn bench_trigger_release_10_beneficiaries() {
-    let (cpu, mem) = measure_trigger_release(10);
+    let (cpu, mem) = measure_trigger_release(10, false);
     println!("trigger_release(n=10) → cpu={cpu:>12} mem={mem:>10}");
     assert!(
         cpu < SOROBAN_CPU_LIMIT,
@@ -121,12 +127,24 @@ fn bench_trigger_release_10_beneficiaries() {
 
 #[test]
 fn bench_trigger_release_20_beneficiaries() {
-    let (cpu, mem) = measure_trigger_release(20);
+    let (cpu, mem) = measure_trigger_release(20, false);
     println!("trigger_release(n=20) → cpu={cpu:>12} mem={mem:>10}");
     // n=20 is MAX_BENEFICIARIES — must be comfortably under the limit
     assert!(
         cpu < SOROBAN_CPU_LIMIT,
         "n=20 (MAX): cpu {cpu} exceeds on-chain limit {SOROBAN_CPU_LIMIT}"
+    );
+}
+
+#[test]
+fn bench_trigger_release_20_beneficiaries_with_vesting() {
+    // Worst case: MAX_BENEFICIARIES plus a vesting schedule, which routes
+    // trigger_release through the vesting branch instead of immediate payout.
+    let (cpu, mem) = measure_trigger_release(20, true);
+    println!("trigger_release(n=20, vesting) → cpu={cpu:>12} mem={mem:>10}");
+    assert!(
+        cpu < SOROBAN_CPU_LIMIT,
+        "n=20 (MAX, vesting): cpu {cpu} exceeds on-chain limit {SOROBAN_CPU_LIMIT}"
     );
 }
 

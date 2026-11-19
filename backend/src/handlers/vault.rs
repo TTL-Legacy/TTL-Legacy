@@ -1,25 +1,15 @@
-use crate::models::*;
 use crate::db::*;
-use axum::http::HeaderMap;
-use chrono::{DateTime, Utc};
-use serde_json::json;
+use crate::models::*;
+use chrono::Utc;
 use std::collections::HashMap;
-use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::instrument;
 
-
-pub fn search_vaults_handler(
-    store: &VaultStore,
-    query: SearchQuery,
-) -> SearchResult {
+pub fn search_vaults_handler(store: &VaultStore, query: SearchQuery) -> SearchResult {
     search_vaults(store, &query)
 }
 
-pub fn compare_vaults_handler(
-    store: &VaultStore,
-    vault_ids: Vec<String>,
-) -> ComparisonResult {
+pub fn compare_vaults_handler(store: &VaultStore, vault_ids: Vec<String>) -> ComparisonResult {
     let vaults = store.lock().unwrap();
     let comparison_vaults: Vec<Vault> = vault_ids
         .iter()
@@ -97,8 +87,7 @@ pub fn export_vaults_handler(
     };
 
     match format {
-        "json" => Ok(serde_json::to_string_pretty(&export_data)
-            .map_err(|e| e.to_string())?),
+        "json" => Ok(serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())?),
         "csv" => export_to_csv(&export_data),
         _ => Err("Unsupported format".to_string()),
     }
@@ -151,127 +140,6 @@ fn export_to_csv(data: &ExportData) -> Result<String, String> {
 
     let buffer = wtr.into_inner().map_err(|e| e.to_string())?;
     String::from_utf8(buffer).map_err(|e| e.to_string())
-}
-
-pub fn generate_compliance_report(
-    store: &VaultStore,
-    event_store: &EventStore,
-    vault_id: &str,
-) -> Result<ComplianceReport, String> {
-    let vaults = store.lock().unwrap();
-    let vault = vaults
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    let history = get_vault_history(event_store, vault_id);
-    
-    let mut fund_movements = Vec::new();
-    let mut beneficiary_changes = Vec::new();
-    let mut ttl_history = Vec::new();
-    let mut total_deposits = 0i128;
-    let mut total_withdrawals = 0i128;
-
-    for event in history {
-        match event.event_type {
-            EventType::Deposit => {
-                if let Some(amount) = event.data.get("amount").and_then(|v| v.as_i64()) {
-                    total_deposits += amount as i128;
-                    fund_movements.push(FundMovement {
-                        timestamp: event.timestamp,
-                        movement_type: "deposit".to_string(),
-                        amount: amount as i128,
-                        balance_after: vault.balance,
-                    });
-                }
-            }
-            EventType::Withdrawal => {
-                if let Some(amount) = event.data.get("amount").and_then(|v| v.as_i64()) {
-                    total_withdrawals += amount as i128;
-                    fund_movements.push(FundMovement {
-                        timestamp: event.timestamp,
-                        movement_type: "withdrawal".to_string(),
-                        amount: amount as i128,
-                        balance_after: vault.balance,
-                    });
-                }
-            }
-            EventType::TtlUpdate => {
-                if let Some(ttl) = event.data.get("ttl_remaining").and_then(|v| v.as_u64()) {
-                    ttl_history.push(TtlEvent {
-                        timestamp: event.timestamp,
-                        event_type: "ttl_extended".to_string(),
-                        ttl_remaining: Some(ttl),
-                    });
-                }
-            }
-            EventType::StatusChange => {
-                if let Some(old_ben) = event.data.get("old_beneficiary").and_then(|v| v.as_str()) {
-                    if let Some(new_ben) = event.data.get("new_beneficiary").and_then(|v| v.as_str()) {
-                        beneficiary_changes.push(BeneficiaryChange {
-                            timestamp: event.timestamp,
-                            old_beneficiary: old_ben.to_string(),
-                            new_beneficiary: new_ben.to_string(),
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(ComplianceReport {
-        vault_id: vault.id,
-        owner: vault.owner,
-        beneficiary: vault.beneficiary,
-        report_generated_at: Utc::now(),
-        fund_movements,
-        beneficiary_changes,
-        ttl_history,
-        total_deposits,
-        total_withdrawals,
-        current_balance: vault.balance,
-    })
-}
-
-pub fn export_compliance_report(
-    report: &ComplianceReport,
-    format: &str,
-) -> Result<String, String> {
-    match format {
-        "json" => Ok(serde_json::to_string_pretty(report).map_err(|e| e.to_string())?),
-        "pdf" => {
-            // Minimal PDF export as text representation
-            let mut pdf_content = String::new();
-            pdf_content.push_str(&format!("COMPLIANCE REPORT\n"));
-            pdf_content.push_str(&format!("Generated: {}\n\n", report.report_generated_at));
-            pdf_content.push_str(&format!("Vault ID: {}\n", report.vault_id));
-            pdf_content.push_str(&format!("Owner: {}\n", report.owner));
-            pdf_content.push_str(&format!("Beneficiary: {}\n", report.beneficiary));
-            pdf_content.push_str(&format!("Current Balance: {}\n", report.current_balance));
-            pdf_content.push_str(&format!("Total Deposits: {}\n", report.total_deposits));
-            pdf_content.push_str(&format!("Total Withdrawals: {}\n\n", report.total_withdrawals));
-            
-            pdf_content.push_str("FUND MOVEMENTS:\n");
-            for movement in &report.fund_movements {
-                pdf_content.push_str(&format!(
-                    "{} - {} {}\n",
-                    movement.timestamp, movement.movement_type, movement.amount
-                ));
-            }
-            
-            pdf_content.push_str("\nBENEFICIARY CHANGES:\n");
-            for change in &report.beneficiary_changes {
-                pdf_content.push_str(&format!(
-                    "{} - {} -> {}\n",
-                    change.timestamp, change.old_beneficiary, change.new_beneficiary
-                ));
-            }
-            
-            Ok(pdf_content)
-        }
-        _ => Err("Unsupported format".to_string()),
-    }
 }
 
 pub fn get_vault_templates() -> VaultTemplateList {
@@ -328,7 +196,10 @@ pub fn create_vault_from_template(
         ttl_remaining: Some(template.check_in_interval),
     };
 
-    store.lock().unwrap().insert(vault.id.clone(), vault.clone());
+    store
+        .lock()
+        .unwrap()
+        .insert(vault.id.clone(), vault.clone());
     Ok(vault)
 }
 
@@ -399,7 +270,8 @@ pub fn get_vault_detail_analytics_handler(
         vault.check_in_interval
     };
 
-    let next_deadline = vault.last_check_in + chrono::Duration::seconds(vault.check_in_interval as i64);
+    let next_deadline =
+        vault.last_check_in + chrono::Duration::seconds(vault.check_in_interval as i64);
     let days_until_deadline = (next_deadline - Utc::now()).num_seconds() / 86400;
 
     let check_in_frequency = CheckInFrequency {
@@ -444,7 +316,8 @@ pub fn get_vault_detail_analytics_handler(
         beneficiary_address: vault.beneficiary.clone(),
         is_active: vault.status == VaultStatus::Active,
         vault_status: format!("{:?}", vault.status),
-        can_receive_funds: vault.status == VaultStatus::Released || vault.status == VaultStatus::Active,
+        can_receive_funds: vault.status == VaultStatus::Released
+            || vault.status == VaultStatus::Active,
     };
 
     Ok(VaultDetailAnalytics {
@@ -510,7 +383,10 @@ pub fn restore_vault_handler(
     let vault: Vault = serde_json::from_slice(&decoded)
         .map_err(|e| format!("Failed to deserialise vault: {}", e))?;
 
-    store.lock().unwrap().insert(vault.id.clone(), vault.clone());
+    store
+        .lock()
+        .unwrap()
+        .insert(vault.id.clone(), vault.clone());
     Ok(vault)
 }
 
@@ -524,8 +400,16 @@ fn base64_encode(input: &[u8]) -> String {
         let combined = (b0 << 16) | (b1 << 8) | b2;
         out.push(CHARS[((combined >> 18) & 0x3F) as usize] as char);
         out.push(CHARS[((combined >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 { CHARS[((combined >> 6) & 0x3F) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { CHARS[(combined & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            CHARS[((combined >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            CHARS[(combined & 0x3F) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -545,336 +429,23 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
     for chunk in bytes.chunks(4) {
-        if chunk.len() < 4 { break; }
+        if chunk.len() < 4 {
+            break;
+        }
         let v0 = val(chunk[0])?;
         let v1 = val(chunk[1])?;
         let v2 = val(chunk[2])?;
         let v3 = val(chunk[3])?;
         let combined = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
         out.push(((combined >> 16) & 0xFF) as u8);
-        if chunk[2] != b'=' { out.push(((combined >> 8) & 0xFF) as u8); }
-        if chunk[3] != b'=' { out.push((combined & 0xFF) as u8); }
+        if chunk[2] != b'=' {
+            out.push(((combined >> 8) & 0xFF) as u8);
+        }
+        if chunk[3] != b'=' {
+            out.push((combined & 0xFF) as u8);
+        }
     }
     Ok(out)
-}
-
-// ── Task 3: Sharing & Collaboration ──────────────────────────────────────────
-
-const DEFAULT_TOKEN_EXPIRY_SECONDS: u64 = 604800; // 7 days
-
-/// POST /vaults/{id}/share
-pub fn share_vault_handler(
-    store: &VaultStore,
-    share_store: &ShareStore,
-    token_store: &ShareTokenStore,
-    audit_store: &AuditStore,
-    vault_id: &str,
-    request: ShareRequest,
-) -> Result<VaultShare, String> {
-    // Verify vault exists
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    let share = VaultShare {
-        share_id: uuid::Uuid::new_v4().to_string(),
-        vault_id: vault_id.to_string(),
-        shared_with: request.shared_with.clone(),
-        permission: request.permission,
-        created_at: Utc::now(),
-    };
-
-    add_vault_share(share_store, share.clone());
-
-    // Audit log
-    append_audit_entry(
-        audit_store,
-        "vault_shared",
-        &vault.owner,
-        serde_json::json!({
-            "vault_id": vault_id,
-            "share_id": share.share_id,
-            "shared_with": request.shared_with,
-            "permission": share.permission,
-        }),
-    );
-
-    Ok(share)
-}
-
-/// POST /vaults/{id}/share/tokens
-pub fn generate_share_token_handler(
-    store: &VaultStore,
-    share_store: &ShareStore,
-    token_store: &ShareTokenStore,
-    audit_store: &AuditStore,
-    vault_id: &str,
-    request: GenerateTokenRequest,
-) -> Result<ShareTokenResponse, String> {
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    let permission = request.permission.unwrap_or(SharePermission::ViewOnly);
-    let expires_at = Utc::now()
-        + chrono::Duration::seconds(request.expiry_seconds.unwrap_or(DEFAULT_TOKEN_EXPIRY_SECONDS) as i64);
-
-    // Create a VaultShare entry (reuses existing share infrastructure)
-    let share = VaultShare {
-        share_id: uuid::Uuid::new_v4().to_string(),
-        vault_id: vault_id.to_string(),
-        shared_with: request.shared_with.clone(),
-        permission: permission.clone(),
-        created_at: Utc::now(),
-    };
-    add_vault_share(share_store, share.clone());
-
-    // Generate the access token
-    let token = ShareToken {
-        token: uuid::Uuid::new_v4().to_string(),
-        share_id: share.share_id.clone(),
-        vault_id: vault_id.to_string(),
-        shared_with: request.shared_with,
-        permission,
-        created_at: Utc::now(),
-        expires_at,
-        revoked: false,
-    };
-    add_share_token(token_store, token.clone());
-
-    let access_url = format!("/api/shared/vaults/{}", token.token);
-
-    // Audit log
-    append_audit_entry(
-        audit_store,
-        "share_token_generated",
-        &vault.owner,
-        serde_json::json!({
-            "vault_id": vault_id,
-            "share_id": share.share_id,
-            "token": token.token,
-            "expires_at": token.expires_at,
-        }),
-    );
-
-    Ok(ShareTokenResponse {
-        share,
-        token,
-        access_url,
-    })
-}
-
-/// POST /vaults/{id}/share/tokens/revoke
-pub fn revoke_share_token_handler(
-    store: &VaultStore,
-    token_store: &ShareTokenStore,
-    audit_store: &AuditStore,
-    vault_id: &str,
-    request: RevokeTokenRequest,
-) -> Result<ShareToken, String> {
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    let token = revoke_share_token(token_store, &request.token)
-        .ok_or_else(|| "Share token not found".to_string())?;
-
-    if token.vault_id != vault_id {
-        return Err("Token does not belong to this vault".to_string());
-    }
-
-    append_audit_entry(
-        audit_store,
-        "share_token_revoked",
-        &vault.owner,
-        serde_json::json!({
-            "vault_id": vault_id,
-            "token": token.token,
-            "share_id": token.share_id,
-        }),
-    );
-
-    Ok(token)
-}
-
-/// GET /vaults/{id}/share/tokens
-pub fn list_share_tokens_handler(
-    token_store: &ShareTokenStore,
-    vault_id: &str,
-) -> Vec<ShareToken> {
-    get_vault_share_tokens(token_store, vault_id)
-}
-
-// ── Read-only access via share token ─────────────────────────────────────────
-
-/// GET /shared/vaults/{token}
-pub fn access_vault_via_share_handler(
-    store: &VaultStore,
-    token_store: &ShareTokenStore,
-    audit_store: &AuditStore,
-    token: &str,
-) -> Result<Vault, String> {
-    let share_token = validate_share_token(token_store, token)?;
-
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(&share_token.vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    append_audit_entry(
-        audit_store,
-        "vault_accessed_via_share",
-        &share_token.shared_with,
-        serde_json::json!({
-            "vault_id": share_token.vault_id,
-            "token": token,
-        }),
-    );
-
-    Ok(vault)
-}
-
-/// GET /shared/vaults/{token}/export
-pub fn access_vault_export_via_share_handler(
-    store: &VaultStore,
-    event_store: &EventStore,
-    audit_store: &AuditStore,
-    token_store: &ShareTokenStore,
-    token: &str,
-    format: &str,
-) -> Result<String, String> {
-    let share_token = validate_share_token(token_store, token)?;
-
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(&share_token.vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    let history = get_vault_history(event_store, &share_token.vault_id);
-    let audit_log = get_vault_audit_log(audit_store, &share_token.vault_id);
-
-    let export_data = ExportData {
-        vault,
-        history,
-        audit_log,
-    };
-
-    append_audit_entry(
-        audit_store,
-        "vault_exported_via_share",
-        &share_token.shared_with,
-        serde_json::json!({
-            "vault_id": share_token.vault_id,
-            "token": token,
-            "format": format,
-        }),
-    );
-
-    match format {
-        "json" => Ok(serde_json::to_string_pretty(&export_data)
-            .map_err(|e| e.to_string())?),
-        "csv" => export_to_csv(&export_data),
-        _ => Err("Unsupported format".to_string()),
-    }
-}
-
-fn validate_share_token(token_store: &ShareTokenStore, token: &str) -> Result<ShareToken, String> {
-    let share_token = get_share_token(token_store, token)
-        .ok_or_else(|| "Invalid share token".to_string())?;
-
-    if share_token.revoked {
-        return Err("Share token has been revoked".to_string());
-    }
-
-    if Utc::now() > share_token.expires_at {
-        return Err("Share token has expired".to_string());
-    }
-
-    if share_token.permission != SharePermission::ViewOnly {
-        return Err("Share token does not have ViewOnly permission".to_string());
-    }
-
-    Ok(share_token)
-}
-
-/// GET /vaults/{id}/shares  (convenience accessor used in tests)
-pub fn list_vault_shares_handler(
-    share_store: &ShareStore,
-    vault_id: &str,
-) -> Vec<VaultShare> {
-    get_vault_shares(share_store, vault_id)
-}
-
-// ── Task 4: Notification Preferences ─────────────────────────────────────────
-
-/// POST /vaults/{id}/notification-preferences
-///
-/// Instrumented with an OpenTelemetry span (Issue #1145).
-#[instrument(skip(store, notif_store), fields(vault_id = %vault_id))]
-pub fn set_notification_preferences_handler(
-    store: &VaultStore,
-    notif_store: &NotificationStore,
-    vault_id: &str,
-    request: NotificationPreferencesRequest,
-) -> Result<VaultNotificationPreferences, String> {
-    if request.channels.is_empty() {
-        return Err("At least one notification channel is required".to_string());
-    }
-
-    // Verify vault exists
-    store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .ok_or_else(|| "Vault not found".to_string())?;
-
-    // Map HTTP channels into legacy boolean flags.
-    let preferred = request.channels.first().cloned();
-    let fallback = request.channels.get(1).cloned();
-    let prefs = NotificationPreferences {
-        owner: vault_id.to_string(),
-        expiry_warning_enabled: request
-            .channels
-            .iter()
-            .any(|c| matches!(c, NotificationChannel::Email | NotificationChannel::Push)),
-        check_in_reminder_enabled: request
-            .channels
-            .iter()
-            .any(|c| matches!(c, NotificationChannel::Sms | NotificationChannel::Push)),
-        vault_released_enabled: request
-            .channels
-            .iter()
-            .any(|c| matches!(c, NotificationChannel::Push)),
-        warning_hours_before: 24,
-        locale: None,
-        preferred_channel: preferred,
-        fallback_channel: fallback,
-        unsubscribed: false,
-    };
-
-    set_notification_preferences(notif_store, prefs.clone());
-    Ok(prefs)
-}
-
-/// GET /vaults/{id}/notification-preferences
-pub fn get_notification_preferences_handler(
-    notif_store: &NotificationStore,
-    vault_id: &str,
-) -> Option<VaultNotificationPreferences> {
-    get_notification_preferences(notif_store, vault_id)
 }
 
 // ── Issue #1099: Vault Health Score ──────────────────────────────────────────
@@ -925,9 +496,9 @@ pub fn get_vault_health_handler(
     store: &VaultStore,
     cache: &HealthCache,
     vault_id: &str,
-    /// Streak value sourced from external context (0 if unavailable).
+    // Streak value sourced from external context (0 if unavailable).
     streak: u32,
-    /// Number of registered passkeys (0 if unavailable).
+    // Number of registered passkeys (0 if unavailable).
     passkey_count: u32,
 ) -> Result<VaultHealthResponse, String> {
     // Return cached result if still fresh
@@ -1039,7 +610,7 @@ fn check_bulk_rate_limit(rate_store: &BulkRateStore, user_id: &str) -> bool {
         window_start: now,
     });
     // Reset window if expired
-    if (now - entry.window_start).num_seconds() >= BULK_RATE_WINDOW_SECS {
+    if now.signed_duration_since(entry.window_start).num_seconds() >= BULK_RATE_WINDOW_SECS {
         entry.count = 0;
         entry.window_start = now;
     }
@@ -1181,7 +752,16 @@ mod tests {
         };
         store.lock().unwrap().insert("v1".to_string(), vault);
 
-        let result = export_vaults_handler(&store, &event_store, &audit_store, "v1", "json", None, None, None);
+        let result = export_vaults_handler(
+            &store,
+            &event_store,
+            &audit_store,
+            "v1",
+            "json",
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok());
         let json_str = result.unwrap();
         assert!(json_str.contains("v1"));
@@ -1206,79 +786,19 @@ mod tests {
         };
         store.lock().unwrap().insert("v1".to_string(), vault);
 
-        let result = export_vaults_handler(&store, &event_store, &audit_store, "v1", "csv", None, None, None);
+        let result = export_vaults_handler(
+            &store,
+            &event_store,
+            &audit_store,
+            "v1",
+            "csv",
+            None,
+            None,
+            None,
+        );
         assert!(result.is_ok());
         let csv_str = result.unwrap();
         assert!(csv_str.contains("v1"));
-    }
-
-    #[test]
-    fn test_generate_compliance_report() {
-        let store = create_vault_store();
-        let event_store = create_event_store();
-
-        let vault = Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 1000,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(100000),
-        };
-        store.lock().unwrap().insert("v1".to_string(), vault);
-
-        let result = generate_compliance_report(&store, &event_store, "v1");
-        assert!(result.is_ok());
-        let report = result.unwrap();
-        assert_eq!(report.vault_id, "v1");
-        assert_eq!(report.owner, "owner1");
-        assert_eq!(report.current_balance, 1000);
-    }
-
-    #[test]
-    fn test_export_compliance_report_json() {
-        let report = ComplianceReport {
-            vault_id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            report_generated_at: Utc::now(),
-            fund_movements: vec![],
-            beneficiary_changes: vec![],
-            ttl_history: vec![],
-            total_deposits: 1000,
-            total_withdrawals: 0,
-            current_balance: 1000,
-        };
-
-        let result = export_compliance_report(&report, "json");
-        assert!(result.is_ok());
-        let json_str = result.unwrap();
-        assert!(json_str.contains("v1"));
-    }
-
-    #[test]
-    fn test_export_compliance_report_pdf() {
-        let report = ComplianceReport {
-            vault_id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            report_generated_at: Utc::now(),
-            fund_movements: vec![],
-            beneficiary_changes: vec![],
-            ttl_history: vec![],
-            total_deposits: 1000,
-            total_withdrawals: 0,
-            current_balance: 1000,
-        };
-
-        let result = export_compliance_report(&report, "pdf");
-        assert!(result.is_ok());
-        let pdf_str = result.unwrap();
-        assert!(pdf_str.contains("COMPLIANCE REPORT"));
-        assert!(pdf_str.contains("v1"));
     }
 
     // ── Task 1: Analytics tests ───────────────────────────────────────────────
@@ -1297,29 +817,35 @@ mod tests {
     fn test_get_vault_analytics_counts() {
         let store = create_vault_store();
         for i in 0..3 {
-            store.lock().unwrap().insert(format!("v{}", i), Vault {
-                id: format!("v{}", i),
+            store.lock().unwrap().insert(
+                format!("v{}", i),
+                Vault {
+                    id: format!("v{}", i),
+                    owner: "owner1".to_string(),
+                    beneficiary: "ben1".to_string(),
+                    balance: 100,
+                    check_in_interval: 86400,
+                    last_check_in: Utc::now(),
+                    created_at: Utc::now(),
+                    status: VaultStatus::Active,
+                    ttl_remaining: Some(86400),
+                },
+            );
+        }
+        store.lock().unwrap().insert(
+            "vr".to_string(),
+            Vault {
+                id: "vr".to_string(),
                 owner: "owner1".to_string(),
                 beneficiary: "ben1".to_string(),
-                balance: 100,
+                balance: 0,
                 check_in_interval: 86400,
                 last_check_in: Utc::now(),
                 created_at: Utc::now(),
-                status: VaultStatus::Active,
-                ttl_remaining: Some(86400),
-            });
-        }
-        store.lock().unwrap().insert("vr".to_string(), Vault {
-            id: "vr".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 0,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Released,
-            ttl_remaining: None,
-        });
+                status: VaultStatus::Released,
+                ttl_remaining: None,
+            },
+        );
 
         let analytics = get_vault_analytics_handler(&store);
         assert_eq!(analytics.total_vaults, 4);
@@ -1330,17 +856,20 @@ mod tests {
     #[test]
     fn test_get_vault_analytics_time_series() {
         let store = create_vault_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "o".to_string(),
-            beneficiary: "b".to_string(),
-            balance: 0,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
+        store.lock().unwrap().insert(
+            "v1".to_string(),
+            Vault {
+                id: "v1".to_string(),
+                owner: "o".to_string(),
+                beneficiary: "b".to_string(),
+                balance: 0,
+                check_in_interval: 86400,
+                last_check_in: Utc::now(),
+                created_at: Utc::now(),
+                status: VaultStatus::Active,
+                ttl_remaining: Some(86400),
+            },
+        );
         let analytics = get_vault_analytics_handler(&store);
         assert_eq!(analytics.time_series.len(), 1);
         assert_eq!(analytics.time_series[0].vaults_created, 1);
@@ -1352,17 +881,20 @@ mod tests {
     fn test_backup_vault_creates_backup() {
         let store = create_vault_store();
         let backup_store = create_backup_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 500,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
+        store.lock().unwrap().insert(
+            "v1".to_string(),
+            Vault {
+                id: "v1".to_string(),
+                owner: "owner1".to_string(),
+                beneficiary: "ben1".to_string(),
+                balance: 500,
+                check_in_interval: 86400,
+                last_check_in: Utc::now(),
+                created_at: Utc::now(),
+                status: VaultStatus::Active,
+                ttl_remaining: Some(86400),
+            },
+        );
 
         let result = backup_vault_handler(&store, &backup_store, "v1");
         assert!(result.is_ok());
@@ -1383,17 +915,20 @@ mod tests {
     fn test_restore_vault_from_backup() {
         let store = create_vault_store();
         let backup_store = create_backup_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 999,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
+        store.lock().unwrap().insert(
+            "v1".to_string(),
+            Vault {
+                id: "v1".to_string(),
+                owner: "owner1".to_string(),
+                beneficiary: "ben1".to_string(),
+                balance: 999,
+                check_in_interval: 86400,
+                last_check_in: Utc::now(),
+                created_at: Utc::now(),
+                status: VaultStatus::Active,
+                ttl_remaining: Some(86400),
+            },
+        );
 
         let backup = backup_vault_handler(&store, &backup_store, "v1").unwrap();
 
@@ -1421,307 +956,6 @@ mod tests {
         assert!(restore_vault_handler(&store, &backup_store, &req).is_err());
     }
 
-    // ── Task 3: Sharing tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_share_vault_creates_share() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 0,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        let req = ShareRequest {
-            shared_with: "trusted@example.com".to_string(),
-            permission: SharePermission::ViewOnly,
-        };
-        let result = share_vault_handler(&store, &share_store, &token_store, &audit_store, "v1", req);
-        assert!(result.is_ok());
-        let share = result.unwrap();
-        assert_eq!(share.vault_id, "v1");
-        assert_eq!(share.permission, SharePermission::ViewOnly);
-
-        // Verify audit entry created
-        assert!(audit_store.lock().unwrap().iter().any(|e| e.action == "vault_shared"));
-    }
-
-    #[test]
-    fn test_share_vault_not_found() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        let req = ShareRequest {
-            shared_with: "someone".to_string(),
-            permission: SharePermission::Edit,
-        };
-        assert!(share_vault_handler(&store, &share_store, &token_store, &audit_store, "missing", req).is_err());
-    }
-
-    #[test]
-    fn test_list_vault_shares() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 0,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        share_vault_handler(&store, &share_store, &token_store, &audit_store, "v1", ShareRequest {
-            shared_with: "a@example.com".to_string(),
-            permission: SharePermission::ViewOnly,
-        }).unwrap();
-        share_vault_handler(&store, &share_store, &token_store, &audit_store, "v1", ShareRequest {
-            shared_with: "b@example.com".to_string(),
-            permission: SharePermission::Admin,
-        }).unwrap();
-
-        let shares = list_vault_shares_handler(&share_store, "v1");
-        assert_eq!(shares.len(), 2);
-    }
-
-    #[test]
-    fn test_share_permission_levels() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 0,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        for perm in [SharePermission::ViewOnly, SharePermission::Edit, SharePermission::Admin] {
-            let req = ShareRequest { shared_with: "x".to_string(), permission: perm.clone() };
-            let share = share_vault_handler(&store, &share_store, &token_store, &audit_store, "v1", req).unwrap();
-            assert_eq!(share.permission, perm);
-        }
-    }
-
-    // ── Share token handler tests (#966) ──────────────────────────────────────
-
-    #[test]
-    fn test_generate_share_token_creates_token() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 1000,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        let result = generate_share_token_handler(
-            &store, &share_store, &token_store, &audit_store, "v1",
-            GenerateTokenRequest {
-                shared_with: "family@example.com".to_string(),
-                permission: None,
-                expiry_seconds: Some(3600),
-            },
-        );
-        assert!(result.is_ok());
-        let resp = result.unwrap();
-        assert_eq!(resp.share.vault_id, "v1");
-        assert_eq!(resp.token.permission, SharePermission::ViewOnly);
-        assert_eq!(resp.token.revoked, false);
-        assert!(resp.access_url.contains(&resp.token.token));
-
-        // Verify persistence
-        let stored = get_share_token(&token_store, &resp.token.token);
-        assert!(stored.is_some());
-        assert!(!stored.unwrap().revoked);
-    }
-
-    #[test]
-    fn test_generate_share_token_vault_not_found() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        let result = generate_share_token_handler(
-            &store, &share_store, &token_store, &audit_store, "nonexistent",
-            GenerateTokenRequest {
-                shared_with: "x@example.com".to_string(),
-                permission: None,
-                expiry_seconds: None,
-            },
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_revoke_share_token_revokes() {
-        let store = create_vault_store();
-        let share_store = create_share_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 100,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        // Seed a token
-        add_share_token(&token_store, ShareToken {
-            token: "tok-1".to_string(),
-            share_id: "s1".to_string(),
-            vault_id: "v1".to_string(),
-            shared_with: "test@example.com".to_string(),
-            permission: SharePermission::ViewOnly,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::days(7),
-            revoked: false,
-        });
-
-        let result = revoke_share_token_handler(
-            &store, &token_store, &audit_store, "v1",
-            RevokeTokenRequest { token: "tok-1".to_string() },
-        );
-        assert!(result.is_ok());
-        let token = result.unwrap();
-        assert!(token.revoked);
-
-        // Verify storage updated
-        let stored = get_share_token(&token_store, "tok-1").unwrap();
-        assert!(stored.revoked);
-    }
-
-    #[test]
-    fn test_revoke_nonexistent_token_returns_error() {
-        let store = create_vault_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 100,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        let result = revoke_share_token_handler(
-            &store, &token_store, &audit_store, "v1",
-            RevokeTokenRequest { token: "does-not-exist".to_string() },
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_revoke_token_wrong_vault_returns_error() {
-        let store = create_vault_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 100,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        add_share_token(&token_store, ShareToken {
-            token: "tok-other".to_string(),
-            share_id: "s1".to_string(),
-            vault_id: "other-vault".to_string(),
-            shared_with: "test@example.com".to_string(),
-            permission: SharePermission::ViewOnly,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::days(7),
-            revoked: false,
-        });
-
-        let result = revoke_share_token_handler(
-            &store, &token_store, &audit_store, "v1",
-            RevokeTokenRequest { token: "tok-other".to_string() },
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_access_vault_via_valid_token() {
-        let store = create_vault_store();
-        let token_store = create_share_token_store();
-        let audit_store = create_audit_store();
-        store.lock().unwrap().insert("v1".to_string(), Vault {
-            id: "v1".to_string(),
-            owner: "owner1".to_string(),
-            beneficiary: "ben1".to_string(),
-            balance: 5000,
-            check_in_interval: 86400,
-            last_check_in: Utc::now(),
-            created_at: Utc::now(),
-            status: VaultStatus::Active,
-            ttl_remaining: Some(86400),
-        });
-
-        add_share_token(&token_store, ShareToken {
-            token: "valid-tok".to_string(),
-            share_id: "s1".to_string(),
-            vault_id: "v1".to_string(),
-            shared_with: "reader@example.com".to_string(),
-            permission: SharePermission::ViewOnly,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::days(7),
-            revoked: false,
-        });
-
-        let result = access_vault_via_share_handler(&store, &token_store, &audit_store, "valid-tok");
-        assert!(result.is_ok());
-        let vault = result.unwrap();
-        assert_eq!(vault.balance, 5000);
-        assert_eq!(vault.owner, "owner1");
-
-        // Audit log written
-        assert!(audit_store.lock().unwrap().iter().any(|e| e.action == "vault_accessed_via_share"));
-    }
-
     // ── Issue #1099: Vault Health Score tests ─────────────────────────────────
 
     fn make_vault_health(id: &str, balance: i128, ttl: Option<u64>, interval: u64) -> Vault {
@@ -1746,8 +980,14 @@ mod tests {
             "v1".to_string(),
             make_vault_health("v1", HEALTH_BALANCE_THRESHOLD, Some(86400), 86400),
         );
-        let r = get_vault_health_handler(&store, &cache, "v1", HEALTH_STREAK_FULL, HEALTH_PASSKEY_FULL)
-            .unwrap();
+        let r = get_vault_health_handler(
+            &store,
+            &cache,
+            "v1",
+            HEALTH_STREAK_FULL,
+            HEALTH_PASSKEY_FULL,
+        )
+        .unwrap();
         assert_eq!(r.score, 100);
         assert_eq!(r.factors.ttl_buffer, 30);
         assert_eq!(r.factors.streak, 20);
@@ -1805,7 +1045,10 @@ mod tests {
         // Mutate vault — cached result should be returned unchanged
         store.lock().unwrap().get_mut("v1").unwrap().balance = 0;
         let r2 = get_vault_health_handler(&store, &cache, "v1", 3, 2).unwrap();
-        assert_eq!(r1.score, r2.score, "cache should shield against store mutation");
+        assert_eq!(
+            r1.score, r2.score,
+            "cache should shield against store mutation"
+        );
     }
 
     #[test]
@@ -1821,7 +1064,10 @@ mod tests {
         // Zero out balance after invalidation
         store.lock().unwrap().get_mut("v1").unwrap().balance = 0;
         let r2 = get_vault_health_handler(&store, &cache, "v1", 5, 3).unwrap();
-        assert!(r2.score < r1.score, "score must drop after balance zeroed and cache cleared");
+        assert!(
+            r2.score < r1.score,
+            "score must drop after balance zeroed and cache cleared"
+        );
     }
 
     // ── Issue #1100: Bulk Vault Summary tests ─────────────────────────────────
@@ -1850,7 +1096,9 @@ mod tests {
         insert_vault(&store, "v1", 100, Some(86400));
         insert_vault(&store, "v2", 200, Some(43200));
 
-        let req = BulkSummaryRequest { vault_ids: vec!["v1".to_string(), "v2".to_string()] };
+        let req = BulkSummaryRequest {
+            vault_ids: vec!["v1".to_string(), "v2".to_string()],
+        };
         let resp = bulk_vault_summary_handler(&store, &rate, &req, "user1").unwrap();
         assert_eq!(resp.summaries.len(), 2);
         assert!(resp.summaries[0].status.is_some());
@@ -1882,10 +1130,16 @@ mod tests {
     fn test_bulk_summary_over_limit_rejected() {
         let store = create_vault_store();
         let rate = create_bulk_rate_store();
-        let ids: Vec<String> = (0..=BULK_SUMMARY_MAX_IDS).map(|i| format!("v{}", i)).collect();
+        let ids: Vec<String> = (0..=BULK_SUMMARY_MAX_IDS)
+            .map(|i| format!("v{}", i))
+            .collect();
         let req = BulkSummaryRequest { vault_ids: ids };
         let result = bulk_vault_summary_handler(&store, &rate, &req, "user1");
-        assert!(result.is_err(), "should reject > {} vault IDs", BULK_SUMMARY_MAX_IDS);
+        assert!(
+            result.is_err(),
+            "should reject > {} vault IDs",
+            BULK_SUMMARY_MAX_IDS
+        );
     }
 
     #[test]
@@ -1918,82 +1172,4 @@ mod tests {
             "user2 should have independent rate limit"
         );
     }
-}
-
-// --- Issue #1143: Vesting Bonus Backend API ---
-
-/// Claim vesting bonus for a vault.
-///
-/// Validates that the caller is the beneficiary, records an audit log entry,
-/// and returns a mock transaction hash for the claim.
-#[instrument(skip(db, headers), fields(vault_id = %vault_id))]
-pub fn claim_vesting_bonus_handler(
-    db: Arc<Db>,
-    headers: HeaderMap,
-    vault_id: &str,
-    req: crate::models::ClaimBonusRequest,
-) -> Result<crate::models::ClaimBonusResponse, String> {
-    let vault = db
-        .get_vault(vault_id)
-        .ok_or_else(|| format!("Vault {} not found", vault_id))?;
-
-    if vault.beneficiary != req.beneficiary {
-        return Err("Caller is not the beneficiary for this vault".to_string());
-    }
-
-    let bonus_config = db
-        .get_vesting_bonus(vault_id)
-        .map_err(|e| format!("Database error: {}", e))?
-        .ok_or_else(|| "No vesting bonus configured for this vault".to_string())?;
-
-    let base_amount = vault.balance / 2;
-    let bonus_amount = (base_amount * bonus_config.bonus_bps as i128) / 10_000;
-    let claimed_amount = base_amount + bonus_amount;
-
-    let tx_hash = uuid::Uuid::new_v4().to_string();
-
-    crate::audit::log_state_modification(
-        &db,
-        "vesting_bonus_claim",
-        &format!("/api/vaults/{}/vesting/claim-bonus", vault_id),
-        "success",
-        &headers,
-        Some(serde_json::json!({
-            "vault_id": vault_id,
-            "beneficiary": req.beneficiary,
-            "bonus_bps": bonus_config.bonus_bps,
-            "claimed_amount": claimed_amount,
-            "bonus_amount": bonus_amount,
-            "transaction_hash": tx_hash,
-        })),
-    );
-
-    Ok(crate::models::ClaimBonusResponse {
-        vault_id: vault_id.to_string(),
-        claimed_amount,
-        bonus_amount,
-        transaction_hash: tx_hash,
-        claimed_at: Utc::now(),
-    })
-}
-
-/// Retrieve the vesting bonus configuration for a vault.
-pub fn get_vesting_bonus_handler(
-    db: Arc<Db>,
-    vault_id: &str,
-) -> Result<crate::models::VestingBonusResponse, String> {
-    let _vault = db
-        .get_vault(vault_id)
-        .ok_or_else(|| format!("Vault {} not found", vault_id))?;
-
-    let bonus_config = db
-        .get_vesting_bonus(vault_id)
-        .map_err(|e| format!("Database error: {}", e))?;
-
-    Ok(crate::models::VestingBonusResponse {
-        vault_id: vault_id.to_string(),
-        configured: bonus_config.is_some(),
-        bonus_bps: bonus_config.as_ref().map(|c| c.bonus_bps),
-        on_time_window_seconds: bonus_config.as_ref().map(|c| c.on_time_window_seconds),
-    })
 }

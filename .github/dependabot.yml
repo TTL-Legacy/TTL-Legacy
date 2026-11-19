@@ -16,6 +16,14 @@ updates:
       prefix: "chore(deps):"
     allow:
       - dependency-type: "all"
+    groups:
+      patch-minor:
+        patterns:
+          - "patch"
+          - "minor"
+      major:
+        patterns:
+          - "major"
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -31,3 +39,11 @@ updates:
       - ci
     commit-message:
       prefix: "ci(deps):"
+    groups:
+      patch-minor:
+        patterns:
+          - "patch"
+          - "minor"
+      major:
+        patterns:
+          - "major"

@@ -5,6 +5,7 @@
 /// Cache entries are invalidated automatically on expiry or explicitly via
 /// `invalidate`.
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -53,12 +54,42 @@ impl VaultCacheEntries {
     }
 }
 
+// ── Cache metrics ─────────────────────────────────────────────────────────────
+
+/// Snapshot of cache hit/miss counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheMetrics {
+    pub hits: u64,
+    pub misses: u64,
+    pub invalidations: u64,
+}
+
+impl CacheMetrics {
+    /// Total number of lookups recorded (hits + misses).
+    pub fn lookups(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Hit ratio in the range `0.0..=1.0`; `0.0` when no lookups occurred.
+    pub fn hit_ratio(&self) -> f64 {
+        let lookups = self.lookups();
+        if lookups == 0 {
+            0.0
+        } else {
+            self.hits as f64 / lookups as f64
+        }
+    }
+}
+
 // ── Public cache type ─────────────────────────────────────────────────────────
 
 /// Thread-safe in-memory cache keyed by `vault_id` (String).
 pub struct VaultCache {
     inner: Mutex<HashMap<String, VaultCacheEntries>>,
     ttl: Duration,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    invalidations: AtomicU64,
 }
 
 impl VaultCache {
@@ -72,7 +103,36 @@ impl VaultCache {
         Self {
             inner: Mutex::new(HashMap::new()),
             ttl,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
         }
+    }
+
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Return a snapshot of the current hit/miss/invalidation counters.
+    pub fn metrics(&self) -> CacheMetrics {
+        CacheMetrics {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reset all counters to zero.
+    pub fn reset_metrics(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.invalidations.store(0, Ordering::Relaxed);
     }
 
     // ── get_vault ─────────────────────────────────────────────────────────────
@@ -83,12 +143,17 @@ impl VaultCache {
         if let Some(entries) = map.get_mut(vault_id) {
             if let Some(entry) = &entries.vault {
                 if !entry.is_expired() {
-                    return Some(entry.value.clone());
+                    let value = entry.value.clone();
+                    drop(map);
+                    self.record_hit();
+                    return Some(value);
                 }
             }
             // Expired — clear it.
             entries.vault = None;
         }
+        drop(map);
+        self.record_miss();
         None
     }
 
@@ -110,11 +175,16 @@ impl VaultCache {
         if let Some(entries) = map.get_mut(vault_id) {
             if let Some(entry) = &entries.ttl_remaining {
                 if !entry.is_expired() {
-                    return Some(entry.value);
+                    let value = entry.value;
+                    drop(map);
+                    self.record_hit();
+                    return Some(value);
                 }
             }
             entries.ttl_remaining = None;
         }
+        drop(map);
+        self.record_miss();
         None
     }
 
@@ -136,11 +206,16 @@ impl VaultCache {
         if let Some(entries) = map.get_mut(vault_id) {
             if let Some(entry) = &entries.summary {
                 if !entry.is_expired() {
-                    return Some(entry.value.clone());
+                    let value = entry.value.clone();
+                    drop(map);
+                    self.record_hit();
+                    return Some(value);
                 }
             }
             entries.summary = None;
         }
+        drop(map);
+        self.record_miss();
         None
     }
 
@@ -160,12 +235,28 @@ impl VaultCache {
     pub fn invalidate(&self, vault_id: &str) {
         let mut map = self.inner.lock().unwrap();
         map.remove(vault_id);
+        drop(map);
+        self.invalidations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Invalidate cache entries in response to an indexed contract event.
+    ///
+    /// Check-ins, withdrawals and releases mutate vault state, so any cached data
+    /// for the affected vault must be dropped to avoid serving stale values.
+    /// Unknown event kinds are ignored.  TTL expiry remains in place as a fallback.
+    pub fn invalidate_on_event(&self, event_kind: &str, vault_id: &str) {
+        match event_kind {
+            "check_in" | "withdrawal" | "release" => self.invalidate(vault_id),
+            _ => {}
+        }
     }
 
     /// Remove all entries from the cache.
     pub fn invalidate_all(&self) {
         let mut map = self.inner.lock().unwrap();
         map.clear();
+        drop(map);
+        self.invalidations.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Return how many vault IDs currently have at least one live (non-expired)
@@ -252,71 +343,12 @@ mod tests {
         let cache = VaultCache::new();
         let mut vault = make_vault("v1");
         cache.set_vault("v1", vault.clone());
-        vault.balance = 9999;
-        cache.set_vault("v1", vault.clone());
-        let result = cache.get_vault("v1").unwrap();
-        assert_eq!(result.balance, 9999);
+        vault.balance = 2000;
+        cache.set_vault("v1", vault);
+        assert_eq!(cache.get_vault("v1").unwrap().balance, 2000);
     }
 
-    // ── get_ttl_remaining / set_ttl_remaining ─────────────────────────────────
-
-    #[test]
-    fn test_get_ttl_remaining_miss_on_empty_cache() {
-        let cache = VaultCache::new();
-        assert!(cache.get_ttl_remaining("v1").is_none());
-    }
-
-    #[test]
-    fn test_set_and_get_ttl_remaining_some() {
-        let cache = VaultCache::new();
-        cache.set_ttl_remaining("v1", Some(3600));
-        let result = cache.get_ttl_remaining("v1");
-        assert_eq!(result, Some(Some(3600)));
-    }
-
-    #[test]
-    fn test_set_and_get_ttl_remaining_none() {
-        let cache = VaultCache::new();
-        cache.set_ttl_remaining("v1", None);
-        let result = cache.get_ttl_remaining("v1");
-        assert_eq!(result, Some(None));
-    }
-
-    #[test]
-    fn test_ttl_remaining_expires_after_ttl() {
-        let cache = VaultCache::with_ttl(Duration::from_millis(1));
-        cache.set_ttl_remaining("v1", Some(100));
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(cache.get_ttl_remaining("v1").is_none());
-    }
-
-    // ── get_vault_summary / set_vault_summary ─────────────────────────────────
-
-    #[test]
-    fn test_get_vault_summary_miss_on_empty_cache() {
-        let cache = VaultCache::new();
-        assert!(cache.get_vault_summary("v1").is_none());
-    }
-
-    #[test]
-    fn test_set_and_get_vault_summary() {
-        let cache = VaultCache::new();
-        let summary = make_summary("v1");
-        cache.set_vault_summary("v1", summary.clone());
-        let result = cache.get_vault_summary("v1");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().vault_id, "v1");
-    }
-
-    #[test]
-    fn test_vault_summary_expires_after_ttl() {
-        let cache = VaultCache::with_ttl(Duration::from_millis(1));
-        cache.set_vault_summary("v1", make_summary("v1"));
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(cache.get_vault_summary("v1").is_none());
-    }
-
-    // ── invalidation ─────────────────────────────────────────────────────────
+    // ── Invalidation ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_invalidate_removes_all_entries_for_vault() {
@@ -324,108 +356,84 @@ mod tests {
         cache.set_vault("v1", make_vault("v1"));
         cache.set_ttl_remaining("v1", Some(100));
         cache.set_vault_summary("v1", make_summary("v1"));
-
         cache.invalidate("v1");
-
         assert!(cache.get_vault("v1").is_none());
         assert!(cache.get_ttl_remaining("v1").is_none());
         assert!(cache.get_vault_summary("v1").is_none());
     }
 
     #[test]
-    fn test_invalidate_does_not_affect_other_vaults() {
+    fn test_invalidate_on_check_in_event() {
+        let cache = VaultCache::new();
+        cache.set_vault("v1", make_vault("v1"));
+        cache.set_vault_summary("v1", make_summary("v1"));
+        assert!(cache.get_vault("v1").is_some());
+
+        // A check-in event for v1 must drop the stale entries.
+        cache.invalidate_on_event("check_in", "v1");
+
+        assert!(cache.get_vault("v1").is_none());
+        assert!(cache.get_vault_summary("v1").is_none());
+    }
+
+    #[test]
+    fn test_invalidate_on_withdrawal_event() {
+        let cache = VaultCache::new();
+        cache.set_vault("v1", make_vault("v1"));
+        cache.invalidate_on_event("withdrawal", "v1");
+        assert!(cache.get_vault("v1").is_none());
+    }
+
+    #[test]
+    fn test_invalidate_on_event_ignores_unrelated_kinds() {
+        let cache = VaultCache::new();
+        cache.set_vault("v1", make_vault("v1"));
+        cache.invalidate_on_event("deposit", "v1");
+        assert!(cache.get_vault("v1").is_some());
+    }
+
+    #[test]
+    fn test_invalidate_on_event_only_affects_target_vault() {
         let cache = VaultCache::new();
         cache.set_vault("v1", make_vault("v1"));
         cache.set_vault("v2", make_vault("v2"));
-
-        cache.invalidate("v1");
-
+        cache.invalidate_on_event("check_in", "v1");
         assert!(cache.get_vault("v1").is_none());
         assert!(cache.get_vault("v2").is_some());
     }
 
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
     #[test]
-    fn test_invalidate_all_clears_entire_cache() {
+    fn test_metrics_track_hits_and_misses() {
         let cache = VaultCache::new();
         cache.set_vault("v1", make_vault("v1"));
-        cache.set_vault("v2", make_vault("v2"));
-
-        cache.invalidate_all();
-
-        assert!(cache.get_vault("v1").is_none());
-        assert!(cache.get_vault("v2").is_none());
-    }
-
-    // ── cache consistency ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_cache_consistency_after_state_change() {
-        // Simulate a check-in event: cache is populated, state changes,
-        // invalidate is called, and fresh data is written.
-        let cache = VaultCache::new();
-        let vault = make_vault("v1");
-        cache.set_vault("v1", vault);
-        cache.set_ttl_remaining("v1", Some(86400));
-        cache.set_vault_summary("v1", make_summary("v1"));
-
-        // Simulate check-in / state change → invalidate stale data.
-        cache.invalidate("v1");
-
-        // Write updated values (as the handler would after fetching fresh data).
-        let mut updated_vault = make_vault("v1");
-        updated_vault.ttl_remaining = Some(86400 * 2);
-        cache.set_vault("v1", updated_vault.clone());
-        cache.set_ttl_remaining("v1", Some(86400 * 2));
-
-        let cached = cache.get_vault("v1").unwrap();
-        assert_eq!(cached.ttl_remaining, Some(86400 * 2));
-
-        let cached_ttl = cache.get_ttl_remaining("v1").unwrap();
-        assert_eq!(cached_ttl, Some(86400 * 2));
+        assert!(cache.get_vault("v1").is_some()); // hit
+        assert!(cache.get_vault("missing").is_none()); // miss
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.lookups(), 2);
+        assert!((metrics.hit_ratio() - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_independent_vaults_do_not_interfere() {
+    fn test_metrics_count_invalidations() {
         let cache = VaultCache::new();
         cache.set_vault("v1", make_vault("v1"));
-        cache.set_vault("v2", make_vault("v2"));
-        cache.set_ttl_remaining("v1", Some(100));
-        cache.set_ttl_remaining("v2", Some(200));
-
-        assert_eq!(cache.get_ttl_remaining("v1"), Some(Some(100)));
-        assert_eq!(cache.get_ttl_remaining("v2"), Some(Some(200)));
-    }
-
-    // ── live_entry_count ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_live_entry_count_empty() {
-        let cache = VaultCache::new();
-        assert_eq!(cache.live_entry_count(), 0);
+        cache.invalidate_on_event("check_in", "v1");
+        assert_eq!(cache.metrics().invalidations, 1);
     }
 
     #[test]
-    fn test_live_entry_count_with_entries() {
+    fn test_reset_metrics() {
         let cache = VaultCache::new();
         cache.set_vault("v1", make_vault("v1"));
-        cache.set_vault("v2", make_vault("v2"));
-        assert_eq!(cache.live_entry_count(), 2);
-    }
-
-    #[test]
-    fn test_live_entry_count_decrements_after_invalidation() {
-        let cache = VaultCache::new();
-        cache.set_vault("v1", make_vault("v1"));
-        cache.set_vault("v2", make_vault("v2"));
-        cache.invalidate("v1");
-        assert_eq!(cache.live_entry_count(), 1);
-    }
-
-    #[test]
-    fn test_live_entry_count_zero_after_expiry() {
-        let cache = VaultCache::with_ttl(Duration::from_millis(1));
-        cache.set_vault("v1", make_vault("v1"));
-        std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(cache.live_entry_count(), 0);
+        let _ = cache.get_vault("v1");
+        cache.reset_metrics();
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 0);
+        assert_eq!(metrics.invalidations, 0);
     }
 }

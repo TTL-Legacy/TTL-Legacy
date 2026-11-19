@@ -67,6 +67,15 @@ approve_multisig(vault_id, proposal_id, caller) -> Result<(), ContractError>
 reject_multisig(vault_id, proposal_id, caller) -> Result<(), ContractError>
 ```
 
+### Cancel
+```rust
+cancel_multisig_proposal(vault_id, proposal_id, caller) -> Result<(), ContractError>
+```
+
+The vault owner, who creates proposals, may cancel a pending proposal. Cancelled
+proposals remain available for status/audit queries but are removed from the
+open-proposal list.
+
 ### Execute
 ```rust
 execute_multisig(vault_id, proposal_id, caller) -> Result<(), ContractError>
@@ -77,6 +86,7 @@ execute_multisig(vault_id, proposal_id, caller) -> Result<(), ContractError>
 ```rust
 get_multisig_proposal(vault_id, proposal_id) -> Option<MultiSigProposal>
 get_multisig_proposal_count(vault_id) -> u64
+list_open_proposals(vault_id) -> Vec<u64>
 ```
 
 ### Payload Helpers
@@ -95,8 +105,12 @@ encode_u64_payload(value: u64) -> Bytes     // for UpdateCheckInInterval
 | `Executed` | Operation completed |
 | `Rejected` | Owner rejected the proposal |
 | `Expired` | Not executed within 7 days |
+| `Cancelled` | Owner cancelled the pending proposal |
 
-Proposals expire **7 days** after creation. Expired proposals cannot be approved or executed.
+Proposals expire **7 days** after creation. Expired proposals are pruned when
+listed, approved, or executed. An approval or execution call that discovers an
+expired proposal returns success after pruning and emits `ms_exp`; it does not
+approve or execute the proposal.
 
 ## Veto Workflow
 

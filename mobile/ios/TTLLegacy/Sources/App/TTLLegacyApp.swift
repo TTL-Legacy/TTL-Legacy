@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct TTLLegacyApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     @StateObject private var authStore = AuthStore()
     @StateObject private var vaultStore = VaultStore()
 

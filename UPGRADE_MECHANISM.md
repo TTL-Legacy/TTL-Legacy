@@ -154,6 +154,76 @@ pub enum ContractError {
 1. Retrieve pending upgrade from PendingUpgrade key
 2. Return Some(upgrade) if exists, None otherwise
 
+## Storage Compatibility Dry-Run Check - Issue #1520
+
+Contract upgrades can silently break storage layout. Before executing an upgrade,
+run a dry-run compatibility check that compares the storage key schema of the
+currently deployed version against the schema expected by the new version.
+
+### Storage Key Schema Snapshot
+
+Each contract version declares a snapshot of its storage key schema. The snapshot
+is a stable, ordered list of the `DataKey` variants (and their value types) that
+the version reads or writes. It is stored per version so that a previous-version
+snapshot can be compared against the incoming version.
+
+```rust
+/// Issue #1520: storage key schema snapshot for a single contract version.
+#[contracttype]
+#[derive(Clone)]
+pub struct StorageSchemaSnapshot {
+    /// Semantic version of the contract that produced this snapshot.
+    pub version: u32,
+    /// Ordered list of storage key names (DataKey variants) in use.
+    pub keys: Vec<Symbol>,
+}
+```
+
+Snapshots are keyed by version so the dry-run can load the previous version's
+schema and diff it against the new one:
+
+```rust
+enum DataKey {
+    // ...
+    StorageSchema(u32),  // Issue #1520: schema snapshot per contract version
+}
+```
+
+### Dry-Run Compatibility Check
+
+#### check_upgrade_compatibility(env, new_version)
+**Purpose**: Dry-run the storage compatibility of a proposed upgrade without
+mutating contract state.
+
+**Authorization**: Public (read-only, no state mutation)
+
+**Parameters**:
+- `env`: Soroban environment
+- `new_version`: u32 - version of the incoming contract
+
+**Returns**: Result<(), ContractError>
+
+**Errors**:
+- `StorageSchemaMissing` - No snapshot recorded for the previous or new version
+- `StorageIncompatible` - New version drops or reorders keys the previous version persisted
+
+**Behavior**:
+1. Load the previous version's `StorageSchemaSnapshot`
+2. Load the new version's `StorageSchemaSnapshot`
+3. Verify every key present in the previous snapshot still exists in the new one
+   (additive changes are allowed; removals and renames are rejected)
+4. Return `Ok(())` if compatible, otherwise `StorageIncompatible`
+5. Perform no writes - this is a dry run only
+
+### Test Coverage
+
+- [x] Snapshot storage key schema per contract version
+- [x] Deserialize previous-version state and confirm it still loads under the new schema
+- [x] Additive key changes pass the dry-run check
+- [x] Removed/renamed keys fail with `StorageIncompatible`
+- [x] Missing snapshot fails with `StorageSchemaMissing`
+- [x] Dry-run performs no state mutation
+
 ## Test Coverage
 
 ### Happy Path
@@ -232,6 +302,11 @@ All upgrade operations are logged with:
    - Transparent history of upgrades
    - Forensic capability
 
+6. **Storage Compatibility Dry-Run**: Upgrades are checked against the previous
+   version's storage key schema before execution
+   - Catches storage layout breaks before they reach production
+   - Additive changes are permitted; removals/renames are rejected
+
 ## Implementation Notes
 
 - Uses Soroban's `env.deployer().update_current_contract_wasm()` for actual upgrade
@@ -239,3 +314,4 @@ All upgrade operations are logged with:
 - Pending upgrade keys are instance-level for efficiency
 - All times are ledger timestamps (UTC seconds on Stellar)
 - TTL extended on all operations to maintain persistence
+- Storage schema snapshots are versioned so the dry-run can diff previous vs new

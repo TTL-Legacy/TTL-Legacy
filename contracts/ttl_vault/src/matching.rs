@@ -207,4 +207,98 @@ mod tests {
 
         assert!(has_topic(&env, MATCH_SET_TOPIC));
     }
+
+    #[test]
+    fn zero_match_bps_produces_no_match() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let partner = Address::generate(&env);
+
+        set_match(&env, &admin, alice.clone(), partner.clone(), 0);
+
+        let mut base = Map::new(&env);
+        base.set(alice, 1_000);
+
+        let matched = compute_matched_amounts(&env, &base);
+
+        assert_eq!(matched.get(partner).unwrap_or(0), 0);
+        assert!(!has_topic(&env, MATCHED_DISTRIBUTION_TOPIC));
+    }
+
+    #[test]
+    fn zero_matched_amount_produces_no_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let partner = Address::generate(&env);
+
+        // 1 bps of 1 unit truncates to 0, so no distribution event is emitted.
+        set_match(&env, &admin, alice.clone(), partner.clone(), 1);
+
+        let mut base = Map::new(&env);
+        base.set(alice, 1);
+
+        let matched = compute_matched_amounts(&env, &base);
+
+        assert_eq!(matched.get(partner).unwrap_or(0), 0);
+        assert!(!has_topic(&env, MATCHED_DISTRIBUTION_TOPIC));
+    }
+
+    #[test]
+    fn accumulates_multiple_sources_for_same_beneficiary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let charity = Address::generate(&env);
+
+        set_match(&env, &admin, alice.clone(), charity.clone(), 10_000);
+        set_match(&env, &admin, bob.clone(), charity.clone(), 5_000);
+
+        let mut base = Map::new(&env);
+        base.set(alice, 1_000);
+        base.set(bob, 2_000);
+
+        let matched = compute_matched_amounts(&env, &base);
+
+        assert_eq!(matched.get(charity).unwrap(), 2_000);
+    }
+
+    #[test]
+    fn emits_matched_distribution_event_with_payload() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let partner = Address::generate(&env);
+
+        set_match(&env, &admin, alice.clone(), partner.clone(), 5_000);
+
+        let mut base = Map::new(&env);
+        base.set(alice.clone(), 2_000);
+
+        let matched = compute_matched_amounts(&env, &base);
+        assert_eq!(matched.get(partner.clone()).unwrap(), 1_000);
+
+        let mut found = false;
+        for event in env.events().all().iter() {
+            let topics: soroban_sdk::Vec<Val> = event.1.clone().into_val(&env);
+            let topic: Option<soroban_sdk::Symbol> = topics
+                .get(0)
+                .and_then(|topic| topic.try_into_val(&env).ok());
+            if topic == Some(MATCHED_DISTRIBUTION_TOPIC) {
+                let payload: MatchedDistributionEvent = event.2.clone().try_into_val(&env).unwrap();
+                assert_eq!(payload.source, alice);
+                assert_eq!(payload.matched, partner);
+                assert_eq!(payload.source_amount, 2_000);
+                assert_eq!(payload.matched_amount, 1_000);
+                found = true;
+            }
+        }
+        assert!(found, "expected MatchedDistribution event");
+    }
 }

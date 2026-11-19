@@ -87,3 +87,46 @@ WASM size: 306 KB (threshold: 256 KB)
 ```
 
 Action: Apply one or more optimizations above, then re-push.
+
+## zk_verifier Contract Budget
+
+### Threshold
+
+**256 KB** — Maximum recommended WASM size for the `zk_verifier` contract
+
+### Rationale
+
+- **Deployment Cost**: Soroban charges per byte uploaded; every kilobyte increases deployment fees for the verifier contract
+- **Instruction Budget**: Verification paths are invoked frequently; a smaller binary keeps upload and execution costs predictable
+- **Performance**: Smaller WASM loads faster and uses less memory during proof verification
+- **Parity with Vault**: Keeping both contracts under the same threshold simplifies monitoring and keeps CI checks consistent
+
+### Monitoring
+
+The CI pipeline checks the `zk_verifier` WASM size on every push and pull request:
+
+```bash
+cargo build --package zk_verifier --target wasm32-unknown-unknown --release
+stat -c%s target/wasm32-unknown-unknown/release/zk_verifier.wasm
+```
+
+If the size exceeds 256 KB, the CI build will fail with a clear message indicating the overage.
+
+### Optimization Strategies
+
+The same optimizations described above apply to `contracts/zk_verifier`:
+
+- Enable LTO and `codegen-units = 1` in `contracts/zk_verifier/Cargo.toml`
+- Audit dependencies with `cargo tree --package zk_verifier --duplicates`
+- Ensure `strip = true` in the release profile
+- Run `wasm-opt -Oz` on the built artifact
+- Refactor large verification functions into smaller, modular components
+
+### CI Failure Example
+
+```
+❌ zk_verifier WASM size exceeds threshold by 50 KB
+WASM size: 306 KB (threshold: 256 KB)
+```
+
+Action: Apply one or more optimizations above, then re-push.

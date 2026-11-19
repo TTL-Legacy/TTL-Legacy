@@ -67,6 +67,55 @@ final class KeychainServiceTests: XCTestCase {
         KeychainService.shared.deleteToken()
         XCTAssertNil(KeychainService.shared.loadToken())
     }
+
+    // MARK: - Accessibility (#1597)
+
+    func test_addQuery_usesThisDeviceOnlyAndDisablesSync() {
+        let query = KeychainService.addQuery(forKey: "k", data: Data("v".utf8))
+        XCTAssertEqual(query[kSecAttrAccessible] as? String,
+                       kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        XCTAssertEqual(query[kSecAttrSynchronizable] as? Bool, false)
+    }
+
+    func test_savedToken_isStoredWithThisDeviceOnlyAccessibility() {
+        KeychainService.shared.saveToken("token")
+        defer { KeychainService.shared.deleteToken() }
+        assertThisDeviceOnly(forKey: KeychainService.Key.token)
+    }
+
+    func test_savedPasskeyCredentialID_isStoredWithThisDeviceOnlyAccessibility() {
+        KeychainService.shared.saveCredentialID("cred-id")
+        defer { SecItemDelete(KeychainService.identityQuery(forKey: KeychainService.Key.credentialID) as CFDictionary) }
+        assertThisDeviceOnly(forKey: KeychainService.Key.credentialID)
+        XCTAssertEqual(KeychainService.shared.loadCredentialID(), "cred-id")
+    }
+
+    func test_save_replacesLegacyItemWithWeakerAccessibility() {
+        let key = KeychainService.Key.token
+        SecItemDelete(KeychainService.identityQuery(forKey: key) as CFDictionary)
+        let legacy: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrAccount: key,
+            kSecValueData: Data("legacy".utf8),
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        XCTAssertEqual(SecItemAdd(legacy as CFDictionary, nil), errSecSuccess)
+        defer { KeychainService.shared.deleteToken() }
+
+        KeychainService.shared.saveToken("upgraded")
+
+        XCTAssertEqual(KeychainService.shared.loadToken(), "upgraded")
+        assertThisDeviceOnly(forKey: key)
+    }
+
+    private func assertThisDeviceOnly(forKey key: String, file: StaticString = #filePath, line: UInt = #line) {
+        let attrs = KeychainService.shared.attributes(forKey: key)
+        XCTAssertNotNil(attrs, "No keychain item for \(key)", file: file, line: line)
+        XCTAssertEqual(attrs?[kSecAttrAccessible as String] as? String,
+                       kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String, file: file, line: line)
+        let sync = attrs?[kSecAttrSynchronizable as String] as? Bool ?? false
+        XCTAssertFalse(sync, file: file, line: line)
+    }
 }
 
 final class OfflineCacheTests: XCTestCase {
