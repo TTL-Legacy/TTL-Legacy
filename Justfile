@@ -43,6 +43,11 @@ fmt:
 audit:
     cargo audit --deny warnings
 
+# Audit all `pub fn` definitions for require_auth / admin-check coverage (issue #1507)
+auth-audit:
+    @echo "Auditing admin-only functions for require_auth coverage..."
+    bash scripts/audit_auth.sh
+
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
 # Deploy to Stellar testnet (prompts if a contract already exists)
@@ -70,6 +75,31 @@ docker-up:
 # Stop and remove local dev stack containers
 docker-down:
     docker-compose down
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+
+# Start frontend development server
+frontend-dev:
+    @if [ ! -d "web" ]; then \
+        echo "Frontend directory not found"; \
+        exit 1; \
+    fi
+    cd web && npm install && npm run dev
+
+# Run frontend tests
+frontend-test:
+    @if [ ! -d "web" ]; then \
+        echo "Frontend directory not found"; \
+        exit 1; \
+    fi
+    cd web && npm install && npm run test
+
+# ── Disaster Recovery ─────────────────────────────────────────────────────────
+
+# Run disaster-recovery backup
+dr-backup:
+    @echo "Running disaster-recovery backup..."
+    bash scripts/dr_backup.sh
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

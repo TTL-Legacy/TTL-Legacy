@@ -129,6 +129,10 @@ fn test_storage_key_no_collisions() {
 
     for (i, key) in keys.iter().enumerate() {
         let val: u32 = env.storage().persistent().get(key).unwrap_or(9999);
-        assert_eq!(val, i as u32, "StorageKey collision detected at index {}", i);
+        assert_eq!(
+            val, i as u32,
+            "StorageKey collision detected at index {}",
+            i
+        );
     }
 }

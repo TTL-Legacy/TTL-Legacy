@@ -20,9 +20,7 @@ fn test_beneficiary_waitlist_add_entry() {
 fn test_beneficiary_waitlist_max_three_entries() {
     let env = Env::new();
     let vault_id: u64 = 1;
-    let beneficiaries: Vec<Address> = (0..4)
-        .map(|_| Address::generate(&env))
-        .collect();
+    let beneficiaries: Vec<Address> = (0..4).map(|_| Address::generate(&env)).collect();
 
     // Test that waitlist respects max 3 entries limit
     // Fourth entry should fail with appropriate error
@@ -98,9 +96,7 @@ fn test_beneficiary_waitlist_sequential_promotions() {
     let env = Env::new();
     let vault_id: u64 = 1;
     let primary = Address::generate(&env);
-    let waitlist_entries: Vec<Address> = (0..3)
-        .map(|_| Address::generate(&env))
-        .collect();
+    let waitlist_entries: Vec<Address> = (0..3).map(|_| Address::generate(&env)).collect();
 
     // Test multiple sequential promotions from waitlist
     // Setup: primary + 3 waitlist entries

@@ -26,6 +26,54 @@ graph TD
 
 ## Data Flows
 
+### Full Vault Lifecycle
+
+This sequence shows vault creation and funding, recurring owner check-ins, and release after the owner misses the check-in deadline. Deadline expiry does not execute a transfer by itself; a caller must invoke the contract after the release grace period.
+
+```mermaid
+sequenceDiagram
+    participant Owner
+    participant Mobile
+    participant Backend
+    participant Contract as ttl_vault Contract
+    participant Token as Token Contract
+    participant Time
+    participant Caller as Beneficiary / Any Caller
+
+    Owner->>Mobile: Create vault with beneficiary and check-in interval
+    Mobile->>Backend: Submit authenticated vault request
+    Backend->>Contract: create_vault(owner, beneficiary, interval)
+    Contract->>Contract: Store locked vault and initial deadline
+    Contract-->>Backend: Return vault ID
+    Backend-->>Mobile: Confirm vault creation
+    Owner->>Mobile: Deposit assets
+    Mobile->>Backend: Submit authenticated deposit request
+    Backend->>Contract: deposit(vault ID, amount)
+    Contract->>Token: Transfer assets into vault
+    Token-->>Contract: Confirm deposit
+
+    loop Before each deadline
+        Owner->>Mobile: Check in
+        Mobile->>Backend: Submit authenticated check-in
+        Backend->>Contract: check_in(vault ID)
+        Contract->>Contract: Verify check-in and update last_check_in
+        Contract-->>Backend: Confirm updated deadline
+        Backend-->>Mobile: Check-in success
+    end
+
+    Note over Time,Contract: If the owner misses a deadline, the vault becomes logically expired; no transfer runs automatically.
+    Time-->>Contract: Check-in deadline passes
+    Note over Time,Contract: Soroban may archive inactive state; the release call attempts restoration when needed.
+    Note over Time,Caller: Wait until the configured release grace period has elapsed.
+    Caller->>Contract: trigger_release(vault ID)
+    Contract->>Contract: Restore archived state if needed
+    Contract->>Contract: Validate expiry, grace period, release conditions, and balance
+    Contract->>Token: Transfer assets to beneficiary
+    Token-->>Contract: Confirm transfer
+    Contract->>Contract: Mark vault released and emit release event
+    Contract-->>Caller: Release confirmed
+```
+
 ### Check-in Flow
 
 This flow allows the vault owner to prove they are active and extend the TTL.
@@ -57,6 +105,27 @@ sequenceDiagram
     Contract->>Contract: Trigger Release Logic
     Contract->>Beneficiary: Assets Transferred
 ```
+
+## Beneficiary Privacy Model
+
+TTL-Legacy operates on a public blockchain, so all contract state is inherently readable by anyone with access to the network. The repository therefore documents the privacy model explicitly instead of pretending the beneficiary is private by default.
+
+### Default behavior
+
+- `Vault.beneficiary` remains stored as a plaintext `Address` for compatibility with existing querying, indexing, and legacy client code.
+- The beneficiary is discoverable from on-chain storage before release and can be used by attackers for social engineering.
+- This is an intentional tradeoff: it preserves interoperable access patterns and minimizes breaking changes, while acknowledging the transparency of Soroban state.
+
+### Optional privacy layer
+
+- For privacy-sensitive vaults, the owner may commit to the beneficiary using a hash commitment, e.g. `sha256(raw_beneficiary_address_bytes)`.
+- The commitment is stored as `BeneficiaryCommitment(u64)` and remains hidden until a later reveal event.
+- At release time, anyone can call `reveal_beneficiary` with the raw beneficiary bytes and a proof; the contract verifies the hash and then transfers funds to the revealed address.
+- This reduces pre-release targeting exposure, but it is not cryptographic anonymity: the beneficiary becomes public at release, and any public release event or transfer still exposes the final address.
+
+### Design decision
+
+This project treats privacy as a best-effort layer layered on top of public blockchain state, not as a guarantee that all beneficiary identities stay hidden forever. The commitment path is offered as an opt-in mechanism for users who value privacy more than maximum compatibility.
 
 ## Component Documentation
 
@@ -178,7 +247,7 @@ All contract storage entries are defined in the `StorageKey` enum (`contracts/tt
 | `VestingCatchUp(u64)` | `VestingCatchUpConfig` | Catch-up vesting config |
 | `VestingBonus(u64)` | `VestingBonusConfig` | Vesting bonus config |
 | `YieldDistributionConfig(u64)` | `YieldDistributionConfig` | Yield distribution config |
-| `TokenLending(u64)` | `TokenLending` | Token lending config |
+| `Lending(u64)` | `TokenLending` | Token loan record (see [token-management.md](token-management.md#data-model-and-lifecycle)) |
 | `TokenCollateral(u64)` | `TokenCollateral` | Token collateral config |
 | `TokenHedge(u64)` | `TokenHedge` | Token hedging config |
 | `TokenRebalance(u64)` | `TokenRebalanceConfig` | Token rebalance config |
@@ -214,6 +283,7 @@ All contract storage entries are defined in the `StorageKey` enum (`contracts/tt
 | `RecoveryContacts(u64)` | `Vec<Address>` | Recovery contacts |
 | `PasskeyRecoveryRequest(u64)` | `PasskeyRecoveryRequest` | Recovery request |
 | `PasskeyRotationPolicy(u64)` | `PasskeyRotationPolicy` | Rotation policy |
+| `LastVaultPasskeyRotation(u64)` | `u64` | Timestamp of last `rotate_passkey` (enforces policy minimum interval) |
 | `CustomMetadataHistory(u64)` | `Vec<Bytes>` | Custom metadata history |
 | `ReleaseVoteThreshold(u64)` | `u32` | Release vote threshold |
 | `VestingScheduleCount(u64)` | `u64` | Number of schedules |

@@ -1,6 +1,12 @@
 # Cargo Audit Configuration
 # This file configures vulnerability severity thresholds and allows accepted advisories.
 # The CI will fail on any CRITICAL or HIGH severity vulnerabilities.
+#
+# CI Integration (issue #1194): cargo-audit is executed as part of the CI pipeline
+# in .github/workflows/ci.yml via the "Install cargo-audit" and "Run security audit"
+# steps. The workflow installs cargo-audit and runs `cargo audit --deny warnings`,
+# which ensures any advisory matched by the rules below will fail the build.
+# No duplicate CI steps are needed — the integration is already active.
 
 # Vulnerabilities to deny (CI will fail)
 deny = ["unmaintained", "unsound"]

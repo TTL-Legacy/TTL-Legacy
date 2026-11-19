@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,23 +15,26 @@ jobs:
   ci:
     name: Test & Lint
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           targets: wasm32-unknown-unknown
           components: clippy
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/bin/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ci-
 
       - name: Build contracts
         run: cargo build --workspace
@@ -49,21 +55,37 @@ jobs:
           fi
           echo "WASM size: $(( SIZE / 1024 )) KB (threshold: 256 KB)"
 
+          ZK_SIZE=$(stat -c%s target/wasm32-unknown-unknown/release/zk_verifier.wasm)
+          ZK_THRESHOLD=$((256 * 1024))
+          if [ "$ZK_SIZE" -gt "$ZK_THRESHOLD" ]; then
+            echo "zk_verifier WASM size exceeds threshold by $(( (ZK_SIZE - ZK_THRESHOLD) / 1024 )) KB"
+            echo "zk_verifier WASM size: $(( ZK_SIZE / 1024 )) KB (threshold: 256 KB)"
+            exit 1
+          fi
+          echo "zk_verifier WASM size: $(( ZK_SIZE / 1024 )) KB (threshold: 256 KB)"
+
       - name: Comment WASM size on PR
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         with:
           script: |
             const fs = require('fs');
-            const path = 'target/wasm32-unknown-unknown/release/ttl_vault.wasm';
-            if (fs.existsSync(path)) {
-              const size = fs.statSync(path).size;
-              const kb = (size / 1024).toFixed(2);
+            const thresholdKb = 256;
+            const report = (label, path) => {
+              if (!fs.existsSync(path)) return null;
+              const kb = (fs.statSync(path).size / 1024).toFixed(2);
+              return `- **${label}**: ${kb} KB (threshold: ${thresholdKb} KB)`;
+            };
+            const lines = [
+              report('ttl_vault', 'target/wasm32-unknown-unknown/release/ttl_vault.wasm'),
+              report('zk_verifier', 'target/wasm32-unknown-unknown/release/zk_verifier.wasm'),
+            ].filter(Boolean);
+            if (lines.length > 0) {
               github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: `📦 **WASM Size Report**: ${kb} KB (threshold: 256 KB)`
+                body: `📦 **WASM Size Report**\n${lines.join('\n')}`
               });
             }
 
@@ -76,6 +98,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Audit admin-only functions for require_auth coverage
+        run: bash scripts/audit_admin_auth.sh
+
       - name: Install cargo-audit
         run: cargo install cargo-audit
 
@@ -83,7 +108,7 @@ jobs:
         run: cargo audit --deny warnings
 
       - name: Scan for secrets with Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -91,13 +116,18 @@ jobs:
 
       - name: Validate OpenAPI specification
         run: |
-          if command -v spectacle &> /dev/null; then
-            spectacle docs/openapi.yaml
+          python3 -m pip install openapi-spec-validator --quiet
+          python3 -m openapi_spec_validator docs/openapi.yaml
+          echo "✅ OpenAPI spec validation passed"
+
+      - name: Check contract error docs are up to date
+        run: |
+          python3 scripts/generate_contract_error_docs.py
+          if ! git diff --exit-code docs/contract-errors.md; then
+            echo "docs/contract-errors.md is out of date. Run scripts/generate_contract_error_docs.py and commit the result."
+            exit 1
           fi
-          python3 -m pip install openapi-spec-validator 2>/dev/null || true
-          if command -v openapi-spec-validator &> /dev/null; then
-            openapi-spec-validator docs/openapi.yaml
-          fi
+          echo "✅ Contract error docs are up to date"
 
       - name: Check version consistency
         run: |
@@ -108,27 +138,62 @@ jobs:
             exit 1
           fi
 
+  frontend:
+    name: Frontend Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-node@cdca7365b2dadb8aad0a33bc7601856ffabcc48e
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
     needs: [ci]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           targets: wasm32-unknown-unknown
           components: clippy, llvm-tools-preview
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/bin/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-coverage-
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
@@ -144,7 +209,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238
         continue-on-error: true
         with:
           files: lcov.info

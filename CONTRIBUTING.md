@@ -2,7 +2,161 @@
 
 We welcome contributions! Please follow these guidelines to help us maintain project quality.
 
+## Getting Started
+
+### Prerequisites
+
+| Tool | Version | Notes |
+|---|---|---|
+| Rust | 1.70+ | Install via [rustup](https://rustup.rs) |
+| Node.js | 18+ | Required for frontend dev tooling |
+| Docker | 24+ | Required for local dev stack |
+| Stellar CLI | latest | `cargo install stellar-cli --locked` |
+| Soroban CLI | latest | Bundled with Stellar CLI |
+| `just` | any | Optional but recommended — `cargo install just` |
+
+### Local Dev Setup (Step by Step)
+
+1. **Copy the environment file:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Start the local dev stack:**
+   ```bash
+   docker-compose up -d
+   ```
+   This starts PostgreSQL (port 5432), the backend (port 3000), and Stellar Quickstart (port 8000).
+   Wait for health checks to pass before proceeding.
+
+3. **Verify the backend is healthy:**
+   ```bash
+   curl http://localhost:3000/health
+   ```
+   You should receive a `200 OK` response.
+
+4. **Build the Soroban contracts:**
+   ```bash
+   just build
+   # or without just:
+   ./scripts/build.sh
+   ```
+
+5. **Deploy to the local Stellar Quickstart node:**
+   ```bash
+   just deploy-testnet
+   ```
+   This deploys to the local node at `localhost:8000` as configured in `docker-compose.override.yml`.
+
+6. **Start the frontend dev server:**
+   ```bash
+   just frontend-dev
+   ```
+   The frontend dev server runs at `http://localhost:5173`.
+
+### Running the Backend Against the Local Node
+
+In your `.env`, set:
+```env
+STELLAR_RPC_URL=http://localhost:8000
+```
+
+This points the backend at your local Stellar Quickstart instance instead of testnet.
+
+## Troubleshooting
+
+Common errors encountered when building the Soroban contracts, and how to fix them.
+
+### `wasm32-unknown-unknown` target not found
+
+**Symptom:** Building the contracts fails with an error such as:
+
+```
+error[E0463]: can't find crate for `core`
+  = note: the `wasm32-unknown-unknown` target may not be installed
+```
+
+or
+
+```
+error: target `wasm32-unknown-unknown` not found in target list
+```
+
+**Cause:** The Soroban contracts are compiled to WebAssembly, which requires the
+`wasm32-unknown-unknown` compilation target. A default `rustup` installation only
+includes the host target, so the wasm target must be added explicitly.
+
+**Fix:** Install the target with `rustup`:
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+If you use a pinned toolchain (e.g. via `rust-toolchain.toml`), add the target to
+that toolchain specifically:
+
+```bash
+rustup target add wasm32-unknown-unknown --toolchain <toolchain>
+```
+
+Verify the target is installed:
+
+```bash
+rustup target list --installed
+```
+
+You should see `wasm32-unknown-unknown` in the output. Then re-run `just build`
+(or `./scripts/build.sh`).
+
+### `soroban-sdk` version mismatch
+
+**Symptom:** The build fails with errors such as:
+
+```
+error: failed to select a version for the requirement `soroban-sdk = "^21.0.0"`
+candidate versions found which didn't match: 20.0.0
+```
+
+or a type/trait mismatch between crates that depend on different `soroban-sdk`
+versions (e.g. `expected soroban_sdk::Address, found soroban_sdk::Address`).
+
+**Cause:** Cargo resolves a single version of `soroban-sdk` for the whole
+dependency graph. If the workspace `Cargo.toml` and the individual contract
+crates (e.g. `contracts/ttl_vault/Cargo.toml`) pin different versions, Cargo
+either fails to resolve or silently links two incompatible copies of the SDK.
+
+**Fix:** Align the `soroban-sdk` version everywhere it is declared:
+
+1. **Workspace `Cargo.toml`** — define the version once under
+   `[workspace.dependencies]`:
+   ```toml
+   [workspace.dependencies]
+   soroban-sdk = "21.0.0"
+   ```
+
+2. **Each contract crate's `Cargo.toml`** — reference the workspace dependency
+   instead of pinning a version locally:
+   ```toml
+   [dependencies]
+   soroban-sdk = { workspace = true }
+   ```
+
+   If a crate must declare it directly, use the exact same version string as the
+   workspace.
+
+3. **Verify** that only one version is in the dependency graph:
+   ```bash
+   cargo tree -i soroban-sdk
+   ```
+
+   The output should show a single `soroban-sdk vX.Y.Z` entry. If multiple
+   versions appear, update the offending `Cargo.toml` files and run
+   `cargo update -p soroban-sdk` to refresh `Cargo.lock`.
+
+Finally, rebuild the contracts with `just build` to confirm the fix.
+
 ## Development Workflow
+=======
 1. **Fork the repo** and create your branch: git checkout -b feature/your-feature-name.
 2. **Formatting:** We use rustfmt. Please run the following command before committing:
    ```bash
@@ -21,6 +175,71 @@ We welcome contributions! Please follow these guidelines to help us maintain pro
    just ci
    ```
 5. **Pull Requests:** Open a PR against main. Ensure your PR description clearly outlines the changes and links to the relevant issue.
+
+## Stellar Wave Contributors
+
+Contributors from the Stellar Wave program can pick up and complete issues following this process:
+
+### Picking Up an Issue
+
+1. **Check the issue labels:** Look for issues labeled with:
+   - `good-first-issue` - Great for new contributors
+   - `help-wanted` - Community contributions welcome
+   - `stellar-wave` - Specifically for Stellar Wave participants
+   
+2. **Read the issue description:** Each issue has:
+   - A clear description of what needs to be done
+   - Estimated time to complete
+   - Priority level (Low, Medium, High)
+   - Category (e.g., Testing, Documentation, Feature, etc.)
+
+3. **Comment on the issue:** Before starting work, comment on the issue to claim it:
+   ```
+   @ttl-legacy-bot claim
+   ```
+   This prevents duplicate work.
+
+### Completing an Issue
+
+1. **Create a feature branch:** Use the issue number and a descriptive name:
+   ```bash
+   git checkout -b feat/issue-XXXX-brief-description
+   ```
+
+2. **Follow the development workflow** (see above section)
+
+3. **Link your PR to the issue:** In your PR description, include:
+   ```
+   Closes #XXXX
+   ```
+   Replace `XXXX` with the issue number. This automatically closes the issue when merged.
+
+4. **PR Description Template:** Use this template:
+   ```markdown
+   ## Summary
+   Brief description of what this PR does.
+
+   ## Changes
+   - Change 1
+   - Change 2
+   - Change 3
+
+   ## Testing
+   How to test these changes locally.
+
+   Closes #XXXX
+   ```
+
+5. **Wait for review:** A maintainer will review your PR within 48 hours.
+
+### Issue Categories & Guide
+
+| Category | What to expect | PR checklist |
+|----------|---|---|
+| **Testing** | Add or improve test coverage | - Tests compile and pass locally<br>- New tests have clear assertions<br>- Run `just test` before submitting |
+| **Documentation** | Add or update docs/guides | - Docs are clear and accurate<br>- Examples are tested<br>- Follow existing formatting |
+| **Feature** | Implement new functionality | - All above + feature works end-to-end<br>- Add tests for new features<br>- Update relevant docs |
+| **Bug Fix** | Resolve reported bugs | - Root cause identified<br>- Fix is minimal and targeted<br>- Add regression test |
 
 ## Automated Security Scanning in CI
 
@@ -91,11 +310,39 @@ Available recipes:
     deploy-testnet-force# Force-redeploy to testnet without confirmation prompt
     docker-down         # Stop and remove local dev stack containers
     docker-up           # Start local dev stack (PostgreSQL, backend, Stellar Quickstart)
+    dr-backup           # Run disaster-recovery backup
     env-setup           # Copy .env.example to .env (skips if .env already exists)
     fmt                 # Auto-format all code
     fmt-check           # Check code formatting
+    frontend-dev        # Start frontend development server
+    frontend-test       # Run frontend tests
     test                # Run the full ttl_vault test suite
 ```
+
+### Frontend Development
+
+The `frontend-dev` and `frontend-test` commands simplify frontend work:
+
+```bash
+# Start the frontend dev server at http://localhost:5173
+just frontend-dev
+
+# Run the frontend test suite
+just frontend-test
+```
+
+These commands automatically install dependencies and run the appropriate npm scripts.
+
+### Disaster Recovery
+
+The `dr-backup` command runs the disaster-recovery backup script:
+
+```bash
+# Trigger a backup to the configured S3 bucket
+just dr-backup
+```
+
+See [RECOVERY_IMPLEMENTATION.md](RECOVERY_IMPLEMENTATION.md) for more details on disaster recovery procedures.
 
 ## Fuzz Testing
 
@@ -205,6 +452,52 @@ git commit -m "Update fuzz corpus after extended fuzzing run"
 4. **Maintain corpus** - Keep seed inputs diverse and minimal
 
 For more details, see [contracts/ttl_vault/fuzz/README.md](contracts/ttl_vault/fuzz/README.md).
+
+## Conventional Commits
+
+TTL-Legacy enforces the [Conventional Commits](https://www.conventionalcommits.org/) specification.
+All **PR titles** and **squash-merge commit messages** must follow this format:
+
+```
+<type>(<optional scope>): <short description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Allowed Types
+
+| Type       | When to use                                          |
+|------------|------------------------------------------------------|
+| `feat`     | A new feature                                        |
+| `fix`      | A bug fix                                            |
+| `docs`     | Documentation-only changes                           |
+| `refactor` | Code change that is neither a fix nor a feature      |
+| `perf`     | Performance improvement                              |
+| `test`     | Adding or updating tests                             |
+| `build`    | Changes to the build system or external dependencies |
+| `ci`       | CI/CD configuration changes                          |
+| `chore`    | Other changes that do not modify src or test files   |
+| `revert`   | Reverts a previous commit                            |
+| `security` | Security fix or hardening                            |
+
+### Examples
+
+```
+feat(vault): add batch check-in endpoint
+fix(check-in): return VaultNotFound instead of raw panic string
+docs(contributing): add conventional commit guide
+security(auth): enforce passkey nonce replay protection
+ci(release): add git-cliff changelog automation
+refactor(backend): extract sanitization middleware
+```
+
+### Why?
+
+Commit messages are parsed by [git-cliff](https://git-cliff.org/) to auto-generate
+`CHANGELOG.md` on every release.  A CI job (`commitlint.yml`) validates PR titles
+against these rules on every pull request.
 
 ## Style Guide
 - Follow standard Rust idiomatic practices.

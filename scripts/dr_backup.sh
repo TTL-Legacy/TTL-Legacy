@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # dr_backup.sh — Disaster Recovery Backup Script
 #
-# Snapshots the TTL-Legacy contract state and backend database to a
-# configurable S3-compatible bucket.
+# Snapshots the TTL-Legacy contract state, vault snapshots and backend
+# database to a configurable S3-compatible bucket.
 #
 # Usage:
 #   ./scripts/dr_backup.sh [--dry-run]
@@ -20,6 +20,9 @@
 #   AWS_SECRET_ACCESS_KEY S3 credentials
 #   AWS_REGION            AWS region                     (default: us-east-1)
 #   DR_WASM_PATH          Path to compiled WASM          (default: auto-detected)
+#   DR_REPLICA_BUCKET     Second bucket in another region for cross-region
+#                         replication (3-2-1). Replication is skipped if unset.
+#   DR_REPLICA_REGION     Region of the replica bucket   (required with DR_REPLICA_BUCKET)
 
 set -euo pipefail
 
@@ -54,6 +57,11 @@ run() {
 : "${CONTRACT_TTL_VAULT:?CONTRACT_TTL_VAULT is required}"
 : "${STELLAR_NETWORK:?STELLAR_NETWORK is required}"
 : "${DR_DB_PATH:?DR_DB_PATH is required}"
+: "${DR_GPG_KEY_ID:?DR_GPG_KEY_ID is required}"
+
+if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
+    : "${DR_REPLICA_REGION:?DR_REPLICA_REGION is required when DR_REPLICA_BUCKET is set}"
+fi
 
 DR_S3_PREFIX="${DR_S3_PREFIX:-backups}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -64,6 +72,9 @@ log "Starting disaster-recovery backup"
 log "  Network   : ${STELLAR_NETWORK}"
 log "  Contract  : ${CONTRACT_TTL_VAULT}"
 log "  Bucket    : s3://${DR_S3_BUCKET}/${BACKUP_KEY_PREFIX}/"
+if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
+    log "  Replica   : s3://${DR_REPLICA_BUCKET}/${BACKUP_KEY_PREFIX}/ (${DR_REPLICA_REGION})"
+fi
 log "  Timestamp : ${TIMESTAMP}"
 
 # ---------------------------------------------------------------------------
@@ -90,6 +101,8 @@ fi
 
 CONTRACT_STATE_FILE=$(mktemp /tmp/contract_state_XXXXXX.json)
 trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}" "${CHECKSUM_FILE:-}" "${CHECKSUM_SIG_FILE:-}"' EXIT
+SIG_DIR=$(mktemp -d /tmp/dr_sig_XXXXXX)
+trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"; rm -rf "${SIG_DIR}"' EXIT
 
 log "Exporting contract state for contract ${CONTRACT_TTL_VAULT} on ${STELLAR_NETWORK}..."
 if $DRY_RUN; then
@@ -198,6 +211,47 @@ fi
 
 # ---------------------------------------------------------------------------
 # 4b. Upload artefacts to S3-compatible storage
+# 3b. Export vault snapshots
+# ---------------------------------------------------------------------------
+# The contract has no public index of snapshot timestamps, so the operator
+# lists the vault_id:timestamp pairs to back up. --send no simulates the
+# read-only get_vault_snapshot call without submitting a transaction.
+
+SKIP_VAULT_SNAPSHOTS=true
+VAULT_SNAPSHOT_FILES=()
+if [[ -z "${DR_VAULT_SNAPSHOTS:-}" ]]; then
+    warn "DR_VAULT_SNAPSHOTS not set. Skipping vault snapshot backup."
+else
+    SKIP_VAULT_SNAPSHOTS=false
+    VAULT_SNAPSHOT_DIR=$(mktemp -d /tmp/vault_snapshots_XXXXXX)
+    IFS=',' read -ra SNAPSHOT_REFS <<< "${DR_VAULT_SNAPSHOTS}"
+    for ref in "${SNAPSHOT_REFS[@]}"; do
+        [[ "${ref}" =~ ^[0-9]+:[0-9]+$ ]] || die "Invalid DR_VAULT_SNAPSHOTS entry '${ref}' (expected vault_id:timestamp)"
+        vault_id="${ref%%:*}"
+        timestamp="${ref##*:}"
+        snapshot_file="${VAULT_SNAPSHOT_DIR}/vault_${vault_id}_${timestamp}.json"
+        VAULT_SNAPSHOT_FILES+=("${snapshot_file}")
+
+        log "Exporting snapshot for vault ${vault_id} at ${timestamp}..."
+        if $DRY_RUN; then
+            log "[DRY-RUN] Would run: stellar contract invoke --send no --id ${CONTRACT_TTL_VAULT} --network ${STELLAR_NETWORK} -- get_vault_snapshot --vault_id ${vault_id} --timestamp ${timestamp} > ${snapshot_file}"
+        else
+            stellar contract invoke \
+                --id "${CONTRACT_TTL_VAULT}" \
+                --network "${STELLAR_NETWORK}" \
+                --send no \
+                -- get_vault_snapshot \
+                --vault_id "${vault_id}" \
+                --timestamp "${timestamp}" \
+                > "${snapshot_file}" \
+                || die "Failed to export snapshot for vault ${vault_id} at ${timestamp}"
+            log "Vault snapshot exported ($(wc -c < "${snapshot_file}") bytes)"
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Upload artefacts to S3-compatible storage
 # ---------------------------------------------------------------------------
 
 upload_to_s3() {
@@ -207,16 +261,41 @@ upload_to_s3() {
     run aws s3 cp "${local_path}" "s3://${DR_S3_BUCKET}/${s3_key}" \
         --endpoint-url "${DR_S3_ENDPOINT}" \
         --region "${AWS_REGION}"
+
+    if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
+        log "Replicating ${s3_key} -> s3://${DR_REPLICA_BUCKET}/${s3_key} (${DR_REPLICA_REGION})"
+        run aws s3 cp "${local_path}" "s3://${DR_REPLICA_BUCKET}/${s3_key}" \
+            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --region "${DR_REPLICA_REGION}"
+    fi
 }
 
-upload_to_s3 "${CONTRACT_STATE_FILE}" "${BACKUP_KEY_PREFIX}/contract_state.json"
+# Sign the artefact with a detached GPG signature, then upload both files.
+upload_signed() {
+    local local_path="$1"
+    local s3_key="$2"
+    local sig_path="${SIG_DIR}/$(basename "${local_path}").sig"
+
+    run gpg --batch --yes --local-user "${DR_GPG_KEY_ID}" \
+        --detach-sign --output "${sig_path}" "${local_path}"
+    upload_to_s3 "${local_path}" "${s3_key}"
+    upload_to_s3 "${sig_path}" "${s3_key}.sig"
+}
+
+upload_signed "${CONTRACT_STATE_FILE}" "${BACKUP_KEY_PREFIX}/contract_state.json"
 
 if ! $SKIP_DB; then
-    upload_to_s3 "${DB_SNAPSHOT_FILE}" "${BACKUP_KEY_PREFIX}/backend_db.sqlite3"
+    upload_signed "${DB_SNAPSHOT_FILE}" "${BACKUP_KEY_PREFIX}/backend_db.sqlite3"
 fi
 
 if ! $SKIP_WASM; then
-    upload_to_s3 "${WASM_PATH}" "${BACKUP_KEY_PREFIX}/ttl_vault.wasm"
+    upload_signed "${WASM_PATH}" "${BACKUP_KEY_PREFIX}/ttl_vault.wasm"
+fi
+
+if ! $SKIP_VAULT_SNAPSHOTS; then
+    for snapshot_file in "${VAULT_SNAPSHOT_FILES[@]}"; do
+        upload_to_s3 "${snapshot_file}" "${BACKUP_KEY_PREFIX}/vault_snapshots/$(basename "${snapshot_file}")"
+    done
 fi
 
 # Upload the checksum file and, if present, its GPG signature
@@ -231,6 +310,15 @@ fi
 # 5. Write backup manifest
 # ---------------------------------------------------------------------------
 
+# Prints the SHA-256 of a file as a JSON string, or null if the file is absent.
+json_sha256() {
+    if [[ -f "$1" ]]; then
+        echo "\"$(sha256sum "$1" | cut -d' ' -f1)\""
+    else
+        echo null
+    fi
+}
+
 MANIFEST_FILE=$(mktemp /tmp/manifest_XXXXXX.json)
 cat > "${MANIFEST_FILE}" <<EOF
 {
@@ -243,11 +331,18 @@ cat > "${MANIFEST_FILE}" <<EOF
     "wasm": "$(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)",
     "checksums": "${BACKUP_KEY_PREFIX}/checksums.sha256",
     "checksums_sig": "$(if [[ -n "${DR_GPG_KEY_ID:-}" ]]; then echo "\"${BACKUP_KEY_PREFIX}/checksums.sha256.asc\""; else echo null; fi)"
+    "backend_db": $(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi),
+    "wasm": $(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)
+  },
+  "sha256": {
+    "contract_state": $(json_sha256 "${CONTRACT_STATE_FILE}"),
+    "backend_db": $(json_sha256 "${DB_SNAPSHOT_FILE:-}"),
+    "wasm": $(json_sha256 "${WASM_PATH}")
   }
 }
 EOF
 
-upload_to_s3 "${MANIFEST_FILE}" "${BACKUP_KEY_PREFIX}/manifest.json"
+upload_signed "${MANIFEST_FILE}" "${BACKUP_KEY_PREFIX}/manifest.json"
 rm -f "${MANIFEST_FILE}"
 
 log "Backup complete — prefix: s3://${DR_S3_BUCKET}/${BACKUP_KEY_PREFIX}/"

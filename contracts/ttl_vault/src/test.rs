@@ -9,36 +9,7 @@ use soroban_sdk::{
     bytes, vec, Address, Bytes, BytesN, Env, IntoVal, TryIntoVal,
 };
 
-fn setup() -> (
-    Env,
-    Address,
-    Address,
-    Address,
-    Address,
-    TtlVaultContractClient<'static>,
-) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
-    let admin = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_address = env
-        .register_stellar_asset_contract_v2(token_admin)
-        .address();
-
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
-
-    let contract_address = env.register_contract(None, TtlVaultContract);
-    let client = TtlVaultContractClient::new(&env, &contract_address);
-    client.initialize(&token_address, &admin);
-
-    let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
-
-    (env, owner, beneficiary, admin, token_address, client)
-}
+use crate::tests::common::setup_with_roles as setup;
 
 // ---- existing tests ----
 
@@ -139,6 +110,46 @@ fn test_vault_exists_for_existing_and_missing_ids() {
 }
 
 #[test]
+fn test_beneficiary_commitment_keeps_identity_private_until_reveal() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
+
+    let proof = beneficiary.to_xdr(&env);
+    let commitment: BytesN<32> = env.crypto().sha256(&proof).into();
+
+    client.commit_beneficiary(&vault_id, &owner, &commitment);
+    assert_eq!(client.get_beneficiary_commitment(&vault_id).unwrap().commitment, commitment);
+
+    let claimed = beneficiary.clone();
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+    client.reveal_beneficiary(&vault_id, &proof, &claimed);
+
+    assert_eq!(client.get_revealed_beneficiary(&vault_id).unwrap(), claimed);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, ReleaseStatus::Released);
+    assert_eq!(vault.balance, 0);
+    assert_eq!(client.get_contract_token(), token_address);
+}
+
+#[test]
+fn test_beneficiary_commitment_rejects_invalid_reveal_proof() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3_600u64, &None);
+
+    let valid_proof = beneficiary.to_xdr(&env);
+    let valid_hash: BytesN<32> = env.crypto().sha256(&valid_proof).into();
+    client.commit_beneficiary(&vault_id, &owner, &valid_hash);
+
+    let wrong_proof = Bytes::from_array(&env, &[9u8; 32]);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+
+    assert!(client
+        .try_reveal_beneficiary(&vault_id, &wrong_proof, &beneficiary)
+        .is_err());
+}
+
+#[test]
 fn test_get_owner_returns_correct_owner() {
     let (_, owner, beneficiary, _, _, client) = setup();
 
@@ -170,11 +181,11 @@ fn test_create_vault_emits_vault_created_event() {
     });
 
     assert!(created_event.is_some(), "VaultCreated event not emitted");
-    let data: (u64, Address, Address, u64, u64) = created_event.unwrap().2.into_val(&env);
-    assert_eq!(data.0, vault_id);
-    assert_eq!(data.1, owner);
-    assert_eq!(data.2, beneficiary);
-    assert_eq!(data.3, 100u64);
+    let data: VaultCreatedEvent = created_event.unwrap().2.into_val(&env);
+    assert_eq!(data.vault_id, vault_id);
+    assert_eq!(data.owner, owner);
+    assert_eq!(data.beneficiary, beneficiary);
+    assert_eq!(data.check_in_interval, 100u64);
 }
 
 #[test]
@@ -337,8 +348,8 @@ fn test_paused_blocks_check_in_withdraw_and_trigger_release() {
 
     client.pause(&bytes!(&env, 0x01));
 
-    assert!(client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64).is_err());
-    assert!(client.try_withdraw(&vault_id, &owner, &10i128).is_err());
+    assert!(client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None).is_err());
+    assert!(client.try_withdraw(&vault_id, &owner, &10i128, &None, &None, &None).is_err());
     assert!(client.try_trigger_release(&vault_id).is_err());
 
     client.unpause();
@@ -361,7 +372,7 @@ fn test_check_in_emits_event_with_correct_topic() {
     // Advance time slightly
     env.ledger().with_mut(|l| l.timestamp += 10);
 
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let events = env.events().all();
     let check_in_event = events.iter().find(|e| {
@@ -392,7 +403,7 @@ fn test_check_in_emits_check_in_recorded_event() {
     env.ledger().with_mut(|l| l.timestamp += 10);
     let check_in_timestamp = env.ledger().timestamp();
 
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let events = env.events().all();
     let recorded_event = events.iter().find(|e| {
@@ -435,7 +446,7 @@ fn test_check_in_no_ttl_warning_just_above_threshold() {
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
     env.ledger().with_mut(|l| l.timestamp += 10);
 
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &None, &None);
 
     assert!(
         !ttl_warning_emitted(&env, vault_id),
@@ -453,7 +464,7 @@ fn test_check_in_no_ttl_warning_at_threshold() {
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
     env.ledger().with_mut(|l| l.timestamp += 10);
 
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &None, &None);
 
     assert!(
         !ttl_warning_emitted(&env, vault_id),
@@ -471,7 +482,7 @@ fn test_check_in_emits_ttl_warning_just_below_threshold() {
     let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
     env.ledger().with_mut(|l| l.timestamp += 10);
 
-    client.check_in(&vault_id, &owner);
+    client.check_in(&vault_id, &owner, &None, &None);
 
     assert!(
         ttl_warning_emitted(&env, vault_id),
@@ -1079,7 +1090,7 @@ fn test_partial_release_rejects_non_owner() {
 fn test_update_beneficiary_rejects_owner_as_beneficiary() {
     let (_, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &1000, &None);
-    client.update_beneficiary(&vault_id, &owner, &owner);
+    client.update_beneficiary(&vault_id, &owner, &owner, &None, &None, &None);
 }
 
 #[test]
@@ -1090,7 +1101,7 @@ fn test_update_beneficiary_requires_auth_before_load() {
     let new_beneficiary = Address::generate(&env);
 
     // other is not the owner, should fail with NotOwner
-    assert!(client.try_update_beneficiary(&vault_id, &other, &new_beneficiary).is_err());
+    assert!(client.try_update_beneficiary(&vault_id, &other, &new_beneficiary, &None, &None, &None).is_err());
 }
 
 #[test]
@@ -1441,7 +1452,7 @@ fn test_withdraw_rejects_zero_amount() {
     client.deposit(&vault_id, &owner, &500i128);
 
     // zero amount should return InvalidAmount (#5)
-    let result = client.try_withdraw(&vault_id, &owner, &0i128);
+    let result = client.try_withdraw(&vault_id, &owner, &0i128, &None, &None, &None);
     assert!(result.is_err(), "expected error for zero-amount withdrawal");
 }
 
@@ -1453,7 +1464,7 @@ fn test_withdraw_rejects_negative_amount() {
     client.deposit(&vault_id, &owner, &500i128);
 
     // negative amount should also return InvalidAmount (#5)
-    let result = client.try_withdraw(&vault_id, &owner, &-1i128);
+    let result = client.try_withdraw(&vault_id, &owner, &-1i128, &None, &None, &None);
     assert!(result.is_err(), "expected error for negative-amount withdrawal");
 }
 
@@ -1488,7 +1499,7 @@ fn test_withdraw_emits_event() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
     client.deposit(&vault_id, &owner, &500i128);
 
-    client.withdraw(&vault_id, &owner, &100i128);
+    client.withdraw(&vault_id, &owner, &100i128, &None, &None, &None);
 
     let events = env.events().all();
     let withdraw_event = events.iter().find(|e| {
@@ -1732,7 +1743,7 @@ fn test_update_beneficiary_updates_index() {
     assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &None, &0u32, &10u32), vec![&env, vault_id]);
     assert_eq!(client.get_vaults_by_beneficiary(&new_beneficiary, &None, &0u32, &10u32), vec![&env]);
 
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
 
     // old beneficiary no longer sees the vault
     assert_eq!(client.get_vaults_by_beneficiary(&old_beneficiary, &None, &0u32, &10u32), vec![&env]);
@@ -1751,7 +1762,7 @@ fn test_state_mutating_calls_extend_instance_ttl() {
     let get_ttl = || env.as_contract(&contract_id, || env.storage().instance().get_ttl());
 
     // check_in
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
 
     // deposit
@@ -1759,12 +1770,12 @@ fn test_state_mutating_calls_extend_instance_ttl() {
     assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
 
     // withdraw
-    client.withdraw(&vault_id, &owner, &1_000);
+    client.withdraw(&vault_id, &owner, &1_000, &None, &None, &None);
     assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
 
     // update_beneficiary
     let new_beneficiary = Address::generate(&env);
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
     assert!(get_ttl() >= INSTANCE_TTL_THRESHOLD as u32);
 
     // set_beneficiaries
@@ -1804,7 +1815,7 @@ fn test_check_in_extends_owner_index_ttl() {
     let contract_id = client.address.clone();
     let vault_id = client.create_vault(&owner, &beneficiary, &1_000u64, &None);
 
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let ttl = env.as_contract(&contract_id, || {
         env.storage()
@@ -1823,7 +1834,7 @@ fn test_check_in_rejects_expired_vault() {
     // Advance past check-in interval to expire the vault
     env.ledger().with_mut(|l| l.timestamp += interval + 1);
 
-    let err = client.try_check_in(&vault_id, &owner).unwrap_err().unwrap();
+    let err = client.try_check_in(&vault_id, &owner, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::VaultExpired as u32));
 }
 
@@ -1948,7 +1959,7 @@ fn test_withdraw_rejected_on_cancelled_vault() {
 
     // Any withdraw attempt on a Cancelled vault must return AlreadyReleased (#7)
     let err = client
-        .try_withdraw(&vault_id, &owner, &1i128)
+        .try_withdraw(&vault_id, &owner, &1i128, &None, &None, &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ContractError::AlreadyReleased);
@@ -1966,7 +1977,7 @@ fn test_withdraw_rejected_on_released_vault() {
 
     // Any withdraw attempt on a Released vault must return AlreadyReleased (#7)
     let err = client
-        .try_withdraw(&vault_id, &owner, &1i128)
+        .try_withdraw(&vault_id, &owner, &1i128, &None, &None, &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ContractError::AlreadyReleased);
@@ -1982,7 +1993,7 @@ fn test_check_in_rejected_on_cancelled_vault() {
 
     // check_in on a Cancelled vault must not extend its TTL; it must return AlreadyReleased (#7)
     let err = client
-        .try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64)
+        .try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, ContractError::AlreadyReleased);
@@ -2105,7 +2116,7 @@ fn test_check_in_uses_check_in_topic_constant() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
     env.ledger().with_mut(|l| l.timestamp += 10);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     assert!(find_event_by_topic(&env, types::CHECK_IN_TOPIC));
 }
 
@@ -2132,7 +2143,7 @@ fn test_schedule_beneficiary_rotation_applies_on_check_in() {
 
     // Advance time past effective timestamp and perform a check-in to trigger rotation
     env.ledger().with_mut(|l| l.timestamp += 10);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     // Rotation event should be emitted and vault should have new beneficiaries
     assert!(find_event_by_topic(&env, types::BEN_ROTATION_TOPIC));
@@ -2213,7 +2224,7 @@ fn test_update_beneficiary_emits_beneficiary_updated_event() {
     let (env, owner, old_beneficiary, _, _, client) = setup();
     let new_beneficiary = Address::generate(&env);
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64, &None);
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
     assert!(find_event_by_topic(&env, types::BENEFICIARY_UPDATED_TOPIC));
 }
 
@@ -2222,7 +2233,7 @@ fn test_update_beneficiary_event_contains_old_and_new_beneficiary() {
     let (env, owner, old_beneficiary, _, _, client) = setup();
     let new_beneficiary = Address::generate(&env);
     let vault_id = client.create_vault(&owner, &old_beneficiary, &100u64, &None);
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
 
     let ben_event = env.events().all().iter().find(|e| {
         let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
@@ -2234,10 +2245,10 @@ fn test_update_beneficiary_event_contains_old_and_new_beneficiary() {
     });
     assert!(ben_event.is_some(), "beneficiary_updated event not emitted");
 
-    let data = ben_event.unwrap().2.clone();
-    let (old, new): (Address, Address) = data.try_into_val(&env).unwrap();
-    assert_eq!(old, old_beneficiary);
-    assert_eq!(new, new_beneficiary);
+    let data: BeneficiaryUpdatedEvent = ben_event.unwrap().2.clone().try_into_val(&env).unwrap();
+    assert_eq!(data.vault_id, vault_id);
+    assert_eq!(data.old_beneficiary, old_beneficiary);
+    assert_eq!(data.new_beneficiary, new_beneficiary);
 }
 
 #[test]
@@ -2316,7 +2327,7 @@ fn test_get_release_status_returns_locked_released_cancelled() {
     assert_eq!(token_client.balance(&owner2), 500_000i128);
 }
 
-// ---- Issue #318: batch_withdraw ----
+// ---- Issue #1292: batch_withdraw (BatchWithdrawal instruction type) ----
 
 #[test]
 fn test_batch_withdraw_decrements_multiple_vaults() {
@@ -2330,8 +2341,19 @@ fn test_batch_withdraw_decrements_multiple_vaults() {
     client.deposit(&vault_id_2, &owner, &300i128);
 
     client.batch_withdraw(
-        &vec![&env, vault_id_1, vault_id_2],
-        &vec![&env, 200i128, 100i128],
+        &vec![
+            &env,
+            BatchWithdrawal {
+                vault_id: vault_id_1,
+                destination: owner.clone(),
+                amount: 200i128,
+            },
+            BatchWithdrawal {
+                vault_id: vault_id_2,
+                destination: owner.clone(),
+                amount: 100i128,
+            },
+        ],
         &owner,
     );
 
@@ -2342,14 +2364,20 @@ fn test_batch_withdraw_decrements_multiple_vaults() {
 }
 
 #[test]
-fn test_batch_withdraw_validates_mismatched_lengths() {
+fn test_batch_withdraw_rejects_non_positive_amount() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
 
     let err = client
         .try_batch_withdraw(
-            &vec![&env, vault_id],
-            &vec![&env, 100i128, 200i128], // one extra amount
+            &vec![
+                &env,
+                BatchWithdrawal {
+                    vault_id,
+                    destination: owner.clone(),
+                    amount: 0i128,
+                },
+            ],
             &owner,
         )
         .unwrap_err()
@@ -2366,11 +2394,22 @@ fn test_batch_withdraw_rolls_back_on_insufficient_balance() {
     client.deposit(&vault_id_1, &owner, &100i128);
     // vault_id_2 has 0 balance
 
-    // Attempting to withdraw from vault_id_2 should fail; vault_id_1 must be unchanged
+    // Attempting to withdraw more than vault_id_2 holds must fail; vault_id_1 must be unchanged
     assert!(client
         .try_batch_withdraw(
-            &vec![&env, vault_id_1, vault_id_2],
-            &vec![&env, 50i128, 1i128],
+            &vec![
+                &env,
+                BatchWithdrawal {
+                    vault_id: vault_id_1,
+                    destination: owner.clone(),
+                    amount: 50i128,
+                },
+                BatchWithdrawal {
+                    vault_id: vault_id_2,
+                    destination: owner.clone(),
+                    amount: 1i128,
+                },
+            ],
             &owner,
         )
         .is_err());
@@ -3117,7 +3156,7 @@ fn test_get_vault_last_check_in_returns_correct_timestamp() {
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp += 50);
-    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    client.check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
 
     let expected = env.ledger().timestamp();
     assert_eq!(client.get_vault_last_check_in(&vault_id), expected);
@@ -3232,6 +3271,33 @@ fn test_get_vault_does_not_extend_ttl_when_above_threshold() {
     );
 }
 
+#[test]
+fn test_get_beneficiary_extends_ttl_when_below_threshold() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let contract_id = client.address.clone();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let advance = (VAULT_TTL_LEDGERS - VAULT_TTL_THRESHOLD + 1) as u32;
+    env.ledger().set_sequence_number(env.ledger().sequence() + advance);
+
+    let ttl_before = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&StorageKey::Vault(vault_id))
+    });
+    assert!(ttl_before < VAULT_TTL_THRESHOLD);
+
+    assert_eq!(client.get_beneficiary(&vault_id), beneficiary);
+
+    let ttl_after = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&StorageKey::Vault(vault_id))
+    });
+    assert!(ttl_after >= VAULT_TTL_LEDGERS);
+}
+
 
 // ---- Issue #369: Security Audit Tests ----
 
@@ -3250,11 +3316,34 @@ fn test_security_reentrancy_protection() {
     assert_eq!(vault_before.balance, 100_000);
     
     // Withdraw - state should be updated before transfer
-    let result = client.try_withdraw(&vault_id, &owner, &50_000);
+    let result = client.try_withdraw(&vault_id, &owner, &50_000, &None, &None, &None);
     assert!(result.is_ok());
     
     let vault_after = client.get_vault(&vault_id);
     assert_eq!(vault_after.balance, 50_000);
+}
+
+#[test]
+fn test_double_trigger_release_rejected() {
+    // Regression test for issue #1270: calling `trigger_release` a second
+    // time (e.g. two rapid calls before a caller observes the first result)
+    // must never transfer funds twice. The `ReleaseAttempted` guard is set
+    // before any external token transfer, so the second call must fail.
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &100u64, &Some(token_address.clone()));
+    client.deposit(&id, &owner, &100_000i128);
+
+    // Advance past expiry.
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    client.trigger_release(&id);
+    assert_eq!(client.get_vault(&id).balance, 0, "funds should be released once");
+
+    let result = client.try_trigger_release(&id);
+    assert!(result.is_err(), "second trigger_release call must be rejected");
+
+    // Balance must still reflect a single release, not a double payout.
+    assert_eq!(client.get_vault(&id).balance, 0);
 }
 
 #[test]
@@ -3286,15 +3375,15 @@ fn test_security_authorization_owner_only() {
     let attacker = Address::generate(&env);
     
     // Attacker cannot check in
-    let result = client.try_check_in(&vault_id, &attacker, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    let result = client.try_check_in(&vault_id, &attacker, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     assert!(result.is_err());
     
     // Attacker cannot withdraw
-    let result = client.try_withdraw(&vault_id, &attacker, &100);
+    let result = client.try_withdraw(&vault_id, &attacker, &100, &None, &None, &None);
     assert!(result.is_err());
     
     // Attacker cannot update beneficiary
-    let result = client.try_update_beneficiary(&vault_id, &attacker, &attacker);
+    let result = client.try_update_beneficiary(&vault_id, &attacker, &attacker, &None, &None, &None);
     assert!(result.is_err());
 }
 
@@ -3393,11 +3482,11 @@ fn test_security_released_vault_immutable() {
     client.trigger_release(&vault_id);
     
     // Cannot withdraw from released vault
-    let result = client.try_withdraw(&vault_id, &owner, &50_000);
+    let result = client.try_withdraw(&vault_id, &owner, &50_000, &None, &None, &None);
     assert!(result.is_err());
     
     // Cannot check in to released vault
-    let result = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    let result = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     assert!(result.is_err());
 }
 
@@ -3428,7 +3517,7 @@ fn test_withdraw_rejects_destination_equal_to_contract_address() {
     StellarAssetClient::new(&env, &token_address).mint(&self_owner, &100_000i128);
     client.deposit(&vault_id, &self_owner, &100_000i128);
 
-    let err = client.try_withdraw(&vault_id, &self_owner, &50_000i128).unwrap_err().unwrap();
+    let err = client.try_withdraw(&vault_id, &self_owner, &50_000i128, &None, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::InvalidWithdrawDestination as u32));
     assert_eq!(client.get_vault(&vault_id).balance, 100_000i128);
 }
@@ -3443,7 +3532,7 @@ fn test_security_paused_contract_blocks_operations() {
     client.pause(&bytes!(&env, 0x01));
 
     // Operations should fail
-    let result = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64);
+    let result = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None);
     assert!(result.is_err());
 
     let result = client.try_deposit(&vault_id, &owner, &100);
@@ -3453,7 +3542,7 @@ fn test_security_paused_contract_blocks_operations() {
     client.unpause();
     
     // Operations should succeed
-    assert!(client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64).is_ok());
+    assert!(client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[1u8; 32]), &0u64, &None, &None).is_ok());
 }
 
 #[test]
@@ -3601,7 +3690,7 @@ fn test_passkey_usage_logging() {
     let passkey_hash = BytesN::<32>::from_array(&env, &[1u8; 32]);
     
     // Check-in with passkey
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
     
     // Get passkey usage
     let usage = client.get_passkey_usage(&vault_id);
@@ -3619,11 +3708,11 @@ fn test_passkey_usage_multiple_entries() {
     let passkey_hash_2 = BytesN::<32>::from_array(&env, &[2u8; 32]);
     
     // First check-in
-    client.check_in(&vault_id, &owner, &passkey_hash_1, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash_1, &0u64, &None, &None);
     env.ledger().with_mut(|l| l.timestamp += 50);
     
     // Second check-in with different passkey
-    client.check_in(&vault_id, &owner, &passkey_hash_2, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash_2, &0u64, &None, &None);
     
     // Get passkey usage
     let usage = client.get_passkey_usage(&vault_id);
@@ -3646,13 +3735,13 @@ fn test_passkey_expiry_enforcement() {
     client.extend_passkey_expiry(&vault_id, &owner, &passkey_hash, &expiry);
     
     // Check-in should succeed before expiry
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
     
     // Advance time past expiry
     env.ledger().with_mut(|l| l.timestamp += 100);
     
     // Check-in should fail with expired passkey
-    let result = client.try_check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    let result = client.try_check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
     assert!(result.is_err());
 }
 
@@ -3960,7 +4049,7 @@ fn test_update_beneficiary_timelock() {
     let new_beneficiary = Address::generate(&env);
     
     // Initiate update
-    client.update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    client.update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
     
     // Apply update (should fail due to timelock)
     let result = client.try_apply_beneficiary_update(&vault_id, &owner);
@@ -3989,7 +4078,7 @@ fn test_update_beneficiary_owner_only() {
     env.mock_auths(&[
         (attacker.clone(), client.address.clone(), symbol_short!("ben_upd_init"), (vault_id, new_beneficiary.clone()).into_val(&env)),
     ]);
-    let result = client.try_update_beneficiary(&vault_id, &attacker, &new_beneficiary);
+    let result = client.try_update_beneficiary(&vault_id, &attacker, &new_beneficiary, &None, &None, &None);
     assert!(result.is_err());
 }
 
@@ -4004,7 +4093,7 @@ fn test_update_beneficiary_fails_after_vault_released() {
 
     let new_beneficiary = Address::generate(&env);
     let err = client
-        .try_update_beneficiary(&vault_id, &owner, &new_beneficiary)
+        .try_update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(7)); // AlreadyReleased
@@ -4487,7 +4576,7 @@ fn test_accept_with_threshold_beneficiary_only() {
     let result = client.try_accept_with_threshold(&vault_id, &100_000i128);
     assert!(result.is_ok());
 
-    let acceptance = client.get_beneficiary_conditional_acceptance(&vault_id);
+    let acceptance = client.get_beneficiary_cond_acceptance(&vault_id);
     assert!(acceptance.is_some());
     assert_eq!(acceptance.unwrap().min_balance_threshold, 100_000i128);
 }
@@ -4585,11 +4674,11 @@ fn test_trigger_release_without_threshold_condition() {
 }
 
 #[test]
-fn test_get_beneficiary_conditional_acceptance_not_set() {
+fn test_get_beneficiary_cond_acceptance_not_set() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
 
-    let acceptance = client.get_beneficiary_conditional_acceptance(&vault_id);
+    let acceptance = client.get_beneficiary_cond_acceptance(&vault_id);
     assert!(acceptance.is_none());
 }
 
@@ -4602,7 +4691,7 @@ fn test_accept_with_threshold_stores_timestamp() {
     client.accept_with_threshold(&vault_id, &100_000i128);
     let after_timestamp = env.ledger().timestamp();
 
-    let acceptance = client.get_beneficiary_conditional_acceptance(&vault_id);
+    let acceptance = client.get_beneficiary_cond_acceptance(&vault_id);
     assert!(acceptance.is_some());
     let acc = acceptance.unwrap();
     assert!(acc.accepted_at >= before_timestamp && acc.accepted_at <= after_timestamp);
@@ -4648,6 +4737,150 @@ fn test_trigger_release_with_threshold_exact_match() {
     assert_eq!(token_client.balance(&beneficiary), 100_000i128);
 }
 
+// ---- Tests for decline_with_threshold ----
+
+#[test]
+fn test_decline_with_threshold_beneficiary_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Only beneficiary can decline with threshold
+    let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_ok());
+
+    let decline = client.get_beneficiary_cond_decline(&vault_id);
+    assert!(decline.is_some());
+    assert_eq!(decline.unwrap().max_balance_threshold, 50_000i128);
+}
+
+#[test]
+fn test_decline_with_threshold_owner_fails() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    env.mock_all_auths_allowing_non_root_auth();
+    // Owner should not be able to decline
+    let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decline_with_threshold_invalid_amount() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Zero threshold should fail
+    let result = client.try_decline_with_threshold(&vault_id, &0i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_err());
+
+    // Negative threshold should fail
+    let result = client.try_decline_with_threshold(&vault_id, &-100i128, &String::from_str(&env, "Too low"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decline_with_threshold_reason_too_long() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Create a reason string that exceeds 256 characters
+    let mut long_reason = String::new(&env);
+    for _ in 0..300 {
+        long_reason.append(&String::from_str(&env, "a"));
+    }
+
+    // Should fail because reason is too long
+    let result = client.try_decline_with_threshold(&vault_id, &50_000i128, &long_reason);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decline_with_threshold_stores_timestamp() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let before = env.ledger().timestamp();
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    let after = env.ledger().timestamp();
+
+    let decline = client.get_beneficiary_cond_decline(&vault_id);
+    assert!(decline.is_some());
+    let dec = decline.unwrap();
+    assert!(dec.declined_at >= before && dec.declined_at <= after);
+}
+
+#[test]
+fn test_decline_with_threshold_emits_event() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+
+    let events = env.events().all();
+    let event_found = events.iter().any(|e| {
+        e.topics.get(0).map_or(false, |t| {
+            t.to_val(&env).to_string().contains("ben_dec")
+        })
+    });
+    assert!(event_found, "BENEFICIARY_DECLINED_TOPIC event not found");
+}
+
+#[test]
+fn test_decline_with_threshold_multiple_declines() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // First decline
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+    let decline1 = client.get_beneficiary_cond_decline(&vault_id);
+    assert_eq!(decline1.unwrap().max_balance_threshold, 50_000i128);
+
+    // Second decline should overwrite the first
+    client.decline_with_threshold(&vault_id, &100_000i128, &String::from_str(&env, "Still too low"));
+    let decline2 = client.get_beneficiary_cond_decline(&vault_id);
+    assert_eq!(decline2.unwrap().max_balance_threshold, 100_000i128);
+}
+
+#[test]
+fn test_trigger_release_with_decline_threshold_below_max() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit 30_000
+    client.deposit(&vault_id, &owner, &30_000i128);
+
+    // Beneficiary declines if balance < 50_000
+    client.decline_with_threshold(&vault_id, &50_000i128, &String::from_str(&env, "Too low"));
+
+    // Advance time to expire vault
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Release should succeed - decline is just a signal, doesn't prevent release
+    // (The release logic respects the owner's wishes, not beneficiary's rejection)
+    client.trigger_release(&vault_id);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, ReleaseStatus::Released);
+
+    let token_client = StellarAssetClient::new(&env, &token_address);
+    assert_eq!(token_client.balance(&beneficiary), 30_000i128);
+}
+
+#[test]
+fn test_decline_with_threshold_with_reason_stored() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let reason = String::from_str(&env, "Vault balance too low for obligations");
+    client.decline_with_threshold(&vault_id, &100_000i128, &reason);
+
+    let decline = client.get_beneficiary_cond_decline(&vault_id);
+    assert!(decline.is_some());
+    let dec = decline.unwrap();
+    assert_eq!(dec.reason, reason);
+    assert_eq!(dec.max_balance_threshold, 100_000i128);
+}
+
 // ---- Task 4: vault activity logging tests ----
 
 #[test]
@@ -4676,7 +4909,7 @@ fn test_activity_log_withdraw() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
     client.deposit(&vault_id, &owner, &100_000i128);
-    client.withdraw(&vault_id, &owner, &50_000i128);
+    client.withdraw(&vault_id, &owner, &50_000i128, &None, &None, &None);
 
     let log = client.get_vault_activity_log(&vault_id);
     let actions: Vec<String> = log.iter().map(|e| e.action).collect();
@@ -4688,7 +4921,7 @@ fn test_activity_log_update_beneficiary() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let new_ben = Address::generate(&env);
     let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
-    client.update_beneficiary(&vault_id, &owner, &new_ben);
+    client.update_beneficiary(&vault_id, &owner, &new_ben, &None, &None, &None);
 
     let log = client.get_vault_activity_log(&vault_id);
     let actions: Vec<String> = log.iter().map(|e| e.action).collect();
@@ -4916,7 +5149,7 @@ fn test_apply_beneficiary_update_respects_limit() {
     let vault2 = client.create_vault(&owner, &other, &3600u64, &None);
 
     // Initiate update — this just queues it (no cap check yet)
-    client.update_beneficiary(&vault2, &owner, &beneficiary).unwrap();
+    client.update_beneficiary(&vault2, &owner, &beneficiary, &None, &None, &None).unwrap();
 
     // Advance past the 24h timelock
     env.ledger().with_mut(|l| l.timestamp = 90_000);
@@ -5045,9 +5278,9 @@ fn test_predict_expiry_uses_history_average() {
 
     // Two check-ins 1800s apart
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     let predicted = client.predict_expiry(&id);
     let vault = client.get_vault(&id);
@@ -5062,13 +5295,13 @@ fn test_get_check_in_streak_increments_on_time() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     let streak = client.get_check_in_streak(&id);
     assert_eq!(streak.current, 1);
     assert_eq!(streak.best, 1);
 
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     let streak2 = client.get_check_in_streak(&id);
     assert_eq!(streak2.current, 2);
     assert_eq!(streak2.best, 2);
@@ -5085,7 +5318,7 @@ fn test_get_check_in_history_page_returns_first_page() {
     // Record 5 check-ins with the current 4-argument API (vault_id, caller, passkey, nonce)
     for _ in 0..5u64 {
         env.ledger().with_mut(|l| l.timestamp += 1800);
-        client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+        client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     }
 
     // Page 0, page_size 3 → 3 entries (oldest 3 of 5)
@@ -5104,7 +5337,7 @@ fn test_get_check_in_history_page_returns_second_page() {
 
     for _ in 0..5u64 {
         env.ledger().with_mut(|l| l.timestamp += 1800);
-        client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+        client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     }
 
     // Page 1 with page_size 3 → remaining 2 entries
@@ -5119,7 +5352,7 @@ fn test_get_check_in_history_page_returns_empty_for_out_of_bounds() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     let page = client.get_check_in_history_page(&id, &10u32, &10u32);
     assert_eq!(page.len(), 0);
@@ -5134,7 +5367,7 @@ fn test_get_check_in_history_page_with_full_50_entries() {
     // 55 check-ins — ring buffer wraps after 50, dropping the 5 oldest
     for _ in 0..55u64 {
         env.ledger().with_mut(|l| l.timestamp += 1800);
-        client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+        client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     }
 
     let full = client.get_check_in_history(&id);
@@ -5156,11 +5389,11 @@ fn test_get_check_in_history_page_entries_in_chronological_order() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp += 1000);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     env.ledger().with_mut(|l| l.timestamp += 2000);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     env.ledger().with_mut(|l| l.timestamp += 3000);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 
     let page = client.get_check_in_history_page(&id, &0u32, &3u32);
     assert_eq!(page.len(), 3);
@@ -5176,11 +5409,11 @@ fn test_get_check_in_history_entry_returns_correct_entry() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
 
     env.ledger().with_mut(|l| l.timestamp = 1_000);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     let ts0 = env.ledger().timestamp();
 
     env.ledger().with_mut(|l| l.timestamp = 3_000);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     let ts1 = env.ledger().timestamp();
 
     // Index 0 = oldest entry
@@ -5215,7 +5448,7 @@ fn test_check_in_history_page_instruction_savings_100_entries() {
     // Drive 100 check-ins — ring buffer caps at 50 so the oldest 50 are overwritten
     for i in 1u64..=100 {
         env.ledger().with_mut(|l| l.timestamp = i * 70);
-        client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+        client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
     }
 
     // History length is capped at 50
@@ -5326,7 +5559,7 @@ fn test_delegate_can_check_in() {
     client.add_check_in_delegate(&id, &owner, &delegate).unwrap();
 
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate, &passkey, &0u64).unwrap();
+    client.check_in(&id, &delegate, &passkey, &0u64, &None, &None).unwrap();
     let vault = client.get_vault(&id);
     assert!(vault.last_check_in > 0);
 }
@@ -5349,7 +5582,7 @@ fn test_non_delegate_cannot_check_in() {
     let passkey = BytesN::from_array(&env, &[1u8; 32]);
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
 
-    let err = client.try_check_in(&id, &stranger, &passkey, &0u64).unwrap_err().unwrap();
+    let err = client.try_check_in(&id, &stranger, &passkey, &0u64, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(6)); // NotOwner
 }
 
@@ -5386,11 +5619,11 @@ fn test_delegate_nonce_increments_after_check_in() {
 
     // First delegated check-in with nonce=0 must succeed
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate, &passkey, &0u64).unwrap();
+    client.check_in(&id, &delegate, &passkey, &0u64, &None, &None).unwrap();
 
     // Second delegated check-in with nonce=1 must succeed
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate, &passkey, &1u64).unwrap();
+    client.check_in(&id, &delegate, &passkey, &1u64, &None, &None).unwrap();
 }
 
 #[test]
@@ -5403,11 +5636,11 @@ fn test_delegate_replay_rejected() {
 
     // First check-in succeeds with nonce=0
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate, &passkey, &0u64).unwrap();
+    client.check_in(&id, &delegate, &passkey, &0u64, &None, &None).unwrap();
 
     // Replaying nonce=0 must be rejected with InvalidNonce (83)
     env.ledger().with_mut(|l| l.timestamp += 100);
-    let err = client.try_check_in(&id, &delegate, &passkey, &0u64).unwrap_err().unwrap();
+    let err = client.try_check_in(&id, &delegate, &passkey, &0u64, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(83)); // InvalidNonce
 }
 
@@ -5421,7 +5654,7 @@ fn test_delegate_wrong_nonce_rejected() {
 
     // Submitting nonce=1 before any check-in (expected=0) must fail
     env.ledger().with_mut(|l| l.timestamp += 100);
-    let err = client.try_check_in(&id, &delegate, &passkey, &1u64).unwrap_err().unwrap();
+    let err = client.try_check_in(&id, &delegate, &passkey, &1u64, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(83)); // InvalidNonce
 }
 
@@ -5433,9 +5666,9 @@ fn test_owner_check_in_ignores_nonce() {
 
     // Owner can pass any nonce value — it must be ignored
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &99u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &99u64, &None, &None).unwrap();
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &owner, &passkey, &0u64).unwrap();
+    client.check_in(&id, &owner, &passkey, &0u64, &None, &None).unwrap();
 }
 
 #[test]
@@ -5450,15 +5683,15 @@ fn test_delegate_nonces_are_independent_per_delegate() {
 
     // delegate_a uses nonce=0; delegate_b also starts at 0 independently
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate_a, &passkey, &0u64).unwrap();
+    client.check_in(&id, &delegate_a, &passkey, &0u64, &None, &None).unwrap();
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate_b, &passkey, &0u64).unwrap();
+    client.check_in(&id, &delegate_b, &passkey, &0u64, &None, &None).unwrap();
 
     // After one check-in each: delegate_a expects nonce=1, delegate_b expects nonce=1
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate_a, &passkey, &1u64).unwrap();
+    client.check_in(&id, &delegate_a, &passkey, &1u64, &None, &None).unwrap();
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&id, &delegate_b, &passkey, &1u64).unwrap();
+    client.check_in(&id, &delegate_b, &passkey, &1u64, &None, &None).unwrap();
 }
 
 // ── Issue #498: Beneficiary Proof of Life ────────────────────────────────────
@@ -5625,6 +5858,39 @@ fn test_enter_hibernation_already_hibernating_fails() {
 
     client.enter_hibernation(&id, &owner, &3600u64).unwrap();
     let err = client.try_enter_hibernation(&id, &owner, &3600u64).unwrap_err().unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // AlreadyHibernating
+}
+
+#[test]
+fn test_enter_hibernation_allows_reentry_after_stale_window_closes() {
+    // Regression test for issue #1271: `enter_hibernation` used to block on
+    // the mere *existence* of a hibernation record, so an owner who forgot
+    // to call `exit_hibernation` before the window closed was permanently
+    // locked out of hibernating again.
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &1000u64).unwrap();
+
+    // Let the hibernation window fully elapse without ever calling
+    // `exit_hibernation`.
+    env.ledger().with_mut(|l| l.timestamp += 1000 + 1);
+
+    // The stale entry must not block a fresh hibernation.
+    client.enter_hibernation(&id, &owner, &500u64).unwrap();
+    let h = client.get_hibernation(&id).unwrap();
+    assert_eq!(h.duration_seconds, 500u64);
+}
+
+#[test]
+fn test_enter_hibernation_still_blocked_while_active() {
+    let (_, owner, beneficiary, _, _, client) = setup();
+    let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+
+    client.enter_hibernation(&id, &owner, &1000u64).unwrap();
+
+    // Still well inside the window — must remain blocked.
+    let err = client.try_enter_hibernation(&id, &owner, &500u64).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // AlreadyHibernating
 }
 
@@ -5809,7 +6075,7 @@ fn test_withdraw_blocked_on_hibernating_vault() {
 
     client.enter_hibernation(&id, &owner, &7200u64).unwrap();
 
-    let err = client.try_withdraw(&id, &owner, &100i128).unwrap_err().unwrap();
+    let err = client.try_withdraw(&id, &owner, &100i128, &None, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(55)); // AlreadyHibernating
 }
 
@@ -5823,7 +6089,7 @@ fn test_withdraw_succeeds_after_exiting_hibernation() {
     env.ledger().with_mut(|l| l.timestamp += 1000);
     client.exit_hibernation(&id, &owner).unwrap();
 
-    client.withdraw(&id, &owner, &100i128);
+    client.withdraw(&id, &owner, &100i128, &None, &None, &None);
 }
 
 // ── Issue #1134: WithdrawalCancelled event on reversal ────────────────────────
@@ -5834,7 +6100,7 @@ fn test_reverse_withdrawal_emits_cancelled_event() {
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
     client.deposit(&id, &owner, &1000i128);
 
-    let withdrawal_id = client.withdraw(&id, &owner, &100i128).unwrap();
+    let withdrawal_id = client.withdraw(&id, &owner, &100i128, &None, &None, &None).unwrap();
     client.reverse_withdrawal(&id, &owner, &withdrawal_id).unwrap();
 
     let events = env.events().all();
@@ -5917,6 +6183,42 @@ fn test_get_beneficiary_is_distinct_from_owner() {
     let returned_beneficiary = client.get_beneficiary(&vault_id).unwrap();
     let returned_owner = client.get_vault_owner(&vault_id);
     assert_ne!(returned_beneficiary, returned_owner);
+}
+
+#[test]
+fn test_get_vault_health_summary_before_first_check_in() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    env.ledger().with_mut(|ledger| ledger.timestamp = 1_000);
+    let vault_id = client.create_vault(&owner, &beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
+
+    let summary = client.get_vault_health_summary(&vault_id).unwrap();
+
+    assert!(summary.last_check_in.is_none());
+    assert_eq!(summary.ttl_remaining, Some(MIN_CHECK_IN_INTERVAL));
+}
+
+#[test]
+fn test_get_vault_batch_preserves_order_and_missing_ids() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
+    let ids = vec![&env, vault_id, 9999u64];
+
+    let batch = client.get_vault_batch(&ids).unwrap();
+
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch.get(0).unwrap().unwrap().beneficiary, beneficiary);
+    assert!(batch.get(1).unwrap().is_none());
+}
+
+#[test]
+fn test_get_vault_batch_rejects_more_than_maximum_size() {
+    let (env, _, _, _, _, client) = setup();
+    let mut ids = Vec::new(&env);
+    for vault_id in 0..=MAX_VAULT_BATCH_SIZE {
+        ids.push_back(vault_id as u64);
+    }
+
+    assert!(client.try_get_vault_batch(&ids).is_err());
 }
 
 // ---- get_vault_status tests ----
@@ -6068,7 +6370,7 @@ fn test_update_beneficiary_rejects_contract_as_new_beneficiary() {
     env.ledger().with_mut(|l| l.timestamp += 86_400);
     
     // Attempt to update beneficiary to contract should fail
-    let result = client.try_update_beneficiary(&vault_id, &owner, &contract_address);
+    let result = client.try_update_beneficiary(&vault_id, &owner, &contract_address, &None, &None, &None);
     assert!(result.is_err());
     
     let err = result.unwrap_err().unwrap();
@@ -6086,7 +6388,7 @@ fn test_update_beneficiary_accepts_account_as_new_beneficiary() {
     let new_beneficiary = Address::generate(&env);
     
     // Update beneficiary should succeed
-    let result = client.try_update_beneficiary(&vault_id, &owner, &new_beneficiary);
+    let result = client.try_update_beneficiary(&vault_id, &owner, &new_beneficiary, &None, &None, &None);
     assert!(result.is_ok());
     
     // Verify the pending update was initiated
@@ -6136,7 +6438,7 @@ fn test_cannot_reverse_twice() {
     let vault_id = client.create_vault(&owner, &beneficiary, &86_400u64, &None);
     client.deposit(&vault_id, &owner, &100_000i128);
 
-    client.withdraw(&vault_id, &owner, &10_000i128);
+    client.withdraw(&vault_id, &owner, &10_000i128, &None, &None, &None);
     client.reverse_withdrawal(&vault_id, &owner, &0u64);
 
     // Try to reverse again
@@ -6305,7 +6607,7 @@ fn test_paused_error_on_check_in() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let vault_id = client.create_vault(&owner, &beneficiary, &1000u64, &None);
     client.pause(&bytes!(&env, 0x01));
-    let err = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[0u8; 32]), &0u64).unwrap_err().unwrap();
+    let err = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[0u8; 32]), &0u64, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::Paused as u32));
 }
 
@@ -6317,7 +6619,7 @@ fn test_max_ttl_exceeded_error_on_check_in() {
     // Set max TTL to 50 seconds; check_in_interval of 100s exceeds it
     client.set_max_ttl_seconds(&50u64);
     let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
-    let err = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[0u8; 32]), &0u64).unwrap_err().unwrap();
+    let err = client.try_check_in(&vault_id, &owner, &BytesN::from_array(&env, &[0u8; 32]), &0u64, &None, &None).unwrap_err().unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::MaxTtlExceeded as u32));
 }
 
@@ -6537,7 +6839,7 @@ fn test_check_in_history_page_first_page() {
 
     for _ in 0..5 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     let page = client.get_check_in_history_page(&id, &0u64, &3u32);
@@ -6557,7 +6859,7 @@ fn test_check_in_history_page_second_page() {
 
     for _ in 0..5 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     // Full history for cross-checking
@@ -6579,7 +6881,7 @@ fn test_check_in_history_page_exact_full_page() {
 
     for _ in 0..4 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     let page = client.get_check_in_history_page(&id, &0u64, &4u32);
@@ -6595,7 +6897,7 @@ fn test_check_in_history_page_cursor_at_last_entry() {
 
     for _ in 0..3 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     let all = client.get_check_in_history(&id);
@@ -6613,7 +6915,7 @@ fn test_check_in_history_page_cursor_out_of_bounds() {
 
     for _ in 0..3 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     // cursor == len
@@ -6634,7 +6936,7 @@ fn test_check_in_history_page_limit_zero() {
 
     for _ in 0..3 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     let page = client.get_check_in_history_page(&id, &0u64, &0u32);
@@ -6651,7 +6953,7 @@ fn test_check_in_history_page_limit_capped_at_50() {
 
     for _ in 0..10 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     // u32::MAX >> 50; result is capped, not a panic, and returns at most 10 entries.
@@ -6668,7 +6970,7 @@ fn test_check_in_history_page_consistent_with_full_history() {
 
     for _ in 0..7 {
         env.ledger().with_mut(|l| l.timestamp += 600);
-        client.check_in(&id, &owner, &passkey).unwrap();
+        client.check_in(&id, &owner, &passkey, &None, &None).unwrap();
     }
 
     let all = client.get_check_in_history(&id);
@@ -6713,11 +7015,11 @@ fn test_passkey_rotation_grace_period() {
 
     // Within grace period (1800s later), passkey check-in still succeeds
     env.ledger().with_mut(|l| l.timestamp += 1800);
-    client.check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
 
     // After grace period (> 3600s total from deprecation), check-in fails
     env.ledger().with_mut(|l| l.timestamp += 2000);
-    let res = client.try_check_in(&vault_id, &owner, &passkey_hash, &0u64);
+    let res = client.try_check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
     assert!(res.is_err());
 }
 
@@ -6733,9 +7035,9 @@ fn test_passkey_usage_analytics_tracking() {
     client.add_passkey(&vault_id, &owner, &passkey1);
     client.add_passkey(&vault_id, &owner, &passkey2);
 
-    client.check_in(&vault_id, &owner, &passkey1, &0u64);
+    client.check_in(&vault_id, &owner, &passkey1, &0u64, &None, &None);
     env.ledger().with_mut(|l| l.timestamp += 100);
-    client.check_in(&vault_id, &owner, &passkey1, &0u64);
+    client.check_in(&vault_id, &owner, &passkey1, &0u64, &None, &None);
 
     let analytics = client.get_passkey_analytics(&vault_id);
     assert_eq!(analytics.len(), 2);
@@ -6798,6 +7100,97 @@ fn test_multi_sig_passkey_withdrawal_flow() {
     client.withdraw_multi_sig(&vault_id, &owner, &100i128, &sigs_two);
 
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
+}
+
+// ── Issue #1850: End-to-end test for multi-sig vault release ────────────────
+
+#[test]
+fn test_multisig_vault_release_e2e() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit funds
+    let deposit_amount = 10_000i128;
+    client.deposit(&vault_id, &owner, &deposit_amount);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount);
+
+    // Add passkeys for multi-sig
+    let passkey1 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey2 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey3 = BytesN::from_array(&env, &[3u8; 32]);
+    client.add_passkey(&vault_id, &owner, &passkey1);
+    client.add_passkey(&vault_id, &owner, &passkey2);
+    client.add_passkey(&vault_id, &owner, &passkey3);
+
+    // Configure multi-sig with 2-of-3 threshold
+    client.configure_multisig(&vault_id, &owner, &vec![&env, passkey1.clone(), passkey2.clone(), passkey3.clone()], &2u32);
+    let config = client.get_multisig_config(&vault_id).unwrap();
+    assert_eq!(config.threshold, 2);
+    assert_eq!(config.signers.len(), 3);
+
+    // Advance time past vault expiry (check_in_interval = 100, so advance 200)
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Verify vault is expired
+    assert!(client.is_expired(&vault_id));
+
+    // Test multi-sig withdrawal before release (should work with 2 signatures)
+    let withdrawal_amount = 1_000i128;
+    let sigs = soroban_sdk::vec![&env, passkey1.clone(), passkey2.clone()];
+    client.withdraw_multi_sig(&vault_id, &owner, &withdrawal_amount, &sigs);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount - withdrawal_amount);
+
+    // Verify multi-sig proposal flow for updating beneficiary
+    let new_beneficiary = Address::generate(&env);
+    let proposal_id = client.propose_multisig(
+        &vault_id,
+        &owner,
+        &types::MultiSigOperation::UpdateBeneficiary,
+        &soroban_sdk::Bytes::new(&env),
+        &None,
+    );
+    assert!(proposal_id > 0);
+
+    // First approval (proposer auto-approves)
+    let status = client.get_multisig_proposal_status(&vault_id, &proposal_id).unwrap();
+    assert_eq!(status, types::ProposalStatus::Pending);
+
+    // Second approval from another signer
+    env.mock_all_auths_allowing_non_root_auth();
+    client.approve_multisig(&vault_id, &proposal_id);
+    
+    // Check proposal is now approved
+    let status = client.get_multisig_proposal_status(&vault_id, &proposal_id).unwrap();
+    assert_eq!(status, types::ProposalStatus::Approved);
+
+    // Execute the multi-sig proposal
+    client.execute_multisig(&vault_id, &proposal_id);
+
+    // Verify beneficiary was updated
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.beneficiary, new_beneficiary);
+
+    // Now test the full release flow with multi-sig configured
+    // Deposit more funds
+    client.deposit(&vault_id, &owner, &5_000i128);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount - withdrawal_amount + 5_000i128);
+
+    // Trigger release (vault is expired, no multi-sig needed for release)
+    client.trigger_release(&vault_id);
+
+    // Verify vault is released and beneficiary received funds
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, types::ReleaseStatus::Released);
+    assert_eq!(vault.balance, 0);
+
+    let token_client = StellarAssetClient::new(&env, &token_address);
+    assert_eq!(token_client.balance(&new_beneficiary), deposit_amount - withdrawal_amount + 5_000i128);
+
+    // Verify state transition was recorded
+    let transitions = client.get_state_transition_log(&vault_id);
+    assert!(transitions.len() > 0);
+    let last_transition = transitions.get(transitions.len() - 1).unwrap();
+    assert_eq!(last_transition.to_status, types::ReleaseStatus::Released);
 }
 
 // ── Issue #1135: AdminTransferred event on accept_admin ─────────────────────
@@ -6928,6 +7321,83 @@ fn test_get_multisig_proposal_status_rejected() {
     assert_eq!(status, ProposalStatus::Rejected);
 }
 
+#[test]
+fn test_owner_can_cancel_pending_multisig_proposal() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let signer = Address::generate(&env);
+    client.configure_multisig(&vault_id, &owner, &soroban_sdk::vec![&env, signer], &2u32);
+    let proposal_id = client.propose_multisig(
+        &vault_id,
+        &owner,
+        &MultiSigOperation::CancelVault,
+        &Bytes::new(&env),
+        &None,
+    );
+
+    client
+        .cancel_multisig_proposal(&vault_id, &proposal_id, &owner)
+        .unwrap();
+
+    assert_eq!(
+        client.get_multisig_proposal_status(&vault_id, &proposal_id),
+        ProposalStatus::Cancelled
+    );
+    assert!(client
+        .try_cancel_multisig_proposal(&vault_id, &proposal_id, &owner)
+        .is_err());
+    assert!(client.list_open_proposals(&vault_id).is_empty());
+}
+
+#[test]
+fn test_approve_prunes_expired_multisig_proposal() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let signer = Address::generate(&env);
+    client.configure_multisig(
+        &vault_id,
+        &owner,
+        &soroban_sdk::vec![&env, signer.clone()],
+        &2u32,
+    );
+    let proposal_id = client.propose_multisig(
+        &vault_id,
+        &owner,
+        &MultiSigOperation::CancelVault,
+        &Bytes::new(&env),
+        &None,
+    );
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + MULTISIG_PROPOSAL_EXPIRY + 1);
+
+    client
+        .approve_multisig(&vault_id, &proposal_id, &signer)
+        .unwrap();
+
+    assert!(client.get_multisig_proposal(&vault_id, &proposal_id).is_none());
+    assert!(client.list_open_proposals(&vault_id).is_empty());
+}
+
+#[test]
+fn test_list_open_proposals_prunes_expired_entries() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let signer = Address::generate(&env);
+    client.configure_multisig(&vault_id, &owner, &soroban_sdk::vec![&env, signer], &2u32);
+    let proposal_id = client.propose_multisig(
+        &vault_id,
+        &owner,
+        &MultiSigOperation::CancelVault,
+        &Bytes::new(&env),
+        &None,
+    );
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + MULTISIG_PROPOSAL_EXPIRY + 1);
+
+    assert!(client.list_open_proposals(&vault_id).is_empty());
+    assert!(client.get_multisig_proposal(&vault_id, &proposal_id).is_none());
+}
+
 // ── Issue #1138: 2FA-gated withdrawals ───────────────────────────────────────
 
 #[test]
@@ -6936,7 +7406,7 @@ fn test_withdraw_succeeds_when_2fa_disabled() {
     let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
     client.deposit(&vault_id, &owner, &1000i128);
 
-    client.withdraw(&vault_id, &owner, &100i128);
+    client.withdraw(&vault_id, &owner, &100i128, &None, &None, &None);
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
 }
 
@@ -6949,7 +7419,7 @@ fn test_withdraw_fails_when_2fa_enabled_and_not_verified() {
     client.enable_2fa(&vault_id, &owner, &0u32);
 
     let err = client
-        .try_withdraw(&vault_id, &owner, &100i128)
+        .try_withdraw(&vault_id, &owner, &100i128, &None, &None, &None)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, soroban_sdk::Error::from_contract_error(89)); // TwoFactorRequired
@@ -6965,6 +7435,64 @@ fn test_withdraw_succeeds_when_2fa_enabled_and_verified() {
     client.enable_2fa(&vault_id, &owner, &0u32);
     client.confirm_2fa(&vault_id, &owner);
 
-    client.withdraw(&vault_id, &owner, &100i128);
+    client.withdraw(&vault_id, &owner, &100i128, &None, &None, &None);
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
+}
+
+// ── Issue #1763: Passkey Rotation Minimum Interval Tests ─────────────────────
+
+// rotate_passkey needs a primary passkey on the vault, which no public call seeds on a
+// fresh vault, so set it through storage the same way other tests do.
+fn seed_primary_passkey(env: &Env, client: &TtlVaultContractClient<'static>, vault_id: u64, passkey: &BytesN<32>) {
+    env.as_contract(&client.address, || {
+        let key = StorageKey::Vault(vault_id);
+        let mut v: Vault = env.storage().persistent().get(&key).unwrap();
+        v.passkey_hash = Some(Bytes::from_array(env, &passkey.to_array()));
+        env.storage().persistent().set(&key, &v);
+    });
+}
+
+#[test]
+fn test_rotate_passkey_enforces_min_rotation_interval() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let passkey_0 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey_1 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey_2 = BytesN::from_array(&env, &[3u8; 32]);
+    seed_primary_passkey(&env, &client, vault_id, &passkey_0);
+
+    client.set_passkey_rotation_policy(&vault_id, &owner, &30u32, &true);
+
+    // No rotation is on record yet, so the first rotation is allowed.
+    client.rotate_passkey(&vault_id, &owner, &passkey_0, &passkey_1);
+
+    // Rotating again straight away would defeat replay protection, so it is rejected.
+    let err = client
+        .try_rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::PasskeyRotationTooSoon as u32));
+
+    // Still rejected one day short of the 30-day minimum interval.
+    env.ledger().with_mut(|l| l.timestamp += 29 * 86_400);
+    assert!(client.try_rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2).is_err());
+
+    // Allowed once the full minimum interval has elapsed.
+    env.ledger().with_mut(|l| l.timestamp += 86_400);
+    client.rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2);
+}
+
+#[test]
+fn test_rotate_passkey_unrestricted_when_policy_not_enforced() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let passkey_0 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey_1 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey_2 = BytesN::from_array(&env, &[3u8; 32]);
+    seed_primary_passkey(&env, &client, vault_id, &passkey_0);
+
+    client.set_passkey_rotation_policy(&vault_id, &owner, &30u32, &false);
+
+    client.rotate_passkey(&vault_id, &owner, &passkey_0, &passkey_1);
+    client.rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2);
 }

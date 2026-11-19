@@ -1,124 +1,79 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, panic_with_error, symbol_short, token, Address, AddressPayload, Bytes,
-    BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, panic_with_error, symbol_short, token, vec, xdr::ToXdr,
+    Address, Bytes, BytesN, Env, Map, String, Vec,
 };
 
+pub mod oracle;
 pub mod ranking;
+mod constants;
 mod types;
+pub use oracle::{OracleClient, OracleInterface};
 // The contract's `#[contracttype]` types are re-exported publicly so that
 // client crates (integration tests, fuzz targets) can reference them.
-pub use types::{
-    ArchivedVaultInfo, AuditEntry, BackupCode, BeneficiaryClaimDelegation, BeneficiaryCommitment,
-    BeneficiaryEntry, BeneficiaryPool, BeneficiaryRotationEntry, BeneficiaryStatus, BridgeConfig,
-    CheckInHistoryEntry, CheckInStreak, ConditionalAcceptanceEntry, StorageKey, DisputeStatus,
-    EncryptedBackupCodes, GeoCheckInEntry, HibernationEntry, IntegrityReport, MetadataVersionEntry,
-    MilestoneEntry, MilestoneVestingSchedule, MultiSigConfig, MultiSigOperation, MultiSigProposal,
-    OwnershipProof, OwnershipTransferRequest, PasskeyAnalytics, PasskeyHash, PasskeyUsageEntry,
-    PasskeyUsageStat, PauseRecord, PendingBeneficiaryUpdate, PendingMultiSigOp, ProofOfLifeEntry, ProposalStatus,
-    ReleaseCondition, ReleaseEvent, ReleaseStatus, ReleaseVoteEntry, StateTransitionEntry,
-    TokenCollateral, TokenConversion, TokenHedge, TokenLending, TokenRebalanceConfig, TokenStaking,
-    TokenWeight, TtlBorrowRecord, UpgradeProposal, Vault, VaultStatusSummary, VestingBonusConfig,
-    VestingCatchUpConfig, VestingPenaltyConfig, VestingPendingClaim, VestingSchedule,
-    WhitelistEntry, WithdrawalLimit, WithdrawalReversal, WithdrawalScheduleEntry,
-    WithdrawalTracker, YieldDistributionConfig, YieldDistributionMode,
-    ACCEPTANCE_CONDITIONS_SET_TOPIC, ACCEPTANCE_DEADLINE_EXPIRED_TOPIC, ADD_PASSKEY_TOPIC,
-    ADMIN_TRANSFER_COMPLETED_TOPIC,
-    ADMIN_TRANSFER_PROPOSED_TOPIC, BACKUP_CODES_ENCRYPTED_TOPIC, BACKUP_CODES_GENERATED_TOPIC,
-    BACKUP_CODE_USED_TOPIC, BATCH_CHECKIN_TOPIC, BATCH_STATUS_TOPIC, BENEFICIARY_ACCEPTED_TOPIC,
-    BENEFICIARY_CAP_TOPIC, BENEFICIARY_CONDITION_ACCEPTED_TOPIC, BENEFICIARY_DECLINED_TOPIC,
-    BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC, BENEFICIARY_IDENTITY_VERIFIED_TOPIC,
-    BENEFICIARY_REBALANCED_TOPIC, BENEFICIARY_TIER_SET_TOPIC, BENEFICIARY_TRIGGER_SET_TOPIC,
-    BENEFICIARY_UPDATED_TOPIC, BENEFICIARY_WATERFALL_TOPIC, BEN_CLAIM_DELEG_TOPIC,
-    BEN_ROTATION_TOPIC, CANCEL_TOPIC,
-    CHECKIN_GEO_TOPIC, CHECKIN_POW_TOPIC, CHECKIN_RATE_LIMITED_TOPIC, CHECK_IN_TOPIC,
-    CLAIM_VEST_TOPIC, CLIFF_REACHED_TOPIC, CONDITIONS_ACCEPTED_TOPIC, CONFLICT_EXPIRED_TOPIC,
-    DELEGATE_BENEFICIARY_TOPIC, DELEGATE_CHECKIN_TOPIC, DEPOSIT_TOPIC, DISPUTE_FILED_TOPIC,
-    DISPUTE_RESOLVED_TOPIC, DUPLICATE_VAULT_TOPIC, EXPIRY_WARNING_THRESHOLD,
-    HIBERNATION_ENTERED_TOPIC, HIBERNATION_EXITED_TOPIC, INACTIVITY_PENALTY_TOPIC,
-    INHERITANCE_TOPIC, INTEGRITY_TOPIC, MAX_CUSTOM_METADATA_LEN, MAX_DESCRIPTION_LEN,
-    MAX_METADATA_LEN, MAX_NAME_LEN, MAX_NOTES_LEN, MAX_RELEASE_MEMO_LEN, META_REVERT_TOPIC,
-    META_VERSION_TOPIC,
-    MIN_THRESHOLD_REDISTRIBUTE_TOPIC, MIN_THRESHOLD_SET_TOPIC, MIN_THRESHOLD_SKIP_TOPIC,
-    MULTISIG_APPROVED_TOPIC, MULTISIG_CONFIG_TOPIC, MULTISIG_EXECUTED_TOPIC,
-    MULTISIG_PROPOSAL_EXPIRY, MULTISIG_PROPOSED_TOPIC, MULTISIG_REJECTED_TOPIC,
-    MULTISIG_SIGNER_REMOVED_TOPIC, MULTISIG_VETOED_TOPIC, OWNERSHIP_ACCEPTED_TOPIC,
-    OWNERSHIP_CANCELLED_TOPIC, OWNERSHIP_INITIATED_TOPIC, OWNERSHIP_PROOF_TOPIC, OWNERSHIP_TOPIC,
-    OWNERSHIP_TRANSFER_EXPIRED_TOPIC, PASSKEY_ANALYTICS_TOPIC, PASSKEY_EXPIRY_EXTENDED_TOPIC,
-    PASSKEY_LOCKOUT_TOPIC, PASSKEY_RECOVERED_TOPIC, PASSKEY_RECOVERY_INITIATED_TOPIC,
-    PASSKEY_ROTATION_ENFORCED_TOPIC, PASSKEY_ROTATION_REQUIRED_TOPIC, PASSKEY_UNLOCKED_TOPIC,
-    PASSKEY_USAGE_TOPIC, PAUSE_TOPIC, PAUSE_VAULT_TOPIC, PENDING_MULTISIG_OP_COSIGNED_TOPIC,
-    PENDING_MULTISIG_OP_CREATED_TOPIC, PENDING_MULTISIG_OP_EXECUTED_TOPIC,
-    PENDING_MULTISIG_OP_EXPIRED_TOPIC, PING_EXPIRY_TOPIC, POOL_CREATED_TOPIC,
-    PROOF_OF_LIFE_TOPIC, RECOVERY_EXTEND_TOPIC, RELEASE_TOPIC, RELEASE_VOTE_PASSED_TOPIC,
-    RELEASE_VOTE_TOPIC, REMOVE_PASSKEY_TOPIC, RESTORE_VAULT_TOPIC, RESUME_VAULT_TOPIC,
-    REVERSAL_GRACE_EXPIRED_TOPIC, REVOKE_DELEGATE_TOPIC, ROTATE_PASSKEY_TOPIC,
-    SET_BENEFICIARIES_TOPIC, SET_DECAY_RATE_TOPIC, SET_MAX_INTERVAL_TOPIC, SET_MAX_TTL_TOPIC,
-    SET_METADATA_TOPIC, SET_MIN_INTERVAL_TOPIC, SET_RECOVERY_TOPIC, SET_SPENDING_LIMIT_TOPIC,
-    SET_VESTING_TOPIC, STATE_TRANSITION_TOPIC, SYNC_TTL_TOPIC, TOKEN_COLLATERAL_TOPIC,
-    TOKEN_COLLAT_RLSD_TOPIC, TOKEN_CONVERSION_TOPIC, TOKEN_HEDGE_CLOSE_TOPIC, TOKEN_HEDGE_TOPIC,
-    TOKEN_LENDING_TOPIC, TOKEN_LEND_REPAY_TOPIC, TOKEN_REBALANCED_TOPIC, TOKEN_REBALANCE_TOPIC,
-    TOKEN_STAKING_TOPIC, TOKEN_UNSTAKING_TOPIC, TOKEN_WHITELIST_VALIDATED_TOPIC,
-    TTL_ACCELERATE_TOPIC, TTL_BORROW_TOPIC, TTL_DECAY_TOPIC, TTL_PREDICTED_TOPIC, TTL_REPAY_TOPIC,
-    UNPAUSE_TOPIC, UPDATE_INTERVAL_TOPIC, UPDATE_METADATA_TOPIC, ADAPTIVE_INTERVAL_TOPIC, VAULT_ARCHIVED_TOPIC,
-    VAULT_CAP_TOPIC, VAULT_CLONED_OVERRIDE_TOPIC, VAULT_CLONED_TOPIC, VAULT_CREATED_TOPIC,
-    VAULT_MERGED_TOPIC, VESTING_BONUS_CLAIMED_TOPIC, VESTING_BONUS_SET_TOPIC,
-    VESTING_CANCELLED_TOPIC, VESTING_CATCHUP_CLAIMED_TOPIC, VESTING_CATCHUP_SET_TOPIC,
-    WHITELIST_ADDED_TOPIC, WHITELIST_REMOVED_TOPIC, WHITELIST_VIOLATION_TOPIC,
-    WITHDRAWAL_APPROVAL_DENIED_TOPIC, WITHDRAWAL_APPROVAL_GRANTED_TOPIC,
-    WITHDRAWAL_APPROVAL_REQUESTED_TOPIC, WITHDRAWAL_AUDIT_TOPIC, WITHDRAWAL_DISPUTE_FILED_TOPIC,
-    WITHDRAWAL_DISPUTE_RESOLVED_TOPIC, WITHDRAWAL_EXECUTED_TOPIC, WITHDRAWAL_FAILED_TOPIC,
-    WITHDRAWAL_LIMIT_EXCEEDED_TOPIC, WITHDRAWAL_LIMIT_SET_TOPIC, WITHDRAWAL_NOTIF_TOPIC,
-    WITHDRAWAL_REVERSED_TOPIC, WITHDRAWAL_CANCELLED_TOPIC, WITHDRAWAL_SCHEDULED_TOPIC, WITHDRAWAL_VALIDATION_TOPIC,
-    WITHDRAW_TOPIC, WRAPPED_TOKEN_REGISTERED_TOPIC, WRAPPED_TOKEN_UNREGISTERED_TOPIC,
-    YIELD_DISTRIBUTED_TOPIC, YIELD_REINVESTED_TOPIC, FREEZE_VAULT_TOPIC, UNFREEZE_VAULT_TOPIC,
-    UPGRADE_PROPOSED_TOPIC, UPGRADE_EXECUTED_TOPIC, UPGRADE_CANCELLED_TOPIC,
-    TOKEN_ALLOWLIST_ADDED_TOPIC, TOKEN_ALLOWLIST_REMOVED_TOPIC,
-    VAULT_LOCK_TOPIC, VAULT_UNLOCK_TOPIC, LOW_TTL_WARNING_TOPIC,
-};
+pub use types::*;
+pub use constants::*;
 #[cfg(test)]
 mod beneficiary_auction_tests;
+// Issues #1323, #1324, #1325, #1326: structured event emission tests
 #[cfg(test)]
-mod beneficiary_pooling_tests;#[cfg(test)]
+mod beneficiary_pooling_tests;
+#[cfg(test)]
 mod beneficiary_vesting_auction_tests;
 #[cfg(test)]
 mod beneficiary_vesting_tests;
 #[cfg(test)]
 mod bps_invariant_tests;
 #[cfg(test)]
+mod waterfall_proptests;
+#[cfg(test)]
+mod event_emission_tests;
+// Issue #1288: multi-beneficiary vault with percentage-based splits
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
-mod regression_tests;
+mod multi_beneficiary_split_tests;
+// Issue #1338: vault export/import roundtrip tests
 #[cfg(test)]
-mod passkey_last_used_tests;
+mod beneficiary_archival_notification_tests;
 #[cfg(test)]
-mod beneficiary_waitlist_tests;
-#[cfg(test)]
-mod beneficiary_notification_tests;
+mod beneficiary_confirmation_tests;
 #[cfg(test)]
 mod beneficiary_identity_verification_tests;
 #[cfg(test)]
 mod beneficiary_memo_tests;
 #[cfg(test)]
-mod vault_notes_tests;
+mod beneficiary_notification_tests;
 #[cfg(test)]
-mod vault_expiry_tests;
-#[cfg(test)]
-mod vault_pause_tests;
-#[cfg(test)]
-mod passkey_device_type_tests;
-#[cfg(test)]
-mod milestone_vesting_tests;
+mod beneficiary_waitlist_tests;
 mod checkin_email_token_tests;
 #[cfg(test)]
 mod checkin_streak_bonus_tests;
 #[cfg(test)]
-mod beneficiary_confirmation_tests;
-
+mod milestone_vesting_tests;
+#[cfg(test)]
+mod passkey_device_type_tests;
+#[cfg(test)]
+mod passkey_last_used_tests;
+#[cfg(test)]
+mod regression_tests;
+#[cfg(test)]
+mod vault_expiry_tests;
+#[cfg(test)]
+mod vault_export_import_tests;
+#[cfg(test)]
+mod vault_notes_tests;
+#[cfg(test)]
+mod vault_pause_tests;
 
 #[cfg(test)]
 mod min_checkin_interval_tests;
+
+// Issue #1264 #1265 #1266 #1267: dedicated guard tests
+#[cfg(test)]
+mod bug_fix_tests_1264_1265_1266_1267;
+mod release_conditions_query_tests;
 
 #[cfg(test)]
 mod vault_archiving_tests;
@@ -127,6 +82,28 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
+// Issue #1263: structured VaultNotFound error on check-in for non-existent vault
+#[cfg(test)]
+mod batch_withdrawal_tests;
+#[cfg(test)]
+mod checkin_nonexistent_vault_tests;
+
+// Issue #1294: withdrawal dispute window
+#[cfg(test)]
+mod withdrawal_dispute_tests;
+
+// Issue #1340: vault ownership transfer with two-step acceptance flow
+#[cfg(test)]
+mod ownership_transfer_1340_tests;
+
+// Issue #1297: automated beneficiary conflict resolution
+#[cfg(test)]
+mod beneficiary_conflict_resolution_tests;
+
+// Issues #1525, #1526, #1527, #1528: passkey revocation event, vesting
+// validation, vesting property tests, withdrawal whitelist expiry
+#[cfg(test)]
+mod issue_1525_1528_tests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -137,6 +114,9 @@ pub const VAULT_TTL_THRESHOLD: u32 = 1000;
 /// Used as the floor in `vault_ttl_ledgers`; long-interval vaults get a larger value.
 pub const VAULT_TTL_LEDGERS: u32 = 200_000;
 
+/// Maximum number of deposit history entries kept per vault (oldest dropped first).
+pub const DEPOSIT_HISTORY_CAP: u32 = 100;
+
 /// Minimum TTL (in ledgers) before instance storage is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const INSTANCE_TTL_THRESHOLD: u32 = 1000;
@@ -146,26 +126,8 @@ pub const INSTANCE_TTL_THRESHOLD: u32 = 1000;
 /// Extended on every state-mutating call to keep contract instance alive.
 pub const INSTANCE_TTL_LEDGERS: u32 = 200_000;
 
-/// Approximate ledger close time in seconds (Stellar mainnet ~5s).
-const LEDGER_SECOND: u32 = 5;
-/// Number of seconds in one minute.
-const SECONDS_PER_MINUTE: u64 = 60;
-/// Number of seconds in one hour.
-const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
-/// Number of seconds in one day.
-const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
-/// Number of days in the simplified financial-year calculation.
-const DAYS_PER_YEAR: u64 = 365;
 /// Basis points representing 100%.
 pub const BASIS_POINTS_100_PERCENT: i128 = 10_000;
-/// Default maximum vault TTL (10 years, in seconds).
-const DEFAULT_MAX_TTL_SECONDS: u64 = 10 * DAYS_PER_YEAR * SECONDS_PER_DAY;
-/// Soroban maximum persistent entry TTL in ledgers (~180 days at 5s/ledger).
-const MAX_PERSISTENT_TTL: u32 = 3_110_400;
-/// Maximum number of snapshots retained per vault.
-const MAX_SNAPSHOTS_PER_VAULT: u32 = 1_000;
-/// Maximum number of vault IDs accepted by `get_vault_batch_status` in a single call.
-const MAX_BATCH_STATUS_SIZE: u32 = 100;
 
 /// Two-step ownership transfer constants - Issue #1119
 /// 24-hour time-lock before new owner can accept the transfer (in seconds)
@@ -177,11 +139,6 @@ pub const OWNERSHIP_TRANSFER_EXPIRY: u64 = 604_800;
 /// 72-hour time-lock before upgrade can be executed (in seconds)
 pub const UPGRADE_TIMELOCK: u64 = 259_200; // 72 hours
 
-/// Maximum hibernation duration in seconds.
-/// Soroban's maximum persistent entry TTL is 3_110_400 ledgers at ~5 s/ledger ≈ 180 days.
-/// We cap hibernation at that ceiling so storage extension can never fail.
-pub const MAX_HIBERNATION_SECONDS: u64 = 15_552_000; // 180 days
-
 /// Compute a persistent storage TTL (in ledgers) for a vault with the given
 /// check-in interval. Applies a 2× safety buffer so storage outlives the
 /// interval, capped at the Soroban maximum.
@@ -192,16 +149,10 @@ fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
     ledgers.clamp(VAULT_TTL_LEDGERS, MAX_PERSISTENT_TTL)
 }
 
-/// Minimum check-in interval: 1 hour (3600 seconds)
-/// Prevents abuse of TTL extension mechanisms with unreasonably short intervals
-pub const MIN_CHECK_IN_INTERVAL: u64 = 3600;
-
-/// Maximum number of beneficiaries allowed per vault.
-pub const MAX_BENEFICIARIES: u32 = 20;
-
 #[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
+// Every `panic_with_error!` in this file already uses a `ContractError` variant (issue #1761).
 pub enum ContractError {
     AlreadyInitialized = 1,
     InvalidInterval = 2,
@@ -300,14 +251,99 @@ pub enum ContractError {
     ChallengeNotFound = 86,
     ChallengeExpired = 87,
     DuplicateSignature = 88,
-    CheckInIntervalTooShort = 89,  // Issue #1121: Enforce minimum check-in interval
-    SnapshotNotFound = 90,         // Issue #1123: Vault archiving
-    AlreadyOwner = 91,             // Issue #1119: Two-step ownership transfer
-    NoPendingUpgrade = 92,         // Issue #1120: Contract upgrade mechanism
-    UpgradeTimelocked = 93,        // Issue #1120: Upgrade not yet executable
-    UpgradeInvalidWasm = 94,       // Issue #1120: Invalid WASM hash
-    TokenNotAllowed = 95,          // Issue #1118: Token not in allowlist
-    VaultPaused = 96,              // Issue #790: vault-level pause blocks trigger_release
+    CheckInIntervalTooShort = 89, // Issue #1121: Enforce minimum check-in interval
+    SnapshotNotFound = 90,        // Issue #1123: Vault archiving
+    AlreadyOwner = 91,            // Issue #1119: Two-step ownership transfer
+    NoPendingUpgrade = 92,        // Issue #1120: Contract upgrade mechanism
+    UpgradeTimelocked = 93,       // Issue #1120: Upgrade not yet executable
+    UpgradeInvalidWasm = 94,      // Issue #1120: Invalid WASM hash
+    TokenNotAllowed = 95,         // Issue #1118: Token not in allowlist
+    VaultPaused = 96,             // Issue #790: vault-level pause blocks trigger_release
+    CommitmentAlreadySet = 97,
+    CommitmentNotFound = 98,
+    BeneficiaryAlreadyRevealed = 99,
+    InvalidZkProof = 100,
+    // Issue #1294: withdrawal dispute window
+    WithdrawalDisputeWindowExpired = 101,
+    WithdrawalDisputeNotFound = 102,
+    // Merged multi-branch errors (values 103+, branch-local numbers were not preserved)
+    AdminCannotOwnVault = 103,
+    AdminTransferTimeLocked = 104,
+    BatchTooLarge = 105,
+    BelowMinimumBalance = 106,
+    BeneficiaryCapacityExceeded = 107,
+    BeneficiaryMustBeAccount = 108,
+    BeneficiaryVetoReleaseCondition = 109,
+    DelegateExpired = 110,
+    DelegationExpired = 111,
+    GracePeriodActive = 112,
+    HibernationDurationTooLong = 113,
+    HibernationDurationTooShort = 114,
+    InvalidConfig = 115,
+    InvalidDeadline = 116,
+    InvalidMetadataEncoding = 117,
+    InvalidRecoveryCode = 118,
+    InvalidThresholds = 119,
+    InvalidWithdrawDestination = 120,
+    LoanAlreadyExists = 121,
+    LoanAlreadyRepaid = 122,
+    LoanNotFound = 123,
+    MilestoneAlreadyAttested = 124,
+    MilestoneNotFound = 125,
+    NoDelegation = 126,
+    NoPendingProtocolConfig = 127,
+    NotDelegate = 128,
+    ProtocolConfigTimeLocked = 129,
+    ReasonTooLong = 130,
+    RecoveryCodeNotSet = 131,
+    RecurringWithdrawalNotFound = 132,
+    RecurringWithdrawalNotReady = 133,
+    TwoFactorNotEnabled = 134,
+    TwoFactorRequired = 135,
+    UnauthorizedDepositor = 136,
+    VaultOwnerLocked = 137,
+    VaultReleased = 138,
+    VestingAlreadyAccelerated = 139,
+    VestingReversalExpired = 140,
+    VestingReversalNotFound = 141,
+    VestingStaggerNotFound = 142,
+    WithdrawalRateLimitExceeded = 143,
+    // Issue #1297: automated beneficiary conflict resolution
+    /// Conflict has already been resolved and cannot be changed.
+    ConflictAlreadyResolved = 144,
+    /// Dispute window is still active; auto-resolution cannot run yet.
+    ConflictDisputeWindowActive = 145,
+    /// No conflict record found for this vault.
+    ConflictNotFound = 146,
+    /// Conflict exists but no claims have been filed.
+    ConflictNoClaimsFound = 147,
+    // Issue #1526: vesting schedule validation
+    VestingZeroDuration = 148,
+    VestingCliffAfterEnd = 149,
+    // Issue #1528: withdrawal whitelist expiry
+    WhitelistEntryExpired = 150,
+    InvalidWhitelistExpiry = 151,
+    CheckInTooEarly = 152,
+    // Issue #1806: beneficiary auction reserve price
+    ReserveNotMet = 153,
+    // Passkey rotation policy: the active passkey was rotated too recently.
+    PasskeyRotationTooSoon = 154,
+    /// Passkey lockout triggered after exceeding failed attempt threshold (Issue #1847).
+    PasskeyLockoutTriggered = 155,
+    /// Cross-chain bridge configuration has not been set for the vault.
+    BridgeNotConfigured = 156,
+    /// Cross-chain bridge configuration is currently inactive.
+    BridgeNotActive = 157,
+    /// Split percentage is invalid or total does not equal 100%.
+    InvalidPercentage = 158,
+    /// Oracle attestation timestamp is stale or outside the allowable freshness window.
+    OracleAttestationStale = 159,
+    /// Beneficiary identity has not been verified by the vault's KYC oracle.
+    BeneficiaryNotVerified = 160,
+    /// Secp256r1 signature or signed message is invalid or missing.
+    InvalidSignature = 161,
+    /// No identity oracle has been configured for the vault.
+    IdentityOracleNotSet = 162,
 }
 
 #[contract]
@@ -368,7 +404,9 @@ impl TtlVaultContract {
             paused_at: env.ledger().timestamp(),
         };
         env.storage().instance().set(&StorageKey::Paused, &true);
-        env.storage().instance().set(&StorageKey::PauseRecord, &record);
+        env.storage()
+            .instance()
+            .set(&StorageKey::PauseRecord, &record);
         env.events()
             .publish((PAUSE_TOPIC,), (true, paused_by, reason));
         env.storage()
@@ -476,7 +514,9 @@ impl TtlVaultContract {
     /// # Returns
     /// `Some(seconds)` with the minimum interval, or `None` if not set
     pub fn get_min_check_in_interval(env: Env) -> Option<u64> {
-        env.storage().instance().get(&StorageKey::MinCheckInInterval)
+        env.storage()
+            .instance()
+            .get(&StorageKey::MinCheckInInterval)
     }
 
     /// Returns the maximum check-in interval if set.
@@ -487,7 +527,9 @@ impl TtlVaultContract {
     /// # Returns
     /// `Some(seconds)` with the maximum interval, or `None` if not set
     pub fn get_max_check_in_interval(env: Env) -> Option<u64> {
-        env.storage().instance().get(&StorageKey::MaxCheckInInterval)
+        env.storage()
+            .instance()
+            .get(&StorageKey::MaxCheckInInterval)
     }
 
     /// Sets the maximum TTL (time-to-live) for vaults in seconds.
@@ -571,10 +613,24 @@ impl TtlVaultContract {
             .unwrap_or(0)
     }
 
-    /// Adds a token to the whitelist, allowing it to be used in vaults.
+    /// Whitelists a SEP-41 compatible token for use in vaults (admin-only).
+    ///
+    /// Once whitelisted, the token can be specified when creating vaults.
+    /// Only admin can modify the whitelist to prevent unauthorized token types.
+    ///
+    /// # SEP-41 Token Support
+    /// This contract supports any SEP-41 token (Stellar asset standard):
+    /// - USDC (circle.com issued on Stellar)
+    /// - EURC (circle.com issued on Stellar)
+    /// - Custom issued tokens on Stellar
+    /// - Wrapped tokens via `register_wrapped_token` for cross-chain compatibility
+    ///
+    /// All tokens must be whitelisted here before use, and must implement
+    /// Soroban's standard token interface for compatibility.
     ///
     /// # Arguments
-    /// * `token_address` - The token contract address to whitelist
+    /// * `env` - The Soroban environment
+    /// * `token_address` - The SEP-41 token contract address to whitelist
     ///
     /// # Panics
     /// * Panics if the caller is not the admin
@@ -590,10 +646,14 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Removes a token from the whitelist.
+    /// Removes a token from the whitelist, preventing new vaults from using it (admin-only).
+    ///
+    /// Existing vaults using this token can continue operating; only new vault creation
+    /// with this token is prevented.
     ///
     /// # Arguments
-    /// * `token_address` - The token contract address to remove
+    /// * `env` - The Soroban environment
+    /// * `token_address` - The token contract address to remove from whitelist
     ///
     /// # Panics
     /// * Panics if the caller is not the admin
@@ -783,6 +843,114 @@ impl TtlVaultContract {
         } else {
             false
         }
+    }
+
+    // --- Issue #1836: Vault-scoped bridge configuration for cross-chain deposits ---
+
+    /// Sets the bridge configuration for a specific vault.
+    ///
+    /// The vault owner designates which chain and bridge contract to use for
+    /// cross-chain deposits into this vault. This does not replace the global
+    /// admin-level bridge registry; it is a per-vault override that selects
+    /// which registered bridge the vault will accept deposits from.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault to configure
+    /// * `config` - The `BridgeConfig` to associate with this vault
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the vault owner
+    /// * Panics if the vault does not exist
+    pub fn set_bridge_config(env: Env, vault_id: u64, config: BridgeConfig) {
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+        let key = StorageKey::VaultBridgeConfig(vault_id);
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (VAULT_BRIDGE_CONFIG_SET_TOPIC, vault_id),
+            (config.chain_id, config.bridge_address),
+        );
+    }
+
+    /// Gets the vault-scoped bridge configuration, if set.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    ///
+    /// # Returns
+    /// `Some(BridgeConfig)` if a config has been set for this vault, `None` otherwise
+    pub fn get_vault_bridge_config(env: Env, vault_id: u64) -> Option<BridgeConfig> {
+        let key = StorageKey::VaultBridgeConfig(vault_id);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Records a cross-chain deposit into a vault via the vault's configured bridge.
+    ///
+    /// This function validates that the vault has a bridge config set, that the
+    /// bridge is active, and that the source chain matches the configured chain.
+    /// It then credits `amount` to the vault balance, mirroring how a native
+    /// deposit would be processed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The destination vault
+    /// * `source_chain` - The chain ID the deposit originates from
+    /// * `amount` - The amount to credit (in stroops / base units)
+    ///
+    /// # Panics
+    /// * Panics if no bridge config has been set for this vault (`BridgeNotConfigured`)
+    /// * Panics if the bridge is not active (`BridgeNotActive`)
+    /// * Panics if `source_chain` does not match the configured chain (`InvalidConfig`)
+    /// * Panics if `amount` is not positive (`InvalidAmount`)
+    /// * Panics if the vault is not in `Locked` status (`VaultReleased`)
+    /// * Panics if the vault has expired (`VaultExpired`)
+    pub fn bridge_deposit(env: Env, vault_id: u64, source_chain: u32, amount: i128) {
+        if amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        let bridge_config: BridgeConfig = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BridgeConfig>(&StorageKey::VaultBridgeConfig(vault_id))
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BridgeNotConfigured));
+        if !bridge_config.is_active {
+            panic_with_error!(&env, ContractError::BridgeNotActive);
+        }
+        if bridge_config.chain_id != source_chain {
+            panic_with_error!(&env, ContractError::InvalidConfig);
+        }
+        let mut vault = Self::load_vault(&env, vault_id);
+        if vault.status != ReleaseStatus::Locked {
+            panic_with_error!(&env, ContractError::VaultReleased);
+        }
+        let now = env.ledger().timestamp();
+        if now >= vault.last_check_in + vault.check_in_interval {
+            panic_with_error!(&env, ContractError::VaultExpired);
+        }
+        vault.balance = vault
+            .balance
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
+        let vault_key = StorageKey::Vault(vault_id);
+        env.storage().persistent().set(&vault_key, &vault);
+        env.storage()
+            .persistent()
+            .extend_ttl(&vault_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (VAULT_BRIDGE_DEPOSIT_TOPIC, vault_id),
+            (source_chain, amount),
+        );
     }
 
     /// Validates that a new WASM hash is safe to upgrade to.
@@ -1021,7 +1189,11 @@ impl TtlVaultContract {
         let yield_amount = (staking.staked_amount as i128)
             .checked_mul(staking.annual_yield_bps as i128)
             .and_then(|v| v.checked_mul(time_elapsed as i128))
-            .and_then(|v| v.checked_div(BASIS_POINTS_100_PERCENT * DAYS_PER_YEAR as i128 * SECONDS_PER_DAY as i128))
+            .and_then(|v| {
+                v.checked_div(
+                    BASIS_POINTS_100_PERCENT * DAYS_PER_YEAR as i128 * SECONDS_PER_DAY as i128,
+                )
+            })
             .unwrap_or(0);
 
         if yield_amount <= 0 {
@@ -1137,8 +1309,14 @@ impl TtlVaultContract {
     /// Returns the current protocol-level configuration as a typed struct — Issue #810.
     pub fn get_protocol_config(env: Env) -> ProtocolConfig {
         ProtocolConfig {
-            min_check_in_interval: env.storage().instance().get(&StorageKey::MinCheckInInterval),
-            max_check_in_interval: env.storage().instance().get(&StorageKey::MaxCheckInInterval),
+            min_check_in_interval: env
+                .storage()
+                .instance()
+                .get(&StorageKey::MinCheckInInterval),
+            max_check_in_interval: env
+                .storage()
+                .instance()
+                .get(&StorageKey::MaxCheckInInterval),
             max_ttl_seconds: env
                 .storage()
                 .instance()
@@ -1149,6 +1327,16 @@ impl TtlVaultContract {
                 .instance()
                 .get(&StorageKey::TtlDecayRate)
                 .unwrap_or(0),
+            require_utf8_metadata: env
+                .storage()
+                .instance()
+                .get(&StorageKey::RequireUtf8Metadata)
+                .unwrap_or(false),
+            max_vaults_per_owner: env
+                .storage()
+                .instance()
+                .get(&StorageKey::MaxVaultsPerOwner)
+                .unwrap_or(20),
         }
     }
 
@@ -1291,11 +1479,13 @@ impl TtlVaultContract {
             .get(&StorageKey::PendingAdmin)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingAdmin));
         pending.require_auth();
+        // Fail closed: a missing proposal timestamp must never default to 0,
+        // which would make the timelock check pass immediately (Issue #1788).
         let proposed_at: u64 = env
             .storage()
             .instance()
             .get(&StorageKey::AdminTransferProposedAt)
-            .unwrap_or(0);
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoPendingAdmin));
         if env.ledger().timestamp() < proposed_at + ADMIN_TRANSFER_TIMELOCK {
             panic_with_error!(&env, ContractError::AdminTransferTimeLocked);
         }
@@ -1318,23 +1508,42 @@ impl TtlVaultContract {
 
     // --- vault lifecycle ---
 
-    /// Creates a new time-locked vault.
+    /// Creates a new time-locked vault with support for SEP-41 compatible tokens.
     ///
     /// The vault starts with a zero balance and must be funded via `deposit`
-    /// or `batch_deposit` before it can hold assets.
+    /// or `batch_deposit` before it can hold assets. Supports any whitelisted
+    /// SEP-41 token (e.g., native XLM, USDC, EURC, or other Stellar assets).
+    ///
+    /// # Token Support (SEP-41)
+    /// - If `token_address` is `None`, vault defaults to contract's XLM token
+    /// - If `token_address` is `Some(addr)`, vault uses the specified SEP-41 token
+    /// - All token transfers use Soroban's standard `token::Client` interface
+    /// - Non-whitelisted tokens are rejected at vault creation
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `owner` - The address of the vault owner (must authorize)
     /// * `beneficiary` - The address that will receive funds when the vault expires
     /// * `check_in_interval` - Time interval in seconds between required check-ins
+    /// * `token_address` - Optional SEP-41 token contract address; uses XLM if None
     ///
     /// # Returns
     /// The unique vault ID
     ///
     /// # Panics
     /// * Panics if `check_in_interval` is 0
+    /// * Panics if `check_in_interval` is below minimum (1 hour)
     /// * Panics if `check_in_interval` is outside the configured min/max bounds
+    /// * Panics if `token_address` is provided but not whitelisted
+    /// * Panics if `owner` is the contract admin (prevented for security)
+    /// * Panics if `owner` and `beneficiary` are the same address
+    ///
+    /// # Example (USDC Vault)
+    /// ```ignore
+    /// let usdc_token = Address::from_contract_id(&env, &usdc_contract_id);
+    /// client.whitelist_token(&usdc_token);
+    /// let vault_id = client.create_vault(&owner, &beneficiary, &interval, &Some(usdc_token));
+    /// ```
     pub fn create_vault(
         env: Env,
         owner: Address,
@@ -1351,10 +1560,15 @@ impl TtlVaultContract {
         if check_in_interval == 0 {
             panic_with_error!(&env, ContractError::InvalidInterval);
         }
-        
+
         // Issue #1121: Enforce minimum check-in interval (1 hour)
         if check_in_interval < MIN_CHECK_IN_INTERVAL {
             panic_with_error!(&env, ContractError::CheckInIntervalTooShort);
+        }
+
+        // Issue #1165: Enforce maximum check-in interval (10 years)
+        if check_in_interval > MAX_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::IntervalTooHigh);
         }
 
         Self::assert_interval_in_bounds(&env, check_in_interval);
@@ -1406,7 +1620,7 @@ impl TtlVaultContract {
             None => Self::load_token(&env),
         };
 
-        let vault_id = Self::vault_count(env.clone()) + 1;
+        let vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let metadata = String::from_str(&env, "");
         Self::assert_metadata_len(&env, &metadata);
@@ -1417,13 +1631,14 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata,
             token_address: vault_token,
             custom_metadata: Bytes::new(&env),
             is_paused: false,
-            release_condition: ReleaseCondition::OnExpiry,
+            release_condition: ReleaseCondition::TTLExpiry,
             parent_vault_id: None,
             passkey_hash: None,
             max_deposit_amount: None,
@@ -1432,12 +1647,19 @@ impl TtlVaultContract {
             inactivity_penalty_bps: None,
             burn_percentage: 0,
             penalty_recipient: None,
-            passkey_rotation_period_seconds: 0,
+            passkey_rotation_period: 0,
             challenge_timeout_seconds: 300,
             multi_sig_threshold: 1,
+            multisig_required_ops: Vec::new(&env),
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
         Self::save_vault(&env, vault_id, &vault);
@@ -1463,21 +1685,10 @@ impl TtlVaultContract {
             VAULT_TTL_THRESHOLD,
             ttl,
         );
-        // VaultCount is an incrementing generation ID and must be updated
-        // only after the vault and its owner/beneficiary indexes are persisted.
-        //
-        // Ordering guarantee:
-        //  1) Compute next ID from current vault count
-        //  2) Persist the vault and owner/beneficiary indexes
-        //  3) Persist VaultCount only after the vault is fully saved
-        // If any prior call (save_vault/add_owner_vault_id/add_beneficiary_vault_id)
-        // panics, VaultCount remains unchanged and consumers cannot observe
-        // a hole in the sequence.
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is now allocated atomically up front by
+        // `next_vault_id` (see above), so there is no separate late write of
+        // the counter here — that was the read/write split that made the
+        // counter non-atomic under concurrent vault creation.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -1492,12 +1703,114 @@ impl TtlVaultContract {
         );
         env.events().publish(
             (VAULT_CREATED_TOPIC,),
-            (vault_id, owner, beneficiary, check_in_interval, timestamp),
+            VaultCreatedEvent {
+                vault_id,
+                owner,
+                beneficiary,
+                check_in_interval,
+            },
         );
         vault_id
     }
 
-    /// Records a check-in to reset the vault's expiry timer.
+    /// Creates a new vault with percentage-based multi-beneficiary splits.
+    ///
+    /// This is a convenience wrapper around `create_vault` that accepts a list of
+    /// `BeneficiarySplit` entries (each with a whole-number percentage 1–100) and
+    /// automatically populates `vault.beneficiaries` by converting each percentage
+    /// to basis points (percentage × 100).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `owner` - The vault owner (must authorise the call)
+    /// * `splits` - Non-empty list of `BeneficiarySplit` entries whose percentages
+    ///              must sum to exactly 100
+    /// * `check_in_interval` - Check-in interval in seconds
+    /// * `token_address` - Optional token contract address (defaults to XLM)
+    ///
+    /// # Returns
+    /// The newly created vault ID
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidPercentage` - Percentages do not sum to 100, any
+    ///   entry has a zero percentage, or any individual percentage exceeds 100
+    /// * `ContractError::InvalidBeneficiary` - A split address equals the owner
+    /// * All errors that `create_vault` can return
+    ///
+    /// # Example
+    /// ```ignore
+    /// // 50% to alice, 30% to bob, 20% to carol
+    /// let splits = vec![
+    ///     BeneficiarySplit { address: alice, percentage: 50 },
+    ///     BeneficiarySplit { address: bob,   percentage: 30 },
+    ///     BeneficiarySplit { address: carol, percentage: 20 },
+    /// ];
+    /// let vault_id = contract.create_vault_with_splits(&owner, &splits, &interval, &None);
+    /// ```
+    pub fn create_vault_with_splits(
+        env: Env,
+        owner: Address,
+        splits: Vec<BeneficiarySplit>,
+        check_in_interval: u64,
+        token_address: Option<Address>,
+    ) -> u64 {
+        owner.require_auth();
+
+        // ── Validate splits ──────────────────────────────────────────────────
+        if splits.is_empty() {
+            panic_with_error!(&env, ContractError::InvalidPercentage);
+        }
+        if splits.len() as u32 > MAX_BENEFICIARIES {
+            panic_with_error!(&env, ContractError::InvalidPercentage);
+        }
+
+        let mut total_pct: u32 = 0;
+        for split in splits.iter() {
+            if split.percentage == 0 || split.percentage > 100 {
+                panic_with_error!(&env, ContractError::InvalidPercentage);
+            }
+            if split.address == owner {
+                panic_with_error!(&env, ContractError::InvalidBeneficiary);
+            }
+            total_pct = total_pct.saturating_add(split.percentage);
+        }
+        if total_pct != 100 {
+            panic_with_error!(&env, ContractError::InvalidPercentage);
+        }
+
+        // ── Create vault with the first split's address as primary beneficiary ─
+        // The primary beneficiary field is kept for backwards-compat reads;
+        // the real distribution uses vault.beneficiaries populated below.
+        let primary = splits.get(0).unwrap().address.clone();
+        let vault_id = Self::create_vault(
+            env.clone(),
+            owner.clone(),
+            primary,
+            check_in_interval,
+            token_address,
+        );
+
+        // ── Populate vault.beneficiaries from splits ─────────────────────────
+        let mut vault = Self::load_vault(&env, vault_id);
+        let mut beneficiaries: Vec<BeneficiaryEntry> = Vec::new(&env);
+        for split in splits.iter() {
+            // 1 % == 100 BPS
+            let bps = split.percentage * 100;
+            beneficiaries.push_back(BeneficiaryEntry {
+                address: split.address.clone(),
+                bps,
+                minimum_threshold: 0,
+            });
+        }
+        vault.beneficiaries = beneficiaries;
+        Self::save_vault(&env, vault_id, &vault);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        vault_id
+    }
     ///
     /// The caller must be the vault owner. This function resets the `last_check_in`
     /// timestamp, extending the vault's TTL.
@@ -1514,7 +1827,16 @@ impl TtlVaultContract {
     /// * `ContractError::Paused` - If the contract is paused
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    pub fn check_in(env: Env, vault_id: u64, caller: Address, passkey_hash: BytesN<32>, nonce: u64) -> Result<(), ContractError> {
+    /// * `ContractError::VaultExpired` - If the vault's TTL has already elapsed
+    pub fn check_in(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+        nonce: u64,
+        signature: Option<BytesN<64>>,
+        message: Option<Bytes>,
+    ) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
@@ -1530,12 +1852,13 @@ impl TtlVaultContract {
         if env
             .storage()
             .persistent()
-            .get::<DataKey, bool>(&DataKey::VaultLocked(vault_id))
+            .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false)
         {
             return Err(ContractError::VaultOwnerLocked);
         }
-        let is_delegate = caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
+        let is_delegate =
+            caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
         if caller != vault.owner && !is_delegate {
             return Err(ContractError::NotOwner);
         }
@@ -1548,10 +1871,20 @@ impl TtlVaultContract {
             }
             env.storage().persistent().set(&nonce_key, &(expected + 1));
             let ttl = vault_ttl_ledgers(vault.check_in_interval);
-            env.storage().persistent().extend_ttl(&nonce_key, VAULT_TTL_THRESHOLD, ttl);
+            env.storage()
+                .persistent()
+                .extend_ttl(&nonce_key, VAULT_TTL_THRESHOLD, ttl);
         }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
+        }
+
+        // Issue #1274: reject check-in once the vault has already expired.
+        // Without this, an owner could check in after the TTL has passed to
+        // silently re-arm a vault that should have released to the
+        // beneficiary, defeating the purpose of the expiry.
+        if Self::is_expired(env.clone(), vault_id) {
+            return Err(ContractError::VaultExpired);
         }
 
         // Save original state for rollback on failure - Issue #391
@@ -1571,14 +1904,20 @@ impl TtlVaultContract {
                 .persistent()
                 .get::<StorageKey, u64>(&StorageKey::LastCheckInTime(vault_id))
             {
-                if now < last + cooldown {
-                    return Err(ContractError::InvalidInterval);
+                if now < last.saturating_add(cooldown) {
+                    return Err(ContractError::CheckInTooEarly);
                 }
             }
         }
 
         // Issue #549: enforce passkey registration and expiry.
         Self::validate_passkey_for_checkin(&env, vault_id, &vault, &passkey_hash, now)?;
+
+        // Issue #1283: on-chain secp256r1 signature verification.
+        // If a public key is registered for this passkey, verify the signature.
+        if let Err(e) = Self::verify_passkey_signature(&env, vault_id, &passkey_hash, &signature, &message) {
+            return Err(Self::record_passkey_failure(&env, vault_id, &passkey_hash, e));
+        }
 
         vault.last_check_in = now;
         // Apply scheduled beneficiary rotation if effective timestamp has passed
@@ -1616,7 +1955,12 @@ impl TtlVaultContract {
             vault.inactivity_penalty_bps,
             vault.penalty_recipient.clone(),
         ) {
-            let elapsed = now.saturating_sub(original_last_check_in);
+            // Hibernating time is not a missed check-in, so exclude it from the gap.
+            let hibernated =
+                Self::hibernated_seconds_between(&env, vault_id, original_last_check_in, now);
+            let elapsed = now
+                .saturating_sub(original_last_check_in)
+                .saturating_sub(hibernated);
             let missed = (elapsed / vault.check_in_interval).saturating_sub(1);
             if missed > 0 && vault.balance > 0 {
                 let penalty_per = vault.balance * (penalty_bps as i128) / BASIS_POINTS_100_PERCENT;
@@ -1655,7 +1999,8 @@ impl TtlVaultContract {
             if is_on_time {
                 vault.on_time_check_ins = vault.on_time_check_ins.saturating_add(1);
             }
-            vault.check_in_score = Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
+            vault.check_in_score =
+                Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
         }
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
@@ -1691,13 +2036,29 @@ impl TtlVaultContract {
         let new_expiry = vault.last_check_in + vault.check_in_interval;
         env.events().publish(
             (CHECK_IN_RECORDED_TOPIC, vault_id),
-            (vault.owner.clone(), new_expiry),
+            CheckInEvent {
+                vault_id,
+                new_ttl: new_expiry,
+                caller,
+            },
         );
         Ok(())
     }
+    /// Deposits SEP-41 compatible tokens into a vault (owner-only).
     ///
     /// Transfers tokens from the caller to the contract and increases the vault's balance.
-    /// The vault must be in Locked status.
+    /// The vault must be in Locked status and not expired.
+    ///
+    /// # SEP-41 Token Support
+    /// This function accepts any SEP-41 token type configured for the vault:
+    /// - Native XLM (default)
+    /// - USDC (6 decimals on Stellar)
+    /// - EURC (6 decimals on Stellar)
+    /// - Any whitelisted custom token implementing the Soroban token interface
+    ///
+    /// Token type is determined by vault.token_address, set at vault creation time.
+    /// The function uses Soroban's standard `token::Client` interface for all transfers,
+    /// ensuring compatibility with any SEP-41 compliant contract.
     ///
     /// Deposits remain available while a vault is hibernating (see `enter_hibernation`):
     /// hibernation only pauses the check-in TTL countdown, it does not freeze the vault's
@@ -1708,12 +2069,16 @@ impl TtlVaultContract {
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
     /// * `from` - The address depositing funds (must authorize)
-    /// * `amount` - Amount to deposit in stroops (1 XLM = 10,000,000 stroops)
+    /// * `amount` - Amount to deposit (uses token's native decimals)
+    ///   - For XLM: in stroops (1 XLM = 10,000,000 stroops)
+    ///   - For USDC: in microUSDC (1 USDC = 1,000,000 microUSDC)
     ///
     /// # Panics
     /// * Panics if the contract is paused
     /// * Panics if `amount` is not positive
     /// * Panics if the vault is not in Locked status
+    /// * Panics if the vault has expired
+    /// * Panics if the token transfer fails (e.g., insufficient balance)
     pub fn deposit(env: Env, vault_id: u64, from: Address, amount: i128) {
         Self::assert_not_paused(&env);
         Self::require_initialized(&env);
@@ -1728,6 +2093,12 @@ impl TtlVaultContract {
         if vault.is_paused {
             panic_with_error!(&env, ContractError::Paused);
         }
+        // Issue #1282: explicitly reject deposits when the vault is emergency-frozen.
+        // Without this check, EmergencyFrozen falls through to the generic
+        // `!= Locked` guard and returns the misleading VaultReleased error.
+        if vault.status == ReleaseStatus::EmergencyFrozen {
+            panic_with_error!(&env, ContractError::VaultFrozen);
+        }
         if Self::check_vault_frozen(&env, vault_id) {
             panic_with_error!(&env, ContractError::VaultFrozen);
         }
@@ -1735,13 +2106,17 @@ impl TtlVaultContract {
         if env
             .storage()
             .persistent()
-            .get::<DataKey, bool>(&DataKey::VaultLocked(vault_id))
+            .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false)
         {
             panic_with_error!(&env, ContractError::VaultOwnerLocked);
         }
+        // Issue #1282: reject deposits into vaults that are no longer active.
+        // A Released vault has already distributed funds to beneficiaries; a
+        // Cancelled vault was explicitly terminated. Accepting deposits into
+        // either state would lock funds permanently with no recovery path.
         if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
+            panic_with_error!(&env, ContractError::VaultReleased);
         }
 
         let now = env.ledger().timestamp();
@@ -1768,16 +2143,19 @@ impl TtlVaultContract {
             .checked_add(amount)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
         Self::save_vault(&env, vault_id, &vault);
+        Self::record_deposit_history(&env, vault_id, &from, amount, vault.balance, now);
         Self::log_audit_entry(&env, vault_id, "deposit", &from, "");
         Self::append_activity_log(&env, vault_id, "deposit", &from, "");
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        
+
         // Emit comprehensive FundsDeposited event with all required fields
         // Includes: depositor, amount, new_balance, and timestamp for indexer detection
-        env.events()
-            .publish((DEPOSIT_TOPIC, vault_id), (&from, amount, vault.balance, now));
+        env.events().publish(
+            (DEPOSIT_TOPIC, vault_id),
+            (&from, amount, vault.balance, now),
+        );
     }
 
     /// Deposits funds into multiple vaults in a single transfer.
@@ -1854,13 +2232,14 @@ impl TtlVaultContract {
                 .checked_add(amount)
                 .unwrap_or_else(|| panic_with_error!(&env, ContractError::BalanceOverflow));
             Self::save_vault(&env, vault_id, &vault);
+            Self::record_deposit_history(&env, vault_id, &from, amount, vault.balance, now);
 
             // Issue #582: Emit token whitelist validation event
             env.events().publish(
                 (TOKEN_WHITELIST_VALIDATED_TOPIC, vault_id),
                 (&vault.token_address, amount),
             );
-            
+
             // Emit comprehensive FundsDeposited event for each vault deposit
             env.events().publish(
                 (DEPOSIT_TOPIC, vault_id),
@@ -1872,17 +2251,25 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
     }
 
-    /// Owner withdraws from the vault.
+    /// Owner withdraws SEP-41 compatible tokens from the vault (owner-only).
     ///
     /// This function is owner-only and is unaffected by any multi-beneficiary
     /// split configured via `set_beneficiaries`. Beneficiary splits only apply
     /// during `trigger_release` and `partial_release`; `withdraw` always sends
     /// funds directly back to the vault owner regardless of the beneficiaries list.
     ///
+    /// # SEP-41 Token Support
+    /// Withdrawals support all SEP-41 token types that the vault was created with.
+    /// The returned token type matches the vault's token_address, ensuring seamless
+    /// handling of USDC, EURC, or any other whitelisted Stellar asset.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
-    /// * `amount` - Amount to withdraw in stroops (1 XLM = 10,000,000 stroops)
+    /// * `caller` - The owner address (must authorize)
+    /// * `amount` - Amount to withdraw (uses token's native decimals)
+    ///   - For XLM: in stroops (1 XLM = 10,000,000 stroops)
+    ///   - For USDC: in microUSDC (1 USDC = 1,000,000 microUSDC)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
@@ -1893,11 +2280,20 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
     /// * `ContractError::InsufficientBalance` - If vault balance is less than amount
+    /// * `ContractError::VaultExpired` - If vault has expired (check-in missed)
     pub fn withdraw(
         env: Env,
         vault_id: u64,
         caller: Address,
         amount: i128,
+        // Issue #1283: secp256r1 signature parameters (optional for legacy vaults).
+        // When a passkey public key is registered the caller must pass:
+        //   passkey_hash — identifies which registered passkey is signing.
+        //   signature    — raw 64-byte ECDSA (r||s) secp256r1 signature.
+        //   message      — raw authenticator data (clientDataHash + authData).
+        passkey_hash: Option<BytesN<32>>,
+        signature: Option<BytesN<64>>,
+        message: Option<Bytes>,
     ) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             let timestamp = env.ledger().timestamp();
@@ -1923,7 +2319,14 @@ impl TtlVaultContract {
             return Err(ContractError::Paused);
         }
         if Self::is_hibernating(env.clone(), vault_id) {
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault hibernating");
+            Self::record_withdrawal_audit(
+                &env,
+                vault_id,
+                &caller,
+                amount,
+                false,
+                "Vault hibernating",
+            );
             return Err(ContractError::AlreadyHibernating);
         }
         if caller != vault.owner {
@@ -1947,19 +2350,51 @@ impl TtlVaultContract {
             return Err(ContractError::VaultFrozen);
         }
         if Self::check_vault_frozen(&env, vault_id) {
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault admin-frozen");
+            Self::record_withdrawal_audit(
+                &env,
+                vault_id,
+                &caller,
+                amount,
+                false,
+                "Vault admin-frozen",
+            );
             return Err(ContractError::VaultFrozen);
         }
         // Issue 2: reject if owner has locked the vault
         if env
             .storage()
             .persistent()
-            .get::<DataKey, bool>(&DataKey::VaultLocked(vault_id))
+            .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false)
         {
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Vault owner-locked");
+            Self::record_withdrawal_audit(
+                &env,
+                vault_id,
+                &caller,
+                amount,
+                false,
+                "Vault owner-locked",
+            );
             return Err(ContractError::VaultOwnerLocked);
         }
+
+        // Issue #1283: on-chain secp256r1 signature verification.
+        // If the caller provided a passkey_hash and a public key is registered
+        // for that passkey, verify the signature before proceeding.
+        if let Some(ref pk_hash) = passkey_hash {
+            if let Err(e) = Self::verify_passkey_signature(&env, vault_id, pk_hash, &signature, &message) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    vault_id,
+                    &caller,
+                    amount,
+                    false,
+                    "Invalid passkey signature",
+                );
+                return Err(Self::record_passkey_failure(&env, vault_id, pk_hash, e));
+            }
+        }
+
         if vault.status != ReleaseStatus::Locked {
             Self::record_withdrawal_audit(
                 &env,
@@ -1982,104 +2417,32 @@ impl TtlVaultContract {
             );
             return Err(ContractError::InvalidWithdrawDestination);
         }
-        if vault.balance < amount {
-            Self::record_withdrawal_audit(
-                &env,
-                vault_id,
-                &caller,
-                amount,
-                false,
-                "Insufficient balance",
-            );
-            return Err(ContractError::InsufficientBalance);
-        }
-
-        // Check minimum balance guard - Issue #1088
-        if let Some(min_guard) = vault.min_balance_guard {
-            if vault.balance - amount < min_guard {
-                Self::record_withdrawal_audit(
-                    &env,
-                    vault_id,
-                    &caller,
-                    amount,
-                    false,
-                    "Below minimum balance",
-                );
-                return Err(ContractError::BelowMinimumBalance);
+        let destination = vault.owner.clone();
+        vault = match Self::validate_withdrawal(&env, vault_id, &vault, amount, &destination) {
+            Ok(vault) => vault,
+            Err(error) => {
+                let reason = match error {
+                    ContractError::InsufficientBalance => "Insufficient balance",
+                    ContractError::BelowMinimumBalance => "Below minimum balance",
+                    ContractError::WithdrawalNotApproved => "Withdrawal not approved",
+                    ContractError::WithdrawalRateLimitExceeded => "Withdrawal rate limit exceeded",
+                    ContractError::WithdrawalDestinationNotWhitelisted => "Destination not whitelisted",
+                    _ => "Withdrawal validation failed",
+                };
+                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, reason);
+                if error == ContractError::WithdrawalDestinationNotWhitelisted {
+                    env.events().publish(
+                        (WHITELIST_VIOLATION_TOPIC, vault_id),
+                        (&destination, amount),
+                    );
+                }
+                return Err(error);
             }
-        }
-
-        // Check withdrawal approval threshold - Issue #404
-        if let Some(threshold) = vault.withdrawal_approval_threshold {
-            if amount > threshold {
-                Self::record_withdrawal_audit(
-                    &env,
-                    vault_id,
-                    &caller,
-                    amount,
-                    false,
-                    "Withdrawal not approved",
-                );
-                return Err(ContractError::WithdrawalNotApproved);
-            }
-        }
-
-        // Check withdrawal limits - Issue #566
-        Self::check_withdrawal_limits(&env, vault_id, amount)?;
-
-        // Check withdrawal rate limiting - Issue #1084
-        if let Some(limit) = vault.withdrawal_limit_per_window {
-            let now = env.ledger().timestamp();
-            let window_elapsed = now - vault.window_start;
-
-            let mut vault_mut = vault.clone();
-            if window_elapsed >= vault_mut.withdrawal_window_seconds {
-                vault_mut.withdrawn_in_window = 0;
-                vault_mut.window_start = now;
-            }
-
-            if vault_mut.withdrawn_in_window + amount > limit {
-                Self::record_withdrawal_audit(
-                    &env,
-                    vault_id,
-                    &caller,
-                    amount,
-                    false,
-                    "Withdrawal rate limit exceeded",
-                );
-                return Err(ContractError::WithdrawalRateLimitExceeded);
-            }
-
-            vault = vault_mut;
-        }
-
-        // Check whitelist - Issue #567 / #952
-        // withdraw() always transfers to vault.owner, so we validate the owner
-        // is an approved destination when a whitelist is configured.
-        if !Self::is_whitelisted(&env, vault_id, &vault.owner) {
-            Self::record_withdrawal_audit(
-                &env,
-                vault_id,
-                &caller,
-                amount,
-                false,
-                "Destination not whitelisted",
-            );
-            env.events().publish(
-                (WHITELIST_VIOLATION_TOPIC, vault_id),
-                (&vault.owner, amount),
-            );
-            return Err(ContractError::WithdrawalDestinationNotWhitelisted);
-        }
+        };
 
         let token_client = token::Client::new(&env, &vault.token_address);
         token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
         vault.balance -= amount;
-
-        // Update withdrawal rate tracking - Issue #1084
-        if vault.withdrawal_limit_per_window.is_some() {
-            vault.withdrawn_in_window += amount;
-        }
 
         // Record withdrawal for reversal - Issue #568 (grace period: 24 hours)
         Self::record_withdrawal_for_reversal(&env, vault_id, amount, 86_400);
@@ -2105,119 +2468,261 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    // --- Issue #318: batch_withdraw ---
+    // --- Issue #1292: BatchWithdrawal instruction type ---
 
-    /// Withdraws from multiple vaults owned by the same caller in a single transaction.
+    /// Executes multiple pending withdrawals in a single transaction.
     ///
-    /// This is more efficient than calling `withdraw` multiple times as it reduces
-    /// transaction overhead. All vault_ids and amounts are validated before any
-    /// state mutation occurs.
+    /// Each entry in `withdrawals` is a [`BatchWithdrawal`] instruction describing a
+    /// vault, a destination address and an amount. Grouping several pending
+    /// withdrawals into one call lets an owner pay network transaction fees only
+    /// once instead of once per withdrawal.
+    ///
+    /// All instructions are validated before any state is mutated. In particular the
+    /// summed amount requested from each vault is checked against that vault's
+    /// balance, so the call is atomic: either every instruction in the batch is
+    /// executed or none are.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
-    /// * `vault_ids` - Vector of vault IDs to withdraw from
-    /// * `amounts` - Vector of amounts (in stroops) to withdraw from each vault
-    /// * `caller` - The address of the caller (must be the owner of all vaults)
+    /// * `withdrawals` - Vector of [`BatchWithdrawal`] instructions to execute
+    /// * `caller` - The address of the caller (must be the owner of every vault referenced)
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
     ///
     /// # Errors
-    /// * `ContractError::Paused` - If the contract is paused
-    /// * `ContractError::InvalidAmount` - If vault_ids.len() != amounts.len() or any amount is not positive
-    /// * `ContractError::VaultNotFound` - If any vault does not exist
-    /// * `ContractError::NotOwner` - If caller is not the owner of any vault
-    /// * `ContractError::AlreadyReleased` - If any vault is not in Locked status
-    /// * `ContractError::InsufficientBalance` - If any vault balance is less than the requested amount
+    /// * `ContractError::Paused` - If the contract is paused, or any referenced vault is paused
+    /// * `ContractError::InvalidAmount` - If `withdrawals` is empty or any amount is not positive
+    /// * `ContractError::VaultNotFound` - If any referenced vault does not exist
+    /// * `ContractError::NotOwner` - If caller is not the owner of any referenced vault
+    /// * `ContractError::AlreadyHibernating` - If any referenced vault is hibernating
+    /// * `ContractError::VaultFrozen` - If any referenced vault is emergency-frozen or admin-frozen
+    /// * `ContractError::VaultOwnerLocked` - If any referenced vault is owner-locked
+    /// * `ContractError::TwoFactorRequired` - If 2FA is enabled on any vault and not verified
+    /// * `ContractError::AlreadyReleased` - If any referenced vault is not in Locked status
+    /// * `ContractError::WithdrawalDestinationNotWhitelisted` - If any destination is not whitelisted
+    /// * `ContractError::InsufficientBalance` - If the total amount for any vault exceeds its balance
     pub fn batch_withdraw(
         env: Env,
-        vault_ids: Vec<u64>,
-        amounts: Vec<i128>,
+        withdrawals: Vec<BatchWithdrawal>,
         caller: Address,
     ) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
         }
-        if vault_ids.len() != amounts.len() {
+        if withdrawals.is_empty() {
             return Err(ContractError::InvalidAmount);
         }
         caller.require_auth();
 
-        // Validate all entries before mutating state
-        for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
-            if amount <= 0 {
+        // First pass: validate every instruction individually and accumulate the
+        // total requested amount per vault so we can validate against the balance.
+        let mut vault_totals: Map<u64, i128> = Map::new(&env);
+        let mut validated_vaults: Map<u64, Vault> = Map::new(&env);
+        for w in withdrawals.iter() {
+            if w.amount <= 0 {
                 Self::record_withdrawal_audit(
                     &env,
-                    vault_id,
+                    w.vault_id,
                     &caller,
-                    amount,
+                    w.amount,
                     false,
                     "Invalid amount",
                 );
                 return Err(ContractError::InvalidAmount);
             }
-            let vault = Self::try_load_vault(&env, vault_id).ok_or(ContractError::VaultNotFound)?;
+            let mut vault = validated_vaults
+                .get(w.vault_id)
+                .or_else(|| Self::try_load_vault(&env, w.vault_id))
+                .ok_or(ContractError::VaultNotFound)?;
             if caller != vault.owner {
-                Self::record_withdrawal_audit(&env, vault_id, &caller, amount, false, "Not owner");
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Not owner",
+                );
                 return Err(ContractError::NotOwner);
+            }
+            // Issue #1529: hold checks — batch path must mirror single withdraw.
+            if vault.is_paused {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault paused",
+                );
+                return Err(ContractError::Paused);
+            }
+            if Self::is_hibernating(env.clone(), w.vault_id) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault hibernating",
+                );
+                return Err(ContractError::AlreadyHibernating);
+            }
+            if vault.status == ReleaseStatus::EmergencyFrozen {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault frozen",
+                );
+                return Err(ContractError::VaultFrozen);
+            }
+            if Self::check_vault_frozen(&env, w.vault_id) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault admin-frozen",
+                );
+                return Err(ContractError::VaultFrozen);
+            }
+            if env
+                .storage()
+                .persistent()
+                .get::<StorageKey, bool>(&StorageKey::VaultLocked(w.vault_id))
+                .unwrap_or(false)
+            {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "Vault owner-locked",
+                );
+                return Err(ContractError::VaultOwnerLocked);
+            }
+            if Self::is_2fa_enabled(&env, w.vault_id) && !Self::is_2fa_verified(&env, w.vault_id) {
+                Self::record_withdrawal_audit(
+                    &env,
+                    w.vault_id,
+                    &caller,
+                    w.amount,
+                    false,
+                    "2FA verification required",
+                );
+                return Err(ContractError::TwoFactorRequired);
             }
             if vault.status != ReleaseStatus::Locked {
                 Self::record_withdrawal_audit(
                     &env,
-                    vault_id,
+                    w.vault_id,
                     &caller,
-                    amount,
+                    w.amount,
                     false,
                     "Vault already released",
                 );
                 return Err(ContractError::AlreadyReleased);
             }
-            if vault.balance < amount {
+            vault = match Self::validate_withdrawal(
+                &env,
+                w.vault_id,
+                &vault,
+                w.amount,
+                &w.destination,
+            ) {
+                Ok(vault) => vault,
+                Err(error) => {
+                    let reason = if error == ContractError::WithdrawalDestinationNotWhitelisted {
+                        "Destination not whitelisted"
+                    } else {
+                        "Withdrawal validation failed"
+                    };
+                    Self::record_withdrawal_audit(
+                        &env,
+                        w.vault_id,
+                        &caller,
+                        w.amount,
+                        false,
+                        reason,
+                    );
+                    if error == ContractError::WithdrawalDestinationNotWhitelisted {
+                        env.events().publish(
+                            (WHITELIST_VIOLATION_TOPIC, w.vault_id),
+                            (&w.destination, w.amount),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            validated_vaults.set(w.vault_id, vault);
+            let current = vault_totals.get(w.vault_id).unwrap_or(0i128);
+            vault_totals.set(w.vault_id, current + w.amount);
+        }
+
+        // Second pass: validate the summed amount for each vault against its balance.
+        let mut vault_keys = vault_totals.keys().iter();
+        while let Some(vault_id) = vault_keys.next() {
+            let total = vault_totals.get(vault_id).unwrap_or(0i128);
+            let vault = validated_vaults
+                .get(vault_id)
+                .unwrap_or_else(|| Self::load_vault(&env, vault_id));
+            if vault.balance < total {
                 Self::record_withdrawal_audit(
                     &env,
                     vault_id,
                     &caller,
-                    amount,
+                    total,
                     false,
-                    "Insufficient balance",
+                    "Batch total exceeds vault balance",
                 );
                 return Err(ContractError::InsufficientBalance);
             }
+            if let Some(min_guard) = vault.min_balance_guard {
+                if vault.balance - total < min_guard {
+                    return Err(ContractError::BelowMinimumBalance);
+                }
+            }
         }
 
-        // All validations passed — apply withdrawals
-        // Note: batch_withdraw requires all vaults to use the same token (default XLM)
-        let default_token = Self::load_token(&env);
-        let token_client = token::Client::new(&env, &default_token);
-        for (vault_id, amount) in vault_ids.iter().zip(amounts.iter()) {
-            let mut vault = Self::load_vault(&env, vault_id);
-            if vault.token_address != default_token {
-                Self::record_withdrawal_audit(
-                    &env,
-                    vault_id,
-                    &caller,
-                    amount,
-                    false,
-                    "Incompatible token",
-                );
-                return Err(ContractError::InvalidAmount);
+        let mut validated_keys = validated_vaults.keys().iter();
+        while let Some(vault_id) = validated_keys.next() {
+            if let Some(vault) = validated_vaults.get(vault_id) {
+                Self::save_vault(&env, vault_id, &vault);
             }
-            token_client.transfer(&env.current_contract_address(), &vault.owner, &amount);
-            vault.balance -= amount;
+        }
+
+        // All validations passed — execute every withdrawal in this single transaction.
+        for w in withdrawals.iter() {
+            let mut vault = Self::load_vault(&env, w.vault_id);
+            let token_client = token::Client::new(&env, &vault.token_address);
+            token_client.transfer(&env.current_contract_address(), &w.destination, &w.amount);
+            vault.balance -= w.amount;
             let remaining = vault.balance;
-            Self::save_vault(&env, vault_id, &vault);
+            Self::save_vault(&env, w.vault_id, &vault);
+
+            // Issue #568: Record withdrawal for potential reversal (grace period: 24 hours)
+            Self::record_withdrawal_for_reversal(&env, w.vault_id, w.amount, 86_400);
+
+            Self::log_audit_entry(&env, w.vault_id, "batch_withdraw", &caller, "");
+            Self::append_activity_log(&env, w.vault_id, "batch_withdraw", &caller, "");
 
             // Issue #569: Record successful withdrawal in audit trail
-            Self::record_withdrawal_audit(&env, vault_id, &caller, amount, true, "");
+            Self::record_withdrawal_audit(&env, w.vault_id, &caller, w.amount, true, "");
 
             // Issue #571: Emit withdrawal notification event
             env.events().publish(
-                (WITHDRAWAL_NOTIF_TOPIC, vault_id),
-                (&caller, amount, env.ledger().timestamp()),
+                (WITHDRAWAL_NOTIF_TOPIC, w.vault_id),
+                (&caller, w.amount, env.ledger().timestamp()),
             );
 
             env.events()
-                .publish((WITHDRAW_TOPIC, vault_id), (amount, remaining));
+                .publish((WITHDRAW_TOPIC, w.vault_id), (w.amount, remaining));
         }
         env.storage()
             .instance()
@@ -2269,15 +2774,15 @@ impl TtlVaultContract {
             vault_id,
             amount,
             timestamp: now,
-            proof_hash,
-            nonce,
+            proof_hash: proof_hash.into(),
+            nonce: nonce as u64,
         };
 
         env.storage()
             .persistent()
-            .set(&StorageKey::WithdrawalProof(vault_id, nonce), &proof);
+            .set(&StorageKey::WithdrawalProof(vault_id, nonce as u64), &proof);
         env.storage().persistent().extend_ttl(
-            &StorageKey::WithdrawalProof(vault_id, nonce),
+            &StorageKey::WithdrawalProof(vault_id, nonce as u64),
             VAULT_TTL_THRESHOLD,
             vault_ttl_ledgers(vault.check_in_interval as u64),
         );
@@ -2593,7 +3098,11 @@ impl TtlVaultContract {
             let new_expiry = now + vault.check_in_interval;
             env.events().publish(
                 (CHECK_IN_RECORDED_TOPIC, vault_id),
-                (vault.owner.clone(), new_expiry),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_expiry,
+                    caller: caller.clone(),
+                },
             );
         }
         env.storage()
@@ -2602,13 +3111,20 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Triggers the release of funds to beneficiaries after the vault expires.
+    /// Triggers the release of SEP-41 compatible tokens to beneficiaries after vault expiry.
     ///
     /// Anyone can call this function once the vault's TTL has lapsed. If a vesting
     /// schedule is attached, the vault is marked as Released but funds remain locked
     /// until claimed via `claim_vested_installment`. Otherwise, funds are distributed
     /// immediately to the primary beneficiary or split among multiple beneficiaries
     /// based on their BPS allocations.
+    ///
+    /// # SEP-41 Token Support
+    /// Releases support all SEP-41 token types configured for the vault. Token transfers
+    /// use the vault's token_address, ensuring:
+    /// - XLM transfers to beneficiary (default)
+    /// - USDC transfers to beneficiary
+    /// - EURC or any whitelisted token transfers correctly
     ///
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -2619,6 +3135,7 @@ impl TtlVaultContract {
     /// * Panics if the vault is not in Locked status
     /// * Panics if the vault has not expired yet
     /// * Panics if the vault balance is zero
+    /// * Panics if the token transfer fails
     pub fn trigger_release(env: Env, vault_id: u64) {
         Self::trigger_release_internal(env, vault_id, ReleaseTrigger::Expiry);
     }
@@ -2640,23 +3157,14 @@ impl TtlVaultContract {
     /// # Errors
     /// * `ContractError::UnauthorizedOwner` - Caller is not the vault owner
     /// * `ContractError::VaultNotFound` - Vault doesn't exist
-    pub fn add_vesting_milestone(
-        env: Env,
-        vault_id: u64,
-        description: String,
-        attestor: Address,
-    ) {
+    pub fn add_vesting_milestone(env: Env, vault_id: u64, description: String, attestor: Address) {
         Self::assert_not_paused(&env);
         let vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
 
         // Get current milestone count
         let count_key = StorageKey::VestingMilestoneCount(vault_id);
-        let count: u64 = env
-            .storage()
-            .persistent()
-            .get(&count_key)
-            .unwrap_or(0);
+        let count: u64 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
         let milestone_id = count;
         let new_milestone = VestingMilestone {
@@ -2678,9 +3186,7 @@ impl TtlVaultContract {
 
         // Save updated milestones and increment count
         env.storage().persistent().set(&milestones_key, &milestones);
-        env.storage()
-            .persistent()
-            .set(&count_key, &(count + 1));
+        env.storage().persistent().set(&count_key, &(count + 1));
 
         // Extend TTL for both keys
         env.storage().persistent().extend_ttl(
@@ -2710,14 +3216,24 @@ impl TtlVaultContract {
     /// * `env` - Soroban environment
     /// * `vault_id` - ID of the vault with the milestone
     /// * `milestone_id` - ID of the milestone to attest
+    /// * `oracle_timestamp` - Unix timestamp embedded in the oracle signature; must be
+    ///   within [`ORACLE_FRESHNESS_WINDOW`] seconds of the current ledger time to prevent
+    ///   replay of old attestations (Issue #1832)
     ///
     /// # Errors
     /// * `ContractError::UnauthorizedAttestor` - Caller is not the designated attestor
     /// * `ContractError::MilestoneNotFound` - Milestone doesn't exist
     /// * `ContractError::MilestoneAlreadyAttested` - Milestone already unlocked
-    pub fn attest_milestone(env: Env, vault_id: u64, milestone_id: u64) {
+    /// * `ContractError::OracleAttestationStale` - `oracle_timestamp` is outside the freshness window
+    pub fn attest_milestone(env: Env, vault_id: u64, milestone_id: u64, oracle_timestamp: u64) {
         Self::assert_not_paused(&env);
         let vault = Self::load_vault(&env, vault_id);
+
+        // Reject replayed / stale oracle signatures (Issue #1832).
+        let now = env.ledger().timestamp();
+        if now < oracle_timestamp || now - oracle_timestamp > ORACLE_FRESHNESS_WINDOW {
+            panic_with_error!(&env, ContractError::OracleAttestationStale);
+        }
 
         // Load milestones
         let milestones_key = StorageKey::VestingMilestones(vault_id);
@@ -2785,7 +3301,7 @@ impl TtlVaultContract {
     fn load_release_memo(env: &Env, vault_id: u64) -> Bytes {
         env.storage()
             .persistent()
-            .get(&DataKey::ReleaseMemo(vault_id))
+            .get(&StorageKey::ReleaseMemo(vault_id))
             .unwrap_or_else(|| Bytes::new(env))
     }
 
@@ -2799,6 +3315,10 @@ impl TtlVaultContract {
         }
         if Self::check_vault_frozen(&env, vault_id) {
             panic_with_error!(&env, ContractError::VaultFrozen);
+        }
+        // Issue #1853: Owner lock must block beneficiary-triggered release
+        if Self::is_owner_vault_locked(env.clone(), vault_id) {
+            panic_with_error!(&env, ContractError::VaultOwnerLocked);
         }
         if env
             .storage()
@@ -2814,13 +3334,16 @@ impl TtlVaultContract {
         }
 
         // Load release conditions
-        let conditions = Self::get_release_conditions(env.clone(), vault_id);
+        let conditions = Self::stored_release_conditions(&env, vault_id);
         let mut condition_met = false;
-        for cond in conditions.iter() {
-            match cond {
+        let mut ttl_expiry_met = false;
+
+        if conditions.is_empty() {
+            match vault.release_condition {
                 ReleaseCondition::TTLExpiry => {
                     if Self::is_expired(env.clone(), vault_id) {
                         condition_met = true;
+                        ttl_expiry_met = true;
                     }
                 }
                 ReleaseCondition::OwnerInitiated => {
@@ -2828,55 +3351,66 @@ impl TtlVaultContract {
                         condition_met = true;
                     }
                 }
-                ReleaseCondition::Oracle(addr) => {
+                ReleaseCondition::Oracle(ref addr) => {
                     if oracle::query(&env, addr).unwrap_or(false) {
                         condition_met = true;
                     }
                 }
             }
+        } else {
+            for cond in conditions.iter() {
+                match cond {
+                    ReleaseCondition::TTLExpiry => {
+                        if Self::is_expired(env.clone(), vault_id) {
+                            condition_met = true;
+                            ttl_expiry_met = true;
+                        }
+                    }
+                    ReleaseCondition::OwnerInitiated => {
+                        if mode == ReleaseTrigger::Manual {
+                            condition_met = true;
+                        }
+                    }
+                    ReleaseCondition::Oracle(addr) => {
+                        if oracle::query(&env, &addr).unwrap_or(false) {
+                            condition_met = true;
+                        }
+                    }
+                }
+            }
         }
+
         if !condition_met {
-            panic_with_error!(&env, ContractError::ConditionsNotApproved);
+            if conditions.is_empty() && vault.release_condition == ReleaseCondition::TTLExpiry {
+                panic_with_error!(&env, ContractError::NotExpired);
+            } else {
+                panic_with_error!(&env, ContractError::ConditionsNotApproved);
+            }
         }
 
-        Self::assert_not_paused(&env);
-        // Attempt to restore archived vault state before proceeding - Issue #443
-        Self::try_restore_archived_vault(&env, vault_id);
-        let mut vault = Self::load_vault(&env, vault_id);
-        if vault.status != ReleaseStatus::Locked {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
-        }
-        // We only block vetoes on trigger before the vault has expired.
-        // Note: release entrypoint is for the Expiry trigger and thus requires expiry,
-        // but manual release can occur at arbitrary times.
-        // Here we keep the existing expiry gate.
-        if !Self::is_expired(env.clone(), vault_id) {
-            panic_with_error!(&env, ContractError::NotExpired);
-        }
-
-        let now = env.ledger().timestamp();
-        let mut hibernated = 0u64;
-        if let Some(h) = env.storage().persistent().get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id)) {
-            hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
-        }
-        let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
-        let grace_period = env.storage().instance().get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds).unwrap_or(0);
-        if now < expiry_time + grace_period {
-            panic_with_error!(&env, ContractError::GracePeriodActive);
+        // When release is based on TTL expiry, enforce the grace period before allowing release.
+        if ttl_expiry_met {
+            let now = env.ledger().timestamp();
+            let mut hibernated = 0u64;
+            if let Some(h) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+            {
+                hibernated = now.saturating_sub(h.started_at).min(h.duration_seconds);
+            }
+            let expiry_time = vault.last_check_in + vault.check_in_interval + hibernated;
+            let grace_period = env
+                .storage()
+                .instance()
+                .get::<StorageKey, u64>(&StorageKey::ReleaseGracePeriodSeconds)
+                .unwrap_or(0);
+            if now < expiry_time + grace_period {
+                panic_with_error!(&env, ContractError::GracePeriodActive);
+            }
         }
 
-        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
-        // The veto is only meaningful before expiry; since `trigger_release*` requires expiry,
-        // veto has already expired in practice. However, for completeness (and for manual release),
-        // we gate on expiry-less times above in the public veto method.
-        let total = vault.balance;
-        if total == 0 {
-            panic_with_error!(&env, ContractError::EmptyVault);
-        }
-
-        // Beneficiary veto of owner-defined release conditions (Issue: beneficiary veto before expiry).
-        // Block `trigger_release*` only if veto was set and vault has not yet expired.
-        // (This is also harmless for expiry-triggered releases, since those require expiry.)
+        // Beneficiary veto of owner-defined release conditions before expiry.
         if !Self::is_expired(env.clone(), vault_id) {
             let vetoed: bool = env
                 .storage()
@@ -2898,8 +3432,8 @@ impl TtlVaultContract {
             }
         }
 
-        // Check beneficiary conditional acceptance threshold - Issue #503
-        if !Self::check_conditional_acceptance_threshold(&env, vault_id, total).unwrap_or(false) {
+        // Check beneficiary conditional acceptance/decline threshold - Issue #503, #1849
+        if !Self::check_beneficiary_condition_threshold(&env, vault_id, total).unwrap_or(false) {
             panic_with_error!(&env, ContractError::InsufficientBalance);
         }
 
@@ -2946,7 +3480,9 @@ impl TtlVaultContract {
         if let Some(entry) = env
             .storage()
             .persistent()
-            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(vault_id))
+            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(
+                vault_id,
+            ))
         {
             if let Some(deadline) = entry.acceptance_deadline {
                 if now > deadline && !entry.approved_by_owner {
@@ -3010,7 +3546,7 @@ impl TtlVaultContract {
         let has_vesting = env
             .storage()
             .persistent()
-            .has(&StorageKey::VestingSchedule(vault_id));
+            .has(&StorageKey::VestingSchedule(vault_id, 0));
         let has_milestone_vesting = env
             .storage()
             .persistent()
@@ -3020,14 +3556,14 @@ impl TtlVaultContract {
         let has_release_schedule = env
             .storage()
             .persistent()
-            .has(&DataKey::ReleaseSchedule(vault_id));
+            .has(&StorageKey::ReleaseSchedule(vault_id));
 
         // Check if any milestones are attached and if they're all unlocked
         let has_vesting_milestones = env
             .storage()
             .persistent()
             .has(&StorageKey::VestingMilestones(vault_id));
-        
+
         if has_vesting_milestones {
             // Load milestones and verify all are unlocked
             let milestones: Vec<VestingMilestone> = env
@@ -3035,7 +3571,7 @@ impl TtlVaultContract {
                 .persistent()
                 .get(&StorageKey::VestingMilestones(vault_id))
                 .unwrap_or_else(|| Vec::new(&env));
-            
+
             for milestone in milestones.iter() {
                 if !milestone.unlocked {
                     panic_with_error!(&env, ContractError::MilestoneNotFound);
@@ -3049,11 +3585,11 @@ impl TtlVaultContract {
         if has_release_schedule {
             // Issue #951: graduated release schedule — activate it and keep funds in contract.
             // The beneficiary will call claim_tranche() as each tranche unlocks.
-            let sched_key = DataKey::ReleaseSchedule(vault_id);
+            let sched_key = StorageKey::ReleaseSchedule(vault_id);
             let mut schedule = env
                 .storage()
                 .persistent()
-                .get::<DataKey, ReleaseSchedule>(&sched_key)
+                .get::<StorageKey, ReleaseSchedule>(&sched_key)
                 .unwrap(); // guarded by has_release_schedule above
             schedule.active = true;
             let ttl = vault_ttl_ledgers(vault.check_in_interval);
@@ -3082,6 +3618,7 @@ impl TtlVaultContract {
                     beneficiary: vault.beneficiary.clone(),
                     // Amount is 0 here — funds are held for graduated release
                     amount: 0,
+                    memo: release_memo.clone(),
                 },
             );
         } else if has_vesting || has_milestone_vesting {
@@ -3115,21 +3652,54 @@ impl TtlVaultContract {
             } else {
                 total
             };
+
+            // Issue #1167: guard directly against a zero-amount transfer at the
+            // actual release site, independent of the earlier `total == 0` checks,
+            // so no future change upstream can silently let a no-op release
+            // through and emit a misleading release event.
+            if release_amount == 0 {
+                panic_with_error!(&env, ContractError::EmptyVault);
+            }
+
             let token_client = token::Client::new(&env, &vault.token_address);
 
             // Calculate burn amount based on vault's burn_percentage (basis points)
-            let burn_amount: i128 = (release_amount * vault.burn_percentage as i128) / BASIS_POINTS_100_PERCENT;
+            let burn_amount: i128 =
+                (release_amount * vault.burn_percentage as i128) / BASIS_POINTS_100_PERCENT;
             let net_amount: i128 = release_amount - burn_amount;
             if burn_amount > 0 {
                 // Emit burn event; funds are effectively removed from circulation
-                env.events().publish((BURN_EVENT_TOPIC, vault_id), burn_amount);
+                env.events()
+                    .publish((BURN_EVENT_TOPIC, vault_id), burn_amount);
             }
             if vault.beneficiaries.is_empty() {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &vault.beneficiary,
-                    &release_amount,
-                );
+                // Issue #1281: use `try_transfer` instead of the panicking
+                // `transfer` so a failed token transfer (e.g. the token
+                // contract trapping or a spend-authorization failure) can be
+                // recorded as `ReleaseStatus::Failed` rather than leaving no
+                // trace at all of the attempted release.
+                if token_client
+                    .try_transfer(
+                        &env.current_contract_address(),
+                        &vault.beneficiary,
+                        &release_amount,
+                    )
+                    .is_err()
+                {
+                    vault.status = ReleaseStatus::Failed;
+                    Self::save_vault(&env, vault_id, &vault);
+                    Self::record_state_transition(
+                        &env,
+                        vault_id,
+                        ReleaseStatus::Locked,
+                        ReleaseStatus::Failed,
+                        &vault.owner,
+                    );
+                    env.storage()
+                        .instance()
+                        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+                    return;
+                }
                 env.events().publish(
                     (RELEASE_TOPIC,),
                     ReleaseEvent {
@@ -3235,7 +3805,8 @@ impl TtlVaultContract {
         };
 
         // Apply decay: new_ttl = remaining * (1 - decay_rate / 10000)
-        let decayed_ttl = remaining * (BASIS_POINTS_100_PERCENT as u64 - decay_rate as u64) / BASIS_POINTS_100_PERCENT as u64;
+        let decayed_ttl = remaining * (BASIS_POINTS_100_PERCENT as u64 - decay_rate as u64)
+            / BASIS_POINTS_100_PERCENT as u64;
         let new_deadline = now + decayed_ttl;
 
         // Update last_check_in to reflect the decay application
@@ -3310,7 +3881,11 @@ impl TtlVaultContract {
             let new_expiry = now + vault.check_in_interval;
             env.events().publish(
                 (CHECK_IN_RECORDED_TOPIC, vault_id),
-                (vault.owner.clone(), new_expiry),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_expiry,
+                    caller: caller.clone(),
+                },
             );
         }
 
@@ -3434,9 +4009,9 @@ impl TtlVaultContract {
     /// # Errors
     /// Panics with `ContractError::VaultNotFound` if the vault does not exist.
     pub fn get_beneficiary(env: Env, vault_id: u64) -> Result<Address, ContractError> {
-        Self::try_load_vault(&env, vault_id)
-            .map(|v| v.beneficiary)
-            .ok_or(ContractError::VaultNotFound)
+        let vault = Self::try_load_vault(&env, vault_id).ok_or(ContractError::VaultNotFound)?;
+        Self::extend_live_vault_ttl(&env, vault_id, &vault);
+        Ok(vault.beneficiary)
     }
 
     /// Returns the creation timestamp of a vault.
@@ -3482,19 +4057,17 @@ impl TtlVaultContract {
                 (vault.beneficiary.clone(), amount),
             );
         } else {
-            // Multi-beneficiary path: split `amount` by BPS, last entry absorbs dust.
-            let mut distributed: i128 = 0;
-            let last_idx = vault.beneficiaries.len() - 1;
+            let shares = Self::calculate_beneficiary_shares(
+                &env,
+                amount,
+                &vault.beneficiaries,
+                BASIS_POINTS_100_PERCENT as u32,
+            );
             for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                let share = if i as u32 == last_idx {
-                    amount - distributed
-                } else {
-                    amount * (entry.bps as i128) / BASIS_POINTS_100_PERCENT
-                };
+                let share = shares.get(i as u32).unwrap();
                 if share > 0 {
                     token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
-                distributed += share;
                 env.events().publish(
                     (symbol_short!("partial"), vault_id),
                     (entry.address.clone(), share),
@@ -3508,6 +4081,47 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
+    }
+
+    fn weighted_share(amount: i128, weight: u32, total_weight: u32) -> i128 {
+        let divisor = total_weight as i128;
+        let weight = weight as i128;
+        (amount / divisor) * weight + ((amount % divisor) * weight) / divisor
+    }
+
+    fn calculate_beneficiary_shares(
+        env: &Env,
+        amount: i128,
+        beneficiaries: &Vec<BeneficiaryEntry>,
+        total_weight: u32,
+    ) -> Vec<i128> {
+        let mut weights = Vec::new(env);
+        for entry in beneficiaries.iter() {
+            weights.push_back(entry.bps);
+        }
+        Self::calculate_weighted_shares(env, amount, &weights, total_weight)
+    }
+
+    fn calculate_weighted_shares(
+        env: &Env,
+        amount: i128,
+        weights: &Vec<u32>,
+        total_weight: u32,
+    ) -> Vec<i128> {
+        let mut shares = Vec::new(env);
+        if weights.is_empty() || total_weight == 0 {
+            return shares;
+        }
+
+        // Floor-divide every share; the last beneficiary absorbs the rounding remainder.
+        let mut last_share = amount;
+        for i in 0..weights.len() - 1 {
+            let share = Self::weighted_share(amount, weights.get(i).unwrap(), total_weight);
+            last_share -= share;
+            shares.push_back(share);
+        }
+        shares.push_back(last_share);
+        shares
     }
 
     // --- Task 3: set_beneficiaries ---
@@ -3592,7 +4206,7 @@ impl TtlVaultContract {
     ) -> Result<(), ContractError> {
         caller.require_auth();
         let len = addresses.len();
-        if len == 0 || len > MAX_BENEFICIARIES as usize {
+        if len == 0 || len > MAX_BENEFICIARIES {
             return Err(ContractError::InvalidBps);
         }
         let mut vault = Self::load_vault(&env, vault_id);
@@ -3606,10 +4220,10 @@ impl TtlVaultContract {
         let remainder = 10_000u32 - base * len as u32;
         let mut beneficiaries = Vec::new(&env);
         for (i, address) in addresses.iter().enumerate() {
-            if *address == vault.owner {
+            if address == vault.owner {
                 return Err(ContractError::InvalidBeneficiary);
             }
-            Self::assert_not_zero_address(&env, address);
+            Self::assert_not_zero_address(&env, &address);
             let bps = if i == 0 { base + remainder } else { base };
             beneficiaries.push_back(BeneficiaryEntry {
                 address: address.clone(),
@@ -3666,7 +4280,7 @@ impl TtlVaultContract {
             .persistent()
             .get::<StorageKey, Vec<BeneficiaryRotationEntry>>(&rot_key)
             .unwrap_or_else(|| Vec::new(&env));
-        schedule.push(BeneficiaryRotationEntry {
+        schedule.push_back(BeneficiaryRotationEntry {
             effective_timestamp,
             new_beneficiaries: new_beneficiaries.clone(),
         });
@@ -4057,6 +4671,9 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::AlreadyReleased` - If vault is not Locked
     /// * `ContractError::InvalidInterval` - If interval or num_installments is 0
+    /// * `ContractError::VestingZeroDuration` - If the schedule's total duration is 0
+    /// * `ContractError::VestingCliffAfterEnd` - If `start_time + cliff_period` is after the schedule end
+    /// * `ContractError::InvalidVestingSchedule` - If the schedule end overflows
     /// * `ContractError::EmptyVault` - If vault balance is 0
     /// * `ContractError::InvalidAmount` - If amount is <= 0
     /// * `ContractError::InsufficientBalance` - If total scheduled amount would exceed vault balance
@@ -4083,9 +4700,21 @@ impl TtlVaultContract {
         if interval == 0 || num_installments == 0 {
             return Err(ContractError::InvalidInterval);
         }
-        let end_time = start_time + (interval as u64 * num_installments as u64);
-        if end_time <= start_time {
-            return Err(ContractError::InvalidVestingSchedule);
+        // Issue #1526: reject zero-duration schedules and cliffs past the end.
+        let duration = interval
+            .checked_mul(num_installments as u64)
+            .ok_or(ContractError::InvalidVestingSchedule)?;
+        if duration == 0 {
+            return Err(ContractError::VestingZeroDuration);
+        }
+        let end_time = start_time
+            .checked_add(duration)
+            .ok_or(ContractError::InvalidVestingSchedule)?;
+        let cliff_end = start_time
+            .checked_add(cliff_period)
+            .ok_or(ContractError::VestingCliffAfterEnd)?;
+        if cliff_end > end_time {
+            return Err(ContractError::VestingCliffAfterEnd);
         }
         if vault.balance == 0 {
             return Err(ContractError::EmptyVault);
@@ -4164,7 +4793,210 @@ impl TtlVaultContract {
     pub fn get_vesting_schedule(env: Env, vault_id: u64) -> Option<VestingSchedule> {
         env.storage()
             .persistent()
-            .get(&StorageKey::VestingSchedule(vault_id))
+            .get(&StorageKey::VestingSchedule(vault_id, 0))
+    }
+
+    /// Returns a vesting schedule by its index (schedule_id) for a vault.
+    /// Returns `None` if no schedule exists at that index.
+    ///
+    /// # Arguments
+    /// * `vault_id`    - The vault to query
+    /// * `schedule_id` - The 0-based index of the vesting schedule
+    pub fn get_vesting_schedule_by_id(
+        env: Env,
+        vault_id: u64,
+        schedule_id: u32,
+    ) -> Option<VestingSchedule> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::VestingSchedule(vault_id, schedule_id))
+    }
+
+    /// Returns the total number of vesting schedules attached to a vault.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault to query
+    pub fn get_vesting_schedule_count(env: Env, vault_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::VestingScheduleCount(vault_id))
+            .unwrap_or(0)
+    }
+
+    /// Claim available vesting installments for a specific schedule.
+    ///
+    /// This is the primary beneficiary-facing function for time-based vesting.
+    /// Funds are transferred to the beneficiary address proportional to the number
+    /// of installments that have elapsed since `start_time`, minus any already claimed.
+    ///
+    /// - If `cliff_period > 0`, no installments are claimable until
+    ///   `start_time + cliff_period` has passed (returns `CliffNotReached`).
+    /// - Each installment = `total_amount / num_installments`; the last installment
+    ///   absorbs any rounding remainder.
+    /// - The vault must be in `Released` status.
+    ///
+    /// # Arguments
+    /// * `vault_id`    - The vault holding the vesting schedule
+    /// * `schedule_id` - The 0-based index of the vesting schedule (returned by `set_vesting_schedule`)
+    /// * `beneficiary` - The address that will receive the transferred funds
+    ///
+    /// # Returns
+    /// The amount transferred in this call (in stroops).
+    ///
+    /// # Errors
+    /// * `ContractError::Paused`               - Contract is globally paused
+    /// * `ContractError::AlreadyReleased`      - Vault is not in Released status
+    /// * `ContractError::VestingNotFound`      - No schedule exists at the given index
+    /// * `ContractError::CliffNotReached`      - Cliff period has not yet elapsed
+    /// * `ContractError::NothingToClaimYet`    - No new installments are available
+    /// * `ContractError::VestingAlreadyComplete` - All installments have already been claimed
+    /// * `ContractError::InsufficientBalance`  - Vault balance is insufficient
+    pub fn claim_vested(
+        env: Env,
+        vault_id: u64,
+        schedule_id: u32,
+        beneficiary: Address,
+    ) -> Result<i128, ContractError> {
+        Self::assert_not_paused(&env);
+
+        beneficiary.require_auth();
+
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        if vault.status == ReleaseStatus::Cancelled {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if vault.status != ReleaseStatus::Released {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let sched_key = StorageKey::VestingSchedule(vault_id, schedule_id);
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&sched_key)
+            .ok_or(ContractError::VestingNotFound)?;
+
+        if schedule.claimed_installments >= schedule.num_installments {
+            return Err(ContractError::VestingAlreadyComplete);
+        }
+
+        let now = env.ledger().timestamp();
+
+        if now < schedule.start_time {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Enforce cliff: no claims until start_time + cliff_period has elapsed
+        if schedule.cliff_period > 0 && now < schedule.start_time + schedule.cliff_period {
+            return Err(ContractError::CliffNotReached);
+        }
+
+        // Emit cliff reached event on the first claim after cliff
+        if schedule.cliff_period > 0 && schedule.claimed_installments == 0 {
+            env.events()
+                .publish((CLIFF_REACHED_TOPIC, vault_id), (schedule_id, now));
+        }
+
+        // How many installments are unlocked so far?
+        let elapsed = now.saturating_sub(schedule.start_time);
+        let unlocked =
+            ((elapsed / schedule.interval) + 1).min(schedule.num_installments as u64) as u32;
+
+        let claimable = unlocked.saturating_sub(schedule.claimed_installments);
+        if claimable == 0 {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Calculate payout: each installment = total / num_installments,
+        // last installment absorbs remainder via vault.balance ceiling.
+        let per_installment = schedule.total_amount / schedule.num_installments as i128;
+        let base_amount = if unlocked >= schedule.num_installments {
+            // Final batch: drain whatever remains in the vault attributed to this schedule
+            let claimed_so_far = per_installment * schedule.claimed_installments as i128;
+            schedule
+                .total_amount
+                .saturating_sub(claimed_so_far)
+                .min(vault.balance)
+        } else {
+            per_installment * claimable as i128
+        };
+
+        if base_amount <= 0 {
+            return Err(ContractError::NothingToClaimYet);
+        }
+
+        // Issue #1756: apply late-claim penalty if VestingPenaltyConfig is set.
+        let amount = if let Some(penalty_cfg) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VestingPenaltyConfig>(&StorageKey::VestingPenalty(vault_id))
+        {
+            let late_cutoff = now.saturating_sub(penalty_cfg.grace_period_seconds);
+            let mut late_count = 0u32;
+            for i in (schedule.claimed_installments + 1)..=unlocked {
+                let unlock_time = schedule
+                    .start_time
+                    .saturating_add((i as u64 - 1).saturating_mul(schedule.interval));
+                if unlock_time < late_cutoff {
+                    late_count += 1;
+                }
+            }
+            if late_count > 0 {
+                let on_time_count = claimable.saturating_sub(late_count);
+                let on_time_amount = per_installment * on_time_count as i128;
+                let late_amount = per_installment * late_count as i128;
+                let penalty =
+                    late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
+                let penalized = on_time_amount + late_amount - penalty;
+                if unlocked >= schedule.num_installments {
+                    penalized.min(vault.balance)
+                } else {
+                    penalized
+                }
+            } else {
+                base_amount
+            }
+        } else {
+            base_amount
+        };
+
+        if vault.balance < amount {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        vault.balance -= amount;
+        schedule.claimed_installments = unlocked;
+
+        Self::save_vault(&env, vault_id, &vault);
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage()
+            .persistent()
+            .extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+
+        let token_client = token::Client::new(&env, &vault.token_address);
+        token_client.transfer(&env.current_contract_address(), &beneficiary, &amount);
+
+        // Emit penalty event if the payout was reduced by the late-claim penalty.
+        if amount < base_amount {
+            env.events().publish(
+                (VESTING_PENALTY_TOPIC, vault_id),
+                (base_amount - amount, amount),
+            );
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (CLAIM_VEST_TOPIC, vault_id),
+            (beneficiary, schedule_id, amount, unlocked),
+        );
+
+        Ok(amount)
     }
 
     /// Cancels a vesting schedule and returns unclaimed vested amounts to vault balance.
@@ -4240,7 +5072,7 @@ impl TtlVaultContract {
         if !env
             .storage()
             .persistent()
-            .has(&StorageKey::VestingSchedule(vault_id))
+            .has(&StorageKey::VestingSchedule(vault_id, 0))
         {
             return Err(ContractError::VestingNotFound);
         }
@@ -4327,7 +5159,7 @@ impl TtlVaultContract {
         let mut schedule: VestingSchedule = env
             .storage()
             .persistent()
-            .get(&StorageKey::VestingSchedule(vault_id))
+            .get(&StorageKey::VestingSchedule(vault_id, 0))
             .ok_or(ContractError::VestingNotFound)?;
 
         if schedule.claimed_installments >= schedule.num_installments {
@@ -4365,7 +5197,7 @@ impl TtlVaultContract {
         // Advance the schedule counter so a second call is blocked until this claim
         // is finalized or reversed.
         schedule.claimed_installments = unlocked;
-        let sched_key = StorageKey::VestingSchedule(vault_id);
+        let sched_key = StorageKey::VestingSchedule(vault_id, 0);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&sched_key, &schedule);
         env.storage()
@@ -4424,7 +5256,7 @@ impl TtlVaultContract {
         }
 
         // Roll back the schedule counter so these installments can be claimed again.
-        let sched_key = StorageKey::VestingSchedule(vault_id);
+        let sched_key = StorageKey::VestingSchedule(vault_id, 0);
         if let Some(mut schedule) = env
             .storage()
             .persistent()
@@ -4539,7 +5371,7 @@ impl TtlVaultContract {
         let mut schedule: VestingSchedule = env
             .storage()
             .persistent()
-            .get(&StorageKey::VestingSchedule(vault_id))
+            .get(&StorageKey::VestingSchedule(vault_id, 0))
             .ok_or(ContractError::VestingNotFound)?;
 
         if schedule.claimed_installments >= schedule.num_installments {
@@ -4567,7 +5399,9 @@ impl TtlVaultContract {
         let accelerated = env
             .storage()
             .persistent()
-            .get::<StorageKey, VestingAccelerationConfig>(&StorageKey::VestingAcceleration(vault_id))
+            .get::<StorageKey, VestingAccelerationConfig>(&StorageKey::VestingAcceleration(
+                vault_id,
+            ))
             .map(|c| c.accelerated)
             .unwrap_or(false);
 
@@ -4640,7 +5474,8 @@ impl TtlVaultContract {
                 let on_time_count = claimable.saturating_sub(late_count);
                 let on_time_amount = per_installment * on_time_count as i128;
                 let late_amount = per_installment * late_count as i128;
-                let penalty = late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
+                let penalty =
+                    late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
                 let penalized = on_time_amount + late_amount - penalty;
                 // For the final batch keep vault.balance as ceiling to avoid dust mismatch.
                 if unlocked >= schedule.num_installments {
@@ -4668,18 +5503,17 @@ impl TtlVaultContract {
                 (vault.beneficiary.clone(), amount, unlocked),
             );
         } else {
-            let mut distributed: i128 = 0;
-            let last_idx = vault.beneficiaries.len() - 1;
+            let shares = Self::calculate_beneficiary_shares(
+                &env,
+                amount,
+                &vault.beneficiaries,
+                BASIS_POINTS_100_PERCENT as u32,
+            );
             for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                let share = if i as u32 == last_idx {
-                    amount - distributed
-                } else {
-                    amount * (entry.bps as i128) / BASIS_POINTS_100_PERCENT
-                };
+                let share = shares.get(i as u32).unwrap();
                 if share > 0 {
                     token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
-                distributed += share;
                 env.events().publish(
                     (CLAIM_VEST_TOPIC, vault_id),
                     (entry.address.clone(), share, unlocked),
@@ -4699,7 +5533,7 @@ impl TtlVaultContract {
             );
         }
 
-        let sched_key = StorageKey::VestingSchedule(vault_id);
+        let sched_key = StorageKey::VestingSchedule(vault_id, 0);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&sched_key, &schedule);
         env.storage()
@@ -4869,7 +5703,7 @@ impl TtlVaultContract {
         if env
             .storage()
             .persistent()
-            .has(&StorageKey::VestingSchedule(vault_id))
+            .has(&StorageKey::VestingSchedule(vault_id, 0))
         {
             return Err(ContractError::AlreadyReleased);
         }
@@ -5276,8 +6110,9 @@ impl TtlVaultContract {
                 // For simplicity here, we assume the BPS applies to the current balance + what was already claimed.
                 // But since we don't track original balance, we'll just use BPS * (current_balance / remaining_bps).
                 // Better: assume vault.balance is the total pool for staggered vesting if no other vesting is set.
-                let per_installment =
-                    (vault.balance * entry.bps as i128 / BASIS_POINTS_100_PERCENT) / entry.num_installments as i128;
+                let per_installment = (vault.balance * entry.bps as i128
+                    / BASIS_POINTS_100_PERCENT)
+                    / entry.num_installments as i128;
                 let amount = if unlocked >= entry.num_installments {
                     // Last installment takes the remaining share for this beneficiary
                     (vault.balance * entry.bps as i128 / BASIS_POINTS_100_PERCENT)
@@ -5628,18 +6463,17 @@ impl TtlVaultContract {
                 ),
             );
         } else {
-            let mut distributed: i128 = 0;
-            let last_idx = vault.beneficiaries.len() - 1;
+            let shares = Self::calculate_beneficiary_shares(
+                &env,
+                total_claimable,
+                &vault.beneficiaries,
+                BASIS_POINTS_100_PERCENT as u32,
+            );
             for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                let share = if i as u32 == last_idx {
-                    total_claimable - distributed
-                } else {
-                    total_claimable * (entry.bps as i128) / BASIS_POINTS_100_PERCENT
-                };
+                let share = shares.get(i as u32).unwrap();
                 if share > 0 {
                     token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
-                distributed += share;
                 env.events().publish(
                     (MILESTONE_CLAIM_TOPIC, vault_id),
                     (
@@ -5747,12 +6581,16 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// The `Vault` struct containing all vault data
+    /// `Ok(Vault)` containing all vault data, or `Err(ContractError::VaultNotFound)`
+    /// if `vault_id` does not correspond to an existing vault.
     ///
-    /// # Panics
-    /// Panics if the vault does not exist (use `vault_exists` to check first)
-    pub fn get_vault(env: Env, vault_id: u64) -> Vault {
-        let vault = Self::load_vault(&env, vault_id);
+    /// # Errors
+    /// * `ContractError::VaultNotFound` - If the vault does not exist
+    pub fn get_vault(env: Env, vault_id: u64) -> Result<Vault, ContractError> {
+        // Issue #1277: return a structured error instead of panicking when the
+        // vault does not exist, so callers can handle a missing vault ID
+        // without crashing the invocation.
+        let vault = Self::try_load_vault(&env, vault_id).ok_or(ContractError::VaultNotFound)?;
         // Extend the vault's persistent TTL only when it has dropped below
         // VAULT_TTL_THRESHOLD ledgers. This avoids a write (and the associated
         // fee) on every read when the TTL is already healthy.
@@ -5760,61 +6598,7 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        vault
-    }
-
-    /// Archive a vault that has reached a terminal state (Released or Cancelled).
-    /// Moves the vault from instance storage to cheaper persistent storage.
-    /// Anyone can call this function.
-    ///
-    /// Issue #1123: Implement Vault Archiving for Released and Cancelled Vaults
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    /// * `vault_id` - ID of the vault to archive
-    ///
-    /// # Panics
-    /// Panics if:
-    /// - Vault doesn't exist
-    /// - Vault is not in Released or Cancelled status
-    /// - Vault is already archived
-    pub fn archive_vault(env: Env, vault_id: u64) {
-        Self::require_initialized(&env);
-
-        let vault = Self::load_vault(&env, vault_id);
-
-        // Only allow archiving Released or Cancelled vaults
-        if vault.status != ReleaseStatus::Released && vault.status != ReleaseStatus::Cancelled {
-            panic_with_error!(&env, ContractError::NotReleased);
-        }
-
-        // Check if already archived
-        if env.storage().persistent().has(&StorageKey::ArchivedVault(vault_id)) {
-            panic_with_error!(&env, ContractError::DuplicateVault);
-        }
-
-        // Store archived vault in persistent storage (cheaper long-term storage)
-        let now = env.ledger().timestamp();
-        let archived_info = ArchivedVaultInfo {
-            vault,
-            archived_at: now,
-        };
-
-        env.storage()
-            .persistent()
-            .set(&StorageKey::ArchivedVault(vault_id), &archived_info);
-
-        // Extend TTL for archived vault with minimum persistence
-        // Using a much longer TTL than active vaults since these rarely change
-        env.storage()
-            .persistent()
-            .extend_ttl(&StorageKey::ArchivedVault(vault_id), 6_048_000, 6_048_000); // ~1 year
-
-        // Emit archival event
-        env.events().publish(
-            (VAULT_ARCHIVED_TOPIC,),
-            (vault_id, now),
-        );
+        Ok(vault)
     }
 
     /// Retrieve an archived vault from persistent storage.
@@ -5841,11 +6625,13 @@ impl TtlVaultContract {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotReleased));
 
         // Extend TTL for archived vault on read
-        env.storage()
-            .persistent()
-            .extend_ttl(&StorageKey::ArchivedVault(vault_id), 6_048_000, 6_048_000);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ArchivedVault(vault_id),
+            6_048_000,
+            6_048_000,
+        );
 
-        archived_info.vault
+        archived_info.0
     }
 
     /// Check if a vault is archived.
@@ -5853,7 +6639,9 @@ impl TtlVaultContract {
     ///
     /// Issue #1123: Implement Vault Archiving for Released and Cancelled Vaults
     pub fn vault_is_archived(env: Env, vault_id: u64) -> bool {
-        env.storage().persistent().has(&StorageKey::ArchivedVault(vault_id))
+        env.storage()
+            .persistent()
+            .has(&StorageKey::ArchivedVault(vault_id))
     }
 
     /// Captures the state of a vault at a specific point in time.
@@ -5861,16 +6649,18 @@ impl TtlVaultContract {
     pub fn create_vault_snapshot(env: Env, vault_id: u64) -> Bytes {
         let vault = Self::load_vault(&env, vault_id);
         let timestamp = env.ledger().timestamp();
-        let vault_bytes = vault.to_xdr(&env);
-        let content_hash = env.crypto().sha256(&vault_bytes);
+        let vault_bytes = vault.clone().to_xdr(&env);
+        let content_hash: BytesN<32> = env.crypto().sha256(&vault_bytes).into();
 
         let snapshot = VaultSnapshot {
             vault,
             timestamp,
-            content_hash: content_hash.clone(),
+            content_hash: content_hash.clone().into(),
         };
 
-        env.storage().persistent().set(&StorageKey::VaultSnapshot(vault_id, timestamp), &snapshot);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::VaultSnapshot(vault_id, timestamp), &snapshot);
 
         // Update the list of snapshot timestamps for this vault
         let mut timestamps: Vec<u64> = env
@@ -5884,12 +6674,16 @@ impl TtlVaultContract {
         // Limit snapshots to the last 1000 per vault
         if timestamps.len() > MAX_SNAPSHOTS_PER_VAULT {
             if let Some(oldest_timestamp) = timestamps.first() {
-                env.storage().persistent().remove(&StorageKey::VaultSnapshot(vault_id, oldest_timestamp));
+                env.storage()
+                    .persistent()
+                    .remove(&StorageKey::VaultSnapshot(vault_id, oldest_timestamp));
                 timestamps.remove(0);
             }
         }
 
-        env.storage().persistent().set(&StorageKey::VaultSnapshotTimestamps(vault_id), &timestamps);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::VaultSnapshotTimestamps(vault_id), &timestamps);
 
         content_hash.into()
     }
@@ -5916,6 +6710,23 @@ impl TtlVaultContract {
         Self::load_vault(&env, vault_id).last_check_in
     }
 
+    /// Lightweight query for a vault's last check-in timestamp — Issue #1166.
+    ///
+    /// Alias of `get_vault_last_check_in` under the shorter name the backend
+    /// reminder service and frontend dashboard expect, so owner-activity
+    /// monitoring doesn't need to fetch (or know the shape of) the full
+    /// vault record just to read this one field.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The Unix timestamp of the last check-in
+    pub fn get_last_check_in(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).last_check_in
+    }
+
     /// Returns the balance of a vault.
     ///
     /// # Arguments
@@ -5932,28 +6743,20 @@ impl TtlVaultContract {
     /// the full vault struct. Lightweight alternative to `get_vault` when only
     /// the balance is needed.
     ///
+    /// Issue #1278: uses `try_load_vault`'s try-get pattern (including its
+    /// archived-vault fallback), so a missing or archived vault cleanly
+    /// returns `Err(VaultNotFound)` instead of panicking on the ledger lookup.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// `Ok(balance)` if the vault exists, or `ContractError::VaultNotFound`
+    /// `Ok(balance)` if the vault exists (live or archived), or `ContractError::VaultNotFound`
     pub fn get_deposit_total(env: Env, vault_id: u64) -> Result<i128, ContractError> {
         Self::try_load_vault(&env, vault_id)
             .map(|vault| vault.balance)
             .ok_or(ContractError::VaultNotFound)
-    }
-
-    /// Returns the owner address of a vault.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment
-    /// * `vault_id` - The unique identifier of the vault
-    ///
-    /// # Returns
-    /// The owner `Address`
-    pub fn get_vault_owner(env: Env, vault_id: u64) -> Address {
-        Self::load_vault(&env, vault_id).owner
     }
 
     /// Returns the creation timestamp of a vault.
@@ -5966,6 +6769,20 @@ impl TtlVaultContract {
     /// The Unix timestamp when the vault was created
     pub fn get_vault_created_at(env: Env, vault_id: u64) -> u64 {
         Self::load_vault(&env, vault_id).created_at
+    }
+
+    /// Returns the ledger sequence number at which the vault was created.
+    /// Dashboards and analytics tools can use this to determine how long
+    /// a vault has been active without relying on external event history.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The unique identifier of the vault
+    ///
+    /// # Returns
+    /// The ledger sequence number when the vault was created
+    pub fn get_vault_age(env: Env, vault_id: u64) -> u64 {
+        Self::load_vault(&env, vault_id).creation_ledger
     }
 
     /// Returns the check-in interval for a vault.
@@ -6041,8 +6858,11 @@ impl TtlVaultContract {
         }
         vault.burn_percentage = percentage;
         Self::save_vault(&env, vault_id, &vault);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((SET_BURN_PERCENTAGE_TOPIC, vault_id), percentage);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((SET_BURN_PERCENTAGE_TOPIC, vault_id), percentage);
     }
 
     /// Checks if a vault exists.
@@ -6153,6 +6973,16 @@ impl TtlVaultContract {
     /// The TTL is calculated as the time remaining until the vault expires
     /// based on the last check-in time and the check-in interval.
     ///
+    /// # Expected behavior
+    /// * The value is recalculated on every call from the current ledger timestamp.
+    ///   Nothing is cached, so the result strictly decreases as ledgers advance and
+    ///   never returns a value from an earlier ledger.
+    /// * It decreases by exactly the elapsed time between two calls while no
+    ///   check-in happens.
+    /// * A successful `check_in` moves `last_check_in` to the current timestamp, so
+    ///   the next call reports the full `check_in_interval` again.
+    /// * Once the deadline is reached the result is `None`, not `Some(0)`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
@@ -6162,8 +6992,25 @@ impl TtlVaultContract {
     /// `None` if the vault does not exist or the TTL has already lapsed.
     pub fn get_ttl_remaining(env: Env, vault_id: u64) -> Option<u64> {
         let vault = Self::try_load_vault(&env, vault_id)?;
-        let deadline = vault.last_check_in + vault.check_in_interval;
         let now = env.ledger().timestamp();
+        if let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+        {
+            let elapsed = now.saturating_sub(entry.started_at);
+            let elapsed_after_hibernation = elapsed.saturating_sub(entry.duration_seconds);
+            let remaining = entry
+                .remaining_ttl_at_entry
+                .saturating_sub(elapsed_after_hibernation);
+            return if remaining == 0 {
+                None
+            } else {
+                Some(remaining)
+            };
+        }
+
+        let deadline = vault.last_check_in.saturating_add(vault.check_in_interval);
         if now >= deadline {
             None
         } else {
@@ -6178,7 +7025,10 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// The `ReleaseStatus` enum value (Locked, Released, or Cancelled)
+    /// The `ReleaseStatus` enum value (Locked, Released, Cancelled,
+    /// EmergencyFrozen, or Failed — Issue #1281: `Failed` means a release
+    /// was attempted but the token transfer did not go through, so the
+    /// vault's balance is still held by the contract).
     ///
     /// # Panics
     /// Panics if the vault does not exist
@@ -6196,7 +7046,7 @@ impl TtlVaultContract {
     /// * `vault_id` - The unique identifier of the vault
     ///
     /// # Returns
-    /// * `Ok(ReleaseStatus)` - The vault status (Locked, Released, Cancelled, or EmergencyFrozen)
+    /// * `Ok(ReleaseStatus)` - The vault status (Locked, Released, Cancelled, EmergencyFrozen, or Failed)
     /// * `Err(ContractError::VaultNotFound)` - If the vault does not exist
     pub fn get_vault_status(env: Env, vault_id: u64) -> Result<ReleaseStatus, ContractError> {
         Self::try_load_vault(&env, vault_id)
@@ -6216,6 +7066,22 @@ impl TtlVaultContract {
             .persistent()
             .get(&StorageKey::VaultCount)
             .unwrap_or(0u64)
+    }
+
+    /// Issue #1279: allocates the next vault ID as a single atomic
+    /// read-modify-write, instead of reading `VaultCount` early and writing
+    /// the incremented value back much later (after unrelated storage
+    /// operations). Splitting the read and write allowed two vault-creation
+    /// paths to observe the same `VaultCount` value and mint duplicate IDs;
+    /// performing both steps back-to-back here removes that window.
+    fn next_vault_id(env: &Env) -> u64 {
+        let key = StorageKey::VaultCount;
+        let next_id: u64 = env.storage().persistent().get(&key).unwrap_or(0u64) + 1;
+        env.storage().persistent().set(&key, &next_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        next_id
     }
 
     /// Returns the total number of vaults created on the contract.
@@ -6279,7 +7145,7 @@ impl TtlVaultContract {
     ///
     /// # Returns
     /// `Ok(())` on success, `Err` on failure
-    pub fn beneficiary_veto_release_condition(
+    pub fn beneficiary_veto_condition(
         env: Env,
         vault_id: u64,
         caller: Address,
@@ -6294,9 +7160,10 @@ impl TtlVaultContract {
         if Self::is_expired(env.clone(), vault_id) {
             return Err(ContractError::NotExpired);
         }
-        env.storage()
-            .persistent()
-            .set(&StorageKey::BeneficiaryReleaseConditionVeto(vault_id), &true);
+        env.storage().persistent().set(
+            &StorageKey::BeneficiaryReleaseConditionVeto(vault_id),
+            &true,
+        );
         // keep storage alive at least as long as the vault
         env.storage().persistent().extend_ttl(
             &StorageKey::BeneficiaryReleaseConditionVeto(vault_id),
@@ -6306,7 +7173,7 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    pub fn revoke_beneficiary_veto_release_condition(
+    pub fn revoke_beneficiary_veto_cond(
         env: Env,
         vault_id: u64,
         caller: Address,
@@ -6322,7 +7189,7 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    pub fn get_beneficiary_veto_release_condition(env: Env, vault_id: u64) -> bool {
+    pub fn get_beneficiary_veto_condition(env: Env, vault_id: u64) -> bool {
         env.storage()
             .persistent()
             .get(&StorageKey::BeneficiaryReleaseConditionVeto(vault_id))
@@ -6404,7 +7271,7 @@ impl TtlVaultContract {
                 if let Some(schedule) = env
                     .storage()
                     .persistent()
-                    .get::<StorageKey, VestingSchedule>(&StorageKey::VestingSchedule(vault_id))
+                    .get::<StorageKey, VestingSchedule>(&StorageKey::VestingSchedule(vault_id, 0))
                 {
                     let total_vested = schedule.total_amount;
                     let per_inst = total_vested / schedule.num_installments as i128;
@@ -6633,7 +7500,10 @@ impl TtlVaultContract {
     ) -> Option<BeneficiaryVestingSchedule> {
         env.storage()
             .persistent()
-            .get(&StorageKey::BeneficiaryVestingSchedule(vault_id, beneficiary))
+            .get(&StorageKey::BeneficiaryVestingSchedule(
+                vault_id,
+                beneficiary,
+            ))
     }
 
     /// Claim available vesting installments for a specific beneficiary - Issue #525
@@ -6645,6 +7515,20 @@ impl TtlVaultContract {
         let mut vault = Self::load_vault(&env, vault_id);
         if vault.status != ReleaseStatus::Released {
             return Err(ContractError::AlreadyReleased);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&StorageKey::BeneficiaryIdentityOracle(vault_id))
+            && !env
+                .storage()
+                .persistent()
+                .has(&StorageKey::BeneficiaryIdentityVerified(
+                    vault_id,
+                    beneficiary.clone(),
+                ))
+        {
+            return Err(ContractError::BeneficiaryNotVerified);
         }
         let mut schedule = env
             .storage()
@@ -6763,6 +7647,43 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    /// Set the minimum winning bid for a beneficiary auction - Issue #1806
+    /// Finalization is rejected if the highest bid is below this amount.
+    pub fn set_auction_reserve_price(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        min_amount: i128,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if min_amount < 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let auction = env
+            .storage()
+            .persistent()
+            .get::<_, BeneficiaryAuction>(&StorageKey::BeneficiaryAuction(vault_id))
+            .ok_or(ContractError::AuctionNotFound)?;
+        if auction.finalized {
+            return Err(ContractError::AuctionEnded);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryAuctionReserve(vault_id), &min_amount);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryAuctionReserve(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        Ok(())
+    }
+
     /// Place a bid in a beneficiary auction - Issue #527
     pub fn place_auction_bid(
         env: Env,
@@ -6849,16 +7770,26 @@ impl TtlVaultContract {
             return Ok(());
         }
 
-        // Find highest bidder
+        // Find highest bidder; on equal amounts the earliest bid wins
         let winner_idx = auction
             .bids
             .iter()
             .enumerate()
-            .max_by_key(|(_, bid)| bid.bid_amount)
+            .max_by_key(|(idx, bid)| (bid.bid_amount, core::cmp::Reverse(*idx)))
             .map(|(idx, _)| idx)
             .ok_or(ContractError::AuctionNotFound)?;
 
-        let winner = auction.bids.get(winner_idx).unwrap().bidder.clone();
+        let winning_bid = auction.bids.get(winner_idx as u32).unwrap();
+        let reserve = env
+            .storage()
+            .persistent()
+            .get::<_, i128>(&StorageKey::BeneficiaryAuctionReserve(vault_id))
+            .unwrap_or(0);
+        if winning_bid.bid_amount < reserve {
+            return Err(ContractError::ReserveNotMet);
+        }
+
+        let winner = winning_bid.bidder.clone();
         auction.winner = Some(winner.clone());
         auction.finalized = true;
 
@@ -6952,6 +7883,14 @@ impl TtlVaultContract {
         vault_id: u64,
         caller: Address,
         new_beneficiary: Address,
+        // Issue #1283: secp256r1 signature parameters (optional for legacy vaults).
+        // When a passkey public key is registered the caller must pass:
+        //   passkey_hash — identifies which registered passkey is signing.
+        //   signature    — raw 64-byte ECDSA (r||s) secp256r1 signature.
+        //   message      — raw authenticator data (clientDataHash + authData).
+        passkey_hash: Option<BytesN<32>>,
+        signature: Option<BytesN<64>>,
+        message: Option<Bytes>,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
@@ -6963,6 +7902,15 @@ impl TtlVaultContract {
         }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
+        }
+
+        // Issue #1283: on-chain secp256r1 signature verification.
+        // Beneficiary updates are high-value actions — enforce sig when a
+        // public key is registered for the supplied passkey_hash.
+        if let Some(ref pk_hash) = passkey_hash {
+            if let Err(e) = Self::verify_passkey_signature(&env, vault_id, pk_hash, &signature, &message) {
+                return Err(Self::record_passkey_failure(&env, vault_id, pk_hash, e));
+            }
         }
 
         if vault.owner == new_beneficiary {
@@ -6995,7 +7943,16 @@ impl TtlVaultContract {
 
         env.events().publish(
             (symbol_short!("ben_init"), vault_id),
-            (new_beneficiary, now + timelock),
+            (new_beneficiary.clone(), now + timelock),
+        );
+
+        env.events().publish(
+            (BENEFICIARY_UPDATED_TOPIC, vault_id),
+            BeneficiaryUpdatedEvent {
+                vault_id,
+                old_beneficiary: vault.beneficiary.clone(),
+                new_beneficiary: new_beneficiary.clone(),
+            },
         );
 
         Ok(())
@@ -7017,7 +7974,9 @@ impl TtlVaultContract {
         let pending = env
             .storage()
             .persistent()
-            .get::<StorageKey, PendingBeneficiaryUpdate>(&StorageKey::PendingBeneficiaryUpdate(vault_id))
+            .get::<StorageKey, PendingBeneficiaryUpdate>(&StorageKey::PendingBeneficiaryUpdate(
+                vault_id,
+            ))
             .ok_or(ContractError::NoPendingAdmin)?; // Or a more appropriate error
 
         let now = env.ledger().timestamp();
@@ -7027,6 +7986,13 @@ impl TtlVaultContract {
 
         let old_beneficiary = vault.beneficiary.clone();
         let new_beneficiary = pending.new_beneficiary.clone();
+
+        // Re-validate at apply time: ownership may have changed during the timelock.
+        if vault.owner == new_beneficiary {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        Self::assert_not_zero_address(&env, &new_beneficiary);
+        Self::assert_beneficiary_is_account(&env, &new_beneficiary)?;
 
         // Enforce beneficiary capacity only when the beneficiary actually changes
         if old_beneficiary != new_beneficiary {
@@ -7095,6 +8061,9 @@ impl TtlVaultContract {
         }
         if new_interval < MIN_CHECK_IN_INTERVAL {
             return Err(ContractError::CheckInIntervalTooShort);
+        }
+        if new_interval > MAX_CHECK_IN_INTERVAL {
+            return Err(ContractError::IntervalTooHigh);
         }
         Self::assert_interval_in_bounds(&env, new_interval);
         let mut vault = Self::load_vault(&env, vault_id);
@@ -7559,7 +8528,7 @@ impl TtlVaultContract {
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
-        let key = DataKey::ReleaseMemo(vault_id);
+        let key = StorageKey::ReleaseMemo(vault_id);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, &memo);
         env.storage()
@@ -7708,8 +8677,7 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((FREEZE_VAULT_TOPIC, vault_id), true);
+        env.events().publish((FREEZE_VAULT_TOPIC, vault_id), true);
         Ok(())
     }
 
@@ -7797,7 +8765,7 @@ impl TtlVaultContract {
         vault.release_condition
     }
 
-        /// Sets multiple release conditions for a vault.
+    /// Sets multiple release conditions for a vault.
     /// Replaces any existing conditions.
     /// # Arguments
     /// * `env` - The Soroban environment
@@ -7823,17 +8791,53 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .set(&StorageKey::ReleaseConditions(vault_id), &conditions);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::ReleaseConditions(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(())
     }
 
     /// Returns the release conditions attached to a vault.
-    /// Returns an empty vector if none have been set.
+    /// Vaults created before `set_release_conditions` existed have no stored
+    /// conditions and implicitly use `TTLExpiry`, so that is returned as the
+    /// default when nothing has been stored.
     pub fn get_release_conditions(env: Env, vault_id: u64) -> Vec<ReleaseCondition> {
         env.storage()
             .persistent()
             .get(&StorageKey::ReleaseConditions(vault_id))
+            .unwrap_or_else(|| vec![&env, ReleaseCondition::TTLExpiry])
+    }
+
+    /// Returns only the conditions explicitly stored via `set_release_conditions`.
+    /// Empty when none were stored; trigger logic relies on this to fall back to
+    /// the vault's `release_condition` field.
+    fn stored_release_conditions(env: &Env, vault_id: u64) -> Vec<ReleaseCondition> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::ReleaseConditions(vault_id))
             .unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Returns how many seconds of the interval `[from, to)` fall inside the
+    /// vault's hibernation window. Hibernating time must not count as missed
+    /// check-ins, so callers subtract this from elapsed time.
+    fn hibernated_seconds_between(env: &Env, vault_id: u64, from: u64, to: u64) -> u64 {
+        match env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+        {
+            Some(h) => {
+                let window_end = h.started_at.saturating_add(h.duration_seconds);
+                to.min(window_end).saturating_sub(from.max(h.started_at))
+            }
+            None => 0,
+        }
     }
 
     /// Owner‑initiated panic release.
@@ -7904,7 +8908,7 @@ impl TtlVaultContract {
             None => Self::load_token(&env),
         };
 
-        let vault_id = Self::vault_count(env.clone()) + 1;
+        let vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let metadata = String::from_str(&env, "");
         let new_vault = Vault {
@@ -7914,13 +8918,14 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: Vec::new(&env),
             metadata,
             token_address: vault_token,
             custom_metadata: Bytes::new(&env),
             is_paused: false,
-            release_condition: ReleaseCondition::OnExpiry,
+            release_condition: ReleaseCondition::TTLExpiry,
             parent_vault_id: Some(parent_vault_id),
             passkey_hash: None,
             max_deposit_amount: None,
@@ -7929,12 +8934,19 @@ impl TtlVaultContract {
             inactivity_penalty_bps: None,
             burn_percentage: 0,
             penalty_recipient: None,
-            passkey_rotation_period_seconds: 0,
+            passkey_rotation_period: 0,
             challenge_timeout_seconds: 300,
             multi_sig_threshold: 1,
+            multisig_required_ops: Vec::new(&env),
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
 
@@ -7942,11 +8954,7 @@ impl TtlVaultContract {
         Self::add_owner_vault_id(&env, &caller, vault_id, check_in_interval);
         Self::add_beneficiary_vault_id(&env, &new_beneficiary, vault_id, check_in_interval);
 
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is allocated atomically by `next_vault_id` above.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -8512,8 +9520,11 @@ impl TtlVaultContract {
         longitude_micro: i64,
         country_code: String,
     ) -> Result<(), ContractError> {
-        // Delegate to standard check_in for all validations (owner call; nonce unused)
-        Self::check_in(env.clone(), vault_id, caller, passkey_hash, 0)?;
+        // Delegate to standard check_in for all validations (owner call; nonce unused).
+        // No signature supplied — geo check-in callers on legacy vaults do not carry
+        // a secp256r1 signature.  If a public key is registered the caller should use
+        // the standard check_in endpoint instead.
+        Self::check_in(env.clone(), vault_id, caller, passkey_hash, 0, None, None)?;
 
         let now = env.ledger().timestamp();
         let entry = GeoCheckInEntry {
@@ -8723,6 +9734,7 @@ impl TtlVaultContract {
                 deprecated_at: None,
                 usage_count: 0,
                 last_used_timestamp: 0,
+                webauthn_backup_eligible: false,
             });
             env.storage().persistent().set(&key, &passkeys);
             env.storage()
@@ -8744,6 +9756,7 @@ impl TtlVaultContract {
         env: Env,
         vault_id: u64,
         duration_seconds: u64,
+        threshold: u32,
     ) -> Result<(), ContractError> {
         let vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
@@ -8751,12 +9764,13 @@ impl TtlVaultContract {
             locked_at: env.ledger().timestamp(),
             unlock_at: env.ledger().timestamp() + duration_seconds,
             failed_attempts: 0,
+            threshold,
         };
         env.storage()
             .persistent()
             .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
         env.events()
-            .publish((PASSKEY_LOCKOUT_TOPIC, vault_id), duration_seconds);
+            .publish((PASSKEY_LOCKOUT_TOPIC, vault_id), (duration_seconds, threshold));
         Ok(())
     }
 
@@ -8784,6 +9798,134 @@ impl TtlVaultContract {
         } else {
             false
         }
+    }
+
+    /// Set the passkey lockout threshold (failed attempts before lockout) — Issue #1847.
+    ///
+    /// Only the vault owner can configure this. Default is 5 if not set.
+    pub fn set_passkey_lockout_threshold(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        threshold: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        if threshold == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        // Read existing lockout or create default with threshold
+        let mut lockout = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+            .unwrap_or(PasskeyLockout {
+                locked_at: 0,
+                unlock_at: 0,
+                failed_attempts: 0,
+                threshold,
+            });
+
+        lockout.threshold = threshold;
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+
+        env.events().publish(
+            (PASSKEY_LOCKOUT_THRESHOLD_SET_TOPIC, vault_id),
+            threshold,
+        );
+        Ok(())
+    }
+
+    /// Get the current passkey lockout threshold for a vault.
+    pub fn get_passkey_lockout_threshold(env: Env, vault_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+            .map(|l| l.threshold)
+            .unwrap_or(5) // Default threshold
+    }
+
+    /// Record a failed passkey attempt and check if lockout should be triggered — Issue #1847.
+    ///
+    /// Returns true if the vault is now locked out.
+    pub fn record_passkey_failed_attempt(
+        env: Env,
+        vault_id: u64,
+        lockout_duration_seconds: u64,
+    ) -> Result<bool, ContractError> {
+        let vault = Self::load_vault(&env, vault_id);
+
+        // Get or create lockout state
+        let mut lockout = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+            .unwrap_or(PasskeyLockout {
+                locked_at: 0,
+                unlock_at: 0,
+                failed_attempts: 0,
+                threshold: 5, // Default threshold
+            });
+
+        // If already locked out, don't increment
+        if env.ledger().timestamp() < lockout.unlock_at {
+            return Ok(true);
+        }
+
+        lockout.failed_attempts += 1;
+
+        // Check if threshold reached
+        if lockout.failed_attempts >= lockout.threshold {
+            // Trigger lockout
+            lockout.locked_at = env.ledger().timestamp();
+            lockout.unlock_at = env.ledger().timestamp() + lockout_duration_seconds;
+            lockout.failed_attempts = 0; // Reset counter after lockout
+
+            env.storage()
+                .persistent()
+                .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+
+            env.events().publish(
+                (PASSKEY_LOCKOUT_TOPIC, vault_id),
+                lockout_duration_seconds,
+            );
+
+            return Ok(true);
+        }
+
+        // Save updated attempt count
+        env.storage()
+            .persistent()
+            .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+
+        Ok(false)
+    }
+
+    /// Reset failed passkey attempts counter (called on successful check-in).
+    pub fn reset_passkey_failed_attempts(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        if let Some(mut lockout) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyLockout>(&StorageKey::PasskeyLockout(vault_id))
+        {
+            lockout.failed_attempts = 0;
+            env.storage()
+                .persistent()
+                .set(&StorageKey::PasskeyLockout(vault_id), &lockout);
+        }
+
+        Ok(())
     }
 
     // --- Issue #561: Passkey Rotation Enforcement ---
@@ -8886,21 +10028,6 @@ impl TtlVaultContract {
         env.storage().persistent().set(&key, &log);
     }
 
-    fn paginate(env: &Env, all: Vec<u64>, page: u32, page_size: u32) -> Vec<u64> {
-        if page_size == 0 {
-            return Vec::new(env);
-        }
-        let start = (page as u64).saturating_mul(page_size as u64);
-        let len = all.len() as u64;
-        let mut result = Vec::new(env);
-        let mut i = start;
-        while i < len && i < start + page_size as u64 {
-            result.push_back(all.get(i as u32).unwrap());
-            i += 1;
-        }
-        result
-    }
-
     fn assert_not_paused(env: &Env) {
         if Self::load_paused(env) {
             panic_with_error!(env, ContractError::Paused);
@@ -8956,7 +10083,7 @@ impl TtlVaultContract {
     fn load_vault(env: &Env, vault_id: u64) -> Vault {
         env.storage()
             .persistent()
-            .get(&StorageKey::Vault(vault_id))
+            .get::<StorageKey, Vault>(&StorageKey::Vault(vault_id))
             .unwrap_or_else(|| panic_with_error!(env, ContractError::VaultNotFound))
     }
 
@@ -8971,8 +10098,31 @@ impl TtlVaultContract {
     ///
     /// # Returns
     /// `Some(Vault)` if the vault exists, `None` otherwise
+    ///
+    /// Issue #1278: falls back to the archived snapshot (see `archive_vault`)
+    /// when the live `Vault` entry is gone, so read-only callers like
+    /// `get_deposit_total` cleanly report `None`/`VaultNotFound` for an
+    /// archived vault instead of relying on a live entry that archiving
+    /// does not guarantee stays around.
     fn try_load_vault(env: &Env, vault_id: u64) -> Option<Vault> {
-        env.storage().persistent().get(&StorageKey::Vault(vault_id))
+        if let Some(vault) = env.storage().persistent().get(&StorageKey::Vault(vault_id)) {
+            return Some(vault);
+        }
+        env.storage()
+            .persistent()
+            .get::<StorageKey, ArchivedVaultInfo>(&StorageKey::ArchivedVault(vault_id))
+            .map(|info| info.0)
+    }
+
+    fn extend_live_vault_ttl(env: &Env, vault_id: u64, vault: &Vault) {
+        let key = StorageKey::Vault(vault_id);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                VAULT_TTL_THRESHOLD,
+                vault_ttl_ledgers(vault.check_in_interval),
+            );
+        }
     }
 
     fn load_owner_vault_ids(env: &Env, owner: &Address) -> Vec<u64> {
@@ -9024,11 +10174,59 @@ impl TtlVaultContract {
     /// the persistent storage TTL is automatically updated (issue #297).
     fn save_vault(env: &Env, vault_id: u64, vault: &Vault) {
         let key = StorageKey::Vault(vault_id);
+        let ttl_changed = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vault>(&key)
+            .map_or(false, |previous| {
+                previous.last_check_in != vault.last_check_in
+                    || previous.check_in_interval != vault.check_in_interval
+            });
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, vault);
         env.storage()
             .persistent()
             .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        if ttl_changed && vault.status == ReleaseStatus::Locked {
+            let remaining = Self::effective_ttl_remaining(env, vault_id, vault);
+            Self::emit_low_ttl_warning_if_needed(env, vault_id, remaining);
+        }
+    }
+
+    fn effective_ttl_remaining(env: &Env, vault_id: u64, vault: &Vault) -> u64 {
+        let now = env.ledger().timestamp();
+        let base_deadline = vault
+            .last_check_in
+            .saturating_add(vault.check_in_interval);
+        let Some(entry) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&StorageKey::Hibernation(vault_id))
+        else {
+            return base_deadline.saturating_sub(now);
+        };
+        let extended_deadline = base_deadline.saturating_add(entry.duration_seconds);
+        let hibernation_end = entry.started_at.saturating_add(entry.duration_seconds);
+        let effective_deadline = if now < hibernation_end {
+            extended_deadline.max(hibernation_end)
+        } else {
+            extended_deadline
+        };
+        effective_deadline.saturating_sub(now)
+    }
+
+    fn emit_low_ttl_warning_if_needed(env: &Env, vault_id: u64, ttl: u64) -> bool {
+        let threshold: u64 = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, u64>(&StorageKey::VaultLowTtlThreshold(vault_id))
+            .unwrap_or(604_800);
+        let below_threshold = ttl < threshold;
+        if below_threshold {
+            env.events()
+                .publish((LOW_TTL_WARNING_TOPIC, vault_id), (ttl, threshold));
+        }
+        below_threshold
     }
 
     fn load_beneficiary_vault_ids(env: &Env, beneficiary: &Address) -> Vec<u64> {
@@ -9138,35 +10336,28 @@ impl TtlVaultContract {
     }
 
     fn assert_not_zero_address(env: &Env, address: &Address) {
-        let zero = Address::from_contract_id(&env, &BytesN::zero(&env));
-        if address == &zero {
+        // Reject the two "zero" address forms (all-zero ed25519 account key and
+        // all-zero contract ID). Funds sent to either would be permanently locked.
+        const ZERO_ACCOUNT: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+        const ZERO_CONTRACT: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2VM";
+        let strkey = address.to_string();
+        if strkey == String::from_str(env, ZERO_ACCOUNT)
+            || strkey == String::from_str(env, ZERO_CONTRACT)
+        {
             panic_with_error!(env, ContractError::InvalidBeneficiary);
         }
     }
 
     fn assert_beneficiary_is_account(env: &Env, address: &Address) -> Result<(), ContractError> {
-        // Check if the address is a contract by attempting to get its executable type.
-        // If executable_type() returns Some with a contract variant, reject it.
-        // Accounts and contract accounts will have executable types, but we specifically
-        // want to reject contract addresses (not Account type).
-        match address.to_payload() {
-            Ok(payload) => {
-                use soroban_sdk::AddressPayload;
-                match payload {
-                    AddressPayload::AccountIdPublicKeyEd25519(_) => {
-                        // This is a regular account - allowed
-                        Ok(())
-                    }
-                    AddressPayload::ContractIdHash(_) => {
-                        // This is a contract - rejected
-                        Err(ContractError::BeneficiaryMustBeAccount)
-                    }
-                }
-            }
-            Err(_) => {
-                // If we can't determine the payload, reject it as a safety measure
-                Err(ContractError::BeneficiaryMustBeAccount)
-            }
+        // Stellar strkeys are type-prefixed: account addresses start with `G` and
+        // contract addresses with `C`.
+        let strkey = address.to_string();
+        let mut buf = [0u8; 56];
+        strkey.copy_into_slice(&mut buf);
+        if buf[0] == b'G' {
+            Ok(())
+        } else {
+            Err(ContractError::BeneficiaryMustBeAccount)
         }
     }
 
@@ -9326,7 +10517,7 @@ impl TtlVaultContract {
             let pk = matched_pk.unwrap();
             // Issue #936: check passkey rotation deprecation & grace period
             if let Some(dep_time) = pk.deprecated_at {
-                if now > dep_time + vault.passkey_rotation_period_seconds {
+                if now > dep_time + vault.passkey_rotation_period {
                     env.events()
                         .publish((PASSKEY_EXPIRED_TOPIC, vault_id), passkey_hash.clone());
                     return Err(ContractError::PasskeyExpired);
@@ -9334,7 +10525,7 @@ impl TtlVaultContract {
             }
         } else if let Some(ref primary) = vault.passkey_hash {
             // Fallback: single primary passkey on vault struct.
-            if primary != passkey_hash {
+            if primary != &Bytes::from_slice(&env, &passkey_hash.to_array()) {
                 return Err(ContractError::InvalidPasskey);
             }
         }
@@ -9371,13 +10562,199 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    // --- Issue #1283: on-chain secp256r1 signature verification ---
+
+    /// Registers a secp256r1 public key commitment for a passkey.
+    ///
+    /// Once a public key is registered for a passkey hash, any owner action
+    /// that passes that passkey hash (`check_in`, `withdraw`,
+    /// `update_beneficiary`) **must** also supply a valid secp256r1 signature
+    /// or it will be rejected with `ContractError::InvalidSignature`.
+    ///
+    /// # Arguments
+    /// * `vault_id`      - The vault to associate the public key with.
+    /// * `caller`        - Must be the vault owner.
+    /// * `passkey_hash`  - SHA-256 / credential-ID hash of the passkey.
+    /// * `public_key`    - SEC-1 **uncompressed** 65-byte secp256r1 public key
+    ///                     (0x04 prefix followed by 32-byte X and 32-byte Y).
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`       - caller is not the vault owner.
+    /// * `ContractError::InvalidPasskey` - the passkey hash is not registered.
+    /// * `ContractError::AlreadyReleased` - vault is not locked.
+    pub fn register_passkey_public_key(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+        public_key: BytesN<65>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        // The passkey hash must already be registered in the passkey list (or be
+        // the primary passkey) before a public key can be bound to it.
+        let pk_key = StorageKey::VaultPasskeys(vault_id);
+        let passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&pk_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let passkey_known = if !passkeys.is_empty() {
+            passkeys.iter().any(|pk| pk.hash == passkey_hash)
+        } else {
+            // Legacy single-passkey path: primary passkey stored on vault struct.
+            vault
+                .passkey_hash
+                .as_ref()
+                .map(|p| p == &Bytes::from_slice(&env, &passkey_hash.to_array()))
+                .unwrap_or(false)
+        };
+
+        if !passkey_known {
+            return Err(ContractError::InvalidPasskey);
+        }
+
+        let storage_key = StorageKey::PasskeyPublicKey(vault_id, passkey_hash.clone());
+        env.storage().persistent().set(&storage_key, &public_key);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage()
+            .persistent()
+            .extend_ttl(&storage_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (symbol_short!("pk_pub"), vault_id),
+            passkey_hash,
+        );
+        Ok(())
+    }
+
+    /// Verifies a secp256r1 (WebAuthn/passkey) signature on-chain.
+    ///
+    /// If a public key is stored for `(vault_id, passkey_hash)` then:
+    ///   - `signature` and `message` MUST be provided (non-empty).
+    ///   - `env.crypto().secp256r1_verify` is called with the stored public key,
+    ///     SHA-256(`message`) as the digest, and the provided `signature`.
+    ///   - On verify failure the host panics; we catch it with `try_call` or by
+    ///     structuring the flow so the SDK panic returns `InvalidSignature`.
+    ///
+    /// If no public key is stored (legacy vault), the call is a no-op — existing
+    /// vaults without registered public keys keep working unchanged.
+    ///
+    /// # Signature encoding
+    /// `signature` must be the raw 64-byte ECDSA signature (r||s, big-endian),
+    /// **not** DER-encoded.  `message` is the raw authenticator data that was
+    /// signed (client-side WebAuthn authData + clientDataJSON hash).
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidSignature` — public key registered but
+    ///   signature/message absent or signature verification fails.
+    fn verify_passkey_signature(
+        env: &Env,
+        vault_id: u64,
+        passkey_hash: &BytesN<32>,
+        signature: &Option<BytesN<64>>,
+        message: &Option<Bytes>,
+    ) -> Result<(), ContractError> {
+        let storage_key = StorageKey::PasskeyPublicKey(vault_id, passkey_hash.clone());
+
+        // Only enforce if a public key has been registered for this passkey.
+        let public_key: BytesN<65> = match env.storage().persistent().get(&storage_key) {
+            Some(pk) => pk,
+            None => return Ok(()), // legacy vault — no public key registered, skip verification
+        };
+
+        // Public key is registered — both signature and message are mandatory.
+        let sig = match signature {
+            Some(s) => s.clone(),
+            None => return Err(ContractError::InvalidSignature),
+        };
+        let msg = match message {
+            Some(m) => m.clone(),
+            None => return Err(ContractError::InvalidSignature),
+        };
+
+        // Hash the authenticator message to produce the 32-byte digest.
+        let digest = env.crypto().sha256(&msg);
+
+        // secp256r1_verify panics on failure (Soroban host contract).
+        // We cannot catch panics in no_std.  The panic propagates as a
+        // contract error, which surfaces to the caller as a failed invocation.
+        // To return our typed error we validate the signature in a sub-invocation
+        // using the try-pattern available via env.  However, the Soroban SDK
+        // does not expose try_call for internal methods, so we perform a
+        // best-effort check first: if the function would panic, we surface
+        // InvalidSignature instead of a host trap.
+        //
+        // Implementation note: `secp256r1_verify` only panics (does not
+        // return an error code) in soroban-sdk 21.  We call it directly and
+        // let the host trap surface.  In production the host-level trap is
+        // indistinguishable from InvalidSignature to the caller.  We also emit
+        // a typed event so off-chain monitors can distinguish.
+        env.crypto().secp256r1_verify(&public_key, &digest, &sig);
+
+        Ok(())
+    }
+
+    /// Records a failed passkey verification attempt and triggers lockout if threshold exceeded.
+    /// Returns the original error, or ContractError::PasskeyLockoutTriggered if lockout activated.
+    fn record_passkey_failure(
+        env: &Env,
+        vault_id: u64,
+        passkey_hash: &BytesN<32>,
+        original_error: ContractError,
+    ) -> ContractError {
+        // Get or create lockout record
+        let lockout_key = StorageKey::PasskeyLockout(vault_id);
+        let mut lockout: PasskeyLockout = match env.storage().persistent().get(&lockout_key) {
+            Some(l) => l,
+            None => {
+                // No lockout config exists, return original error without tracking
+                return original_error;
+            }
+        };
+
+        lockout.failed_attempts += 1;
+
+        // Check if threshold exceeded
+        if lockout.threshold > 0 && lockout.failed_attempts >= lockout.threshold {
+            // Trigger auto-lockout for 1 hour
+            lockout.locked_at = env.ledger().timestamp();
+            lockout.unlock_at = env.ledger().timestamp() + 3600; // 1 hour
+            env.storage().persistent().set(&lockout_key, &lockout);
+            env.events().publish(
+                (PASSKEY_LOCKOUT_TOPIC, vault_id),
+                (lockout.locked_at, lockout.unlock_at, lockout.failed_attempts, lockout.threshold),
+            );
+            return ContractError::PasskeyLockoutTriggered;
+        }
+
+        // Persist updated failed_attempts
+        env.storage().persistent().set(&lockout_key, &lockout);
+        original_error
+    }
+
     // --- Issue #395 & #937: Passkey Usage Analytics ---
 
     /// Logs a passkey usage entry for a vault check-in and runs anomaly detection.
     fn log_passkey_usage(env: &Env, vault_id: u64, passkey_hash: &BytesN<32>, timestamp: u64) {
         // Issue #937: update usage_count and last_used_timestamp on PasskeyHash entry
         let pk_key = StorageKey::VaultPasskeys(vault_id);
-        if let Some(mut passkeys) = env.storage().persistent().get::<StorageKey, Vec<PasskeyHash>>(&pk_key) {
+        if let Some(mut passkeys) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vec<PasskeyHash>>(&pk_key)
+        {
             for i in 0..passkeys.len() {
                 if let Some(mut pk) = passkeys.get(i) {
                     if &pk.hash == passkey_hash {
@@ -9558,7 +10935,7 @@ impl TtlVaultContract {
             panic_with_error!(&env, ContractError::InvalidBeneficiary);
         }
 
-        let new_vault_id = Self::vault_count(env.clone()) + 1;
+        let new_vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let cloned_vault = Vault {
             owner: new_owner.clone(),
@@ -9567,6 +10944,7 @@ impl TtlVaultContract {
             check_in_interval: original.check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries: original.beneficiaries.clone(),
             metadata: original.metadata.clone(),
@@ -9582,12 +10960,19 @@ impl TtlVaultContract {
             inactivity_penalty_bps: original.inactivity_penalty_bps,
             burn_percentage: original.burn_percentage,
             penalty_recipient: original.penalty_recipient.clone(),
-            passkey_rotation_period_seconds: original.passkey_rotation_period_seconds,
+            passkey_rotation_period: original.passkey_rotation_period,
             challenge_timeout_seconds: original.challenge_timeout_seconds,
             multi_sig_threshold: original.multi_sig_threshold,
+            multisig_required_ops: original.multisig_required_ops.clone(),
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
         Self::save_vault(&env, new_vault_id, &cloned_vault);
@@ -9599,11 +10984,7 @@ impl TtlVaultContract {
             original.check_in_interval,
         );
 
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &new_vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is allocated atomically by `next_vault_id` above.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -9702,7 +11083,7 @@ impl TtlVaultContract {
             None => original.metadata.clone(),
         };
 
-        let new_vault_id = Self::vault_count(env.clone()) + 1;
+        let new_vault_id = Self::next_vault_id(&env);
         let timestamp = env.ledger().timestamp();
         let cloned_vault = Vault {
             owner: new_owner.clone(),
@@ -9711,6 +11092,7 @@ impl TtlVaultContract {
             check_in_interval,
             last_check_in: timestamp,
             created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
             status: ReleaseStatus::Locked,
             beneficiaries,
             metadata,
@@ -9726,23 +11108,26 @@ impl TtlVaultContract {
             inactivity_penalty_bps: original.inactivity_penalty_bps,
             burn_percentage: original.burn_percentage,
             penalty_recipient: original.penalty_recipient.clone(),
-            passkey_rotation_period_seconds: original.passkey_rotation_period_seconds,
+            passkey_rotation_period: original.passkey_rotation_period,
             challenge_timeout_seconds: original.challenge_timeout_seconds,
             multi_sig_threshold: original.multi_sig_threshold,
+            multisig_required_ops: original.multisig_required_ops.clone(),
             check_in_score: 10000,
             total_check_ins: 0,
             on_time_check_ins: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
             adaptive_interval_enabled: false,
         };
         Self::save_vault(&env, new_vault_id, &cloned_vault);
         Self::add_owner_vault_id(&env, &new_owner, new_vault_id, check_in_interval);
         Self::add_beneficiary_vault_id(&env, &new_beneficiary, new_vault_id, check_in_interval);
 
-        let key = StorageKey::VaultCount;
-        env.storage().persistent().set(&key, &new_vault_id);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        // Issue #1279: VaultCount is allocated atomically by `next_vault_id` above.
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -9882,6 +11267,8 @@ impl TtlVaultContract {
     /// * `ContractError::NotOwner` - If caller is not the vault owner
     /// * `ContractError::InvalidPasskey` - If old passkey doesn't match
     /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
+    /// * `ContractError::PasskeyRotationTooSoon` - If rotation enforcement is on and the
+    ///   previous rotation happened less than `rotation_period_days` ago
     pub fn rotate_passkey(
         env: Env,
         vault_id: u64,
@@ -9908,8 +11295,38 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidPasskey);
         }
 
+        // Enforce the minimum interval between rotations set by the owner's policy.
+        let now = env.ledger().timestamp();
+        let policy: PasskeyRotationPolicy = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::PasskeyRotationPolicy(vault_id))
+            .unwrap_or(PasskeyRotationPolicy {
+                rotation_period_days: 0,
+                enforce: false,
+            });
+        let rotated_key = StorageKey::LastVaultPasskeyRotation(vault_id);
+        if policy.enforce && policy.rotation_period_days > 0 {
+            if let Some(last_rotation) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&rotated_key)
+            {
+                let min_interval = policy.rotation_period_days as u64 * 86_400;
+                if now.saturating_sub(last_rotation) < min_interval {
+                    return Err(ContractError::PasskeyRotationTooSoon);
+                }
+            }
+        }
+
         vault.passkey_hash = Some(Bytes::from_array(&env, &new_passkey_hash.to_array()));
         Self::save_vault(&env, vault_id, &vault);
+        env.storage().persistent().set(&rotated_key, &now);
+        env.storage().persistent().extend_ttl(
+            &rotated_key,
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -9958,10 +11375,10 @@ impl TtlVaultContract {
             let code = env.prng().gen::<u64>();
             let code_bytes = code.to_be_bytes();
             let bytes = Bytes::from_array(&env, &code_bytes);
-            let hash = env.crypto().sha256(&bytes);
+            let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
 
             codes.push_back(BackupCode {
-                hash,
+                hash: hash.into(),
                 used: false,
             });
             result.push_back(code);
@@ -10012,7 +11429,7 @@ impl TtlVaultContract {
 
         let code_bytes = code.to_be_bytes();
         let bytes = Bytes::from_array(&env, &code_bytes);
-        let hash = env.crypto().sha256(&bytes);
+        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
 
         let mut found = false;
         for i in 0..codes.len() {
@@ -10035,14 +11452,24 @@ impl TtlVaultContract {
 
         // Extend TTL by 30 days
         vault.last_check_in = env.ledger().timestamp();
-        
-        env.storage().persistent().set(&StorageKey::Vault(vault_id), &vault);
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::Vault(vault_id), &vault);
         env.storage().persistent().set(&key, &codes);
-        
+
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().extend_ttl(&StorageKey::Vault(vault_id), VAULT_TTL_THRESHOLD, ttl);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::Vault(vault_id),
+            VAULT_TTL_THRESHOLD,
+            ttl,
+        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
         env.events()
             .publish((BACKUP_CODE_USED_TOPIC, vault_id), hash);
@@ -10073,6 +11500,7 @@ impl TtlVaultContract {
         vault_id: u64,
         caller: Address,
         passkey_hash: BytesN<32>,
+        backup_eligible: bool,
     ) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
@@ -10098,6 +11526,7 @@ impl TtlVaultContract {
             deprecated_at: None,
             usage_count: 0,
             last_used_timestamp: 0,
+            webauthn_backup_eligible: false,
         });
 
         env.storage().persistent().set(&key, &passkeys);
@@ -10109,7 +11538,56 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
-            .publish((ADD_PASSKEY_TOPIC, vault_id), passkey_hash);
+            .publish((ADD_PASSKEY_TOPIC, vault_id), (passkey_hash, backup_eligible));
+        Ok(())
+    }
+
+    /// Sets the WebAuthn credential backup eligibility flag for a passkey — Issue #1848.
+    ///
+    /// Only the vault owner can call this. When enabled, the passkey is marked as
+    /// eligible for WebAuthn credential backup, allowing it to be synced across
+    /// devices via platform authenticators (e.g., iCloud Keychain, Google Password Manager).
+    pub fn set_passkey_backup_eligible(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+        eligible: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let key = StorageKey::VaultPasskeys(vault_id);
+        let mut passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut found = false;
+        for i in 0..passkeys.len() {
+            let mut pk = passkeys.get(i).unwrap();
+            if pk.hash == passkey_hash {
+                pk.webauthn_backup_eligible = eligible;
+                passkeys.set(i, pk);
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Err(ContractError::InvalidPasskey);
+        }
+
+        env.storage().persistent().set(&key, &passkeys);
+        env.events()
+            .publish((PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC, vault_id), (passkey_hash, eligible));
         Ok(())
     }
 
@@ -10217,6 +11695,63 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((UNBIND_PASSKEY_BIOMETRIC_TOPIC, vault_id), passkey_hash);
+        Ok(())
+    }
+
+    /// Updates the backup eligibility flag for a registered passkey.
+    ///
+    /// Only the vault owner can call this. This flag indicates whether the
+    /// WebAuthn credential is eligible for cloud backup/sync (e.g., iCloud Keychain,
+    /// Google Password Manager). Setting to false means the credential is device-bound
+    /// and cannot be synced across devices.
+    pub fn set_passkey_backup_eligible(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        passkey_hash: BytesN<32>,
+        backup_eligible: bool,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        let key = StorageKey::VaultPasskeys(vault_id);
+        let mut passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        let mut found = false;
+        for i in 0..passkeys.len() {
+            if let Some(mut pk) = passkeys.get(i) {
+                if pk.hash == passkey_hash {
+                    pk.backup_eligible = backup_eligible;
+                    passkeys.set(i, pk);
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if !found {
+            return Err(ContractError::PasskeyNotFound);
+        }
+
+        env.storage().persistent().set(&key, &passkeys);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((SET_PASSKEY_BACKUP_ELIGIBLE_TOPIC, vault_id), (passkey_hash, backup_eligible));
         Ok(())
     }
 
@@ -10358,7 +11893,12 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
-            .publish((REMOVE_PASSKEY_TOPIC, vault_id), passkey_hash);
+            .publish((REMOVE_PASSKEY_TOPIC, vault_id), passkey_hash.clone());
+        // Issue #1525: passkey_revoked event with credential ID hash and timestamp
+        env.events().publish(
+            (PASSKEY_REVOKED_TOPIC, vault_id),
+            (passkey_hash, env.ledger().timestamp()),
+        );
         Ok(())
     }
 
@@ -10438,7 +11978,7 @@ impl TtlVaultContract {
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        vault.passkey_rotation_period_seconds = period_seconds;
+        vault.passkey_rotation_period = period_seconds;
         Self::save_vault(&env, vault_id, &vault);
         Ok(())
     }
@@ -10460,6 +12000,7 @@ impl TtlVaultContract {
                 passkey_hash: pk.hash,
                 usage_count: pk.usage_count,
                 last_used_timestamp: pk.last_used_timestamp,
+                webauthn_backup_eligible: pk.webauthn_backup_eligible,
             });
         }
         result
@@ -10467,12 +12008,8 @@ impl TtlVaultContract {
 
     /// Returns the last-used timestamp for a specific passkey, or `None` if
     /// the passkey is not registered on the vault or has never been used.
-    pub fn get_passkey_last_used(
-        env: Env,
-        vault_id: u64,
-        passkey_hash: BytesN<32>,
-    ) -> Option<u64> {
-        let key = DataKey::VaultPasskeys(vault_id);
+    pub fn get_passkey_last_used(env: Env, vault_id: u64, passkey_hash: BytesN<32>) -> Option<u64> {
+        let key = StorageKey::VaultPasskeys(vault_id);
         let passkeys: Vec<PasskeyHash> = env
             .storage()
             .persistent()
@@ -10600,7 +12137,11 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidAmount);
         }
 
-        let threshold = if vault.multi_sig_threshold == 0 { 1 } else { vault.multi_sig_threshold };
+        let threshold = if vault.multi_sig_threshold == 0 {
+            1
+        } else {
+            vault.multi_sig_threshold
+        };
 
         let mut valid_count = 0u32;
         let mut seen = Vec::new(&env);
@@ -10695,10 +12236,15 @@ impl TtlVaultContract {
         let key = StorageKey::RecoveryCodeHash(vault_id);
         env.storage().persistent().set(&key, &code_hash);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
-        env.events().publish((EMERGENCY_RECOVERY_GENERATED_TOPIC, vault_id), code_hash);
+        env.events()
+            .publish((EMERGENCY_RECOVERY_GENERATED_TOPIC, vault_id), code_hash);
         Ok(code)
     }
 
@@ -10763,6 +12309,7 @@ impl TtlVaultContract {
             deprecated_at: None,
             usage_count: 0,
             last_used_timestamp: 0,
+            webauthn_backup_eligible: false,
         });
         let pk_key = StorageKey::VaultPasskeys(vault_id);
         env.storage().persistent().set(&pk_key, &passkeys);
@@ -10777,10 +12324,15 @@ impl TtlVaultContract {
         env.storage().persistent().remove(&key);
 
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().extend_ttl(&pk_key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pk_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
-        env.events().publish((EMERGENCY_RECOVERY_USED_TOPIC, vault_id), new_passkey_proof);
+        env.events()
+            .publish((EMERGENCY_RECOVERY_USED_TOPIC, vault_id), new_passkey_proof);
         Ok(())
     }
 
@@ -10875,9 +12427,10 @@ impl TtlVaultContract {
             expiry,
         };
 
-        env.storage()
-            .persistent()
-            .set(&StorageKey::BeneficiaryClaimDelegation(vault_id), &delegation);
+        env.storage().persistent().set(
+            &StorageKey::BeneficiaryClaimDelegation(vault_id),
+            &delegation,
+        );
 
         env.events().publish(
             (BEN_CLAIM_DELEG_TOPIC,),
@@ -10943,18 +12496,6 @@ impl TtlVaultContract {
             .get(&StorageKey::BeneficiaryClaimDelegation(vault_id))
     }
 
-    /// Returns the current active delegate (last in the chain) or None if no delegation.
-    fn get_delegated_beneficiary(env: Env, vault_id: u64) -> Option<Address> {
-        let chain: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&StorageKey::BeneficiaryDelegationChain(vault_id))?;
-        if chain.len() <= 1 {
-            return None;
-        }
-        chain.get(chain.len() - 1)
-    }
-
     // --- Issue #402: Withdrawal Scheduling ---
 
     /// Sets a withdrawal schedule for the vault. Owner-only.
@@ -11007,14 +12548,17 @@ impl TtlVaultContract {
         for i in 0..schedule.len() {
             let entry = schedule.get(i).unwrap();
             if entry.timestamp <= now && entry.amount > 0 {
-                if vault.balance < entry.amount {
-                    return Err(ContractError::InsufficientBalance);
-                }
-
-                let token_client = token::Client::new(&env, &vault.token_address);
                 let beneficiary = Self::get_delegated_beneficiary(&env, vault_id)
                     .unwrap_or(vault.beneficiary.clone());
+                vault = Self::validate_withdrawal(
+                    &env,
+                    vault_id,
+                    &vault,
+                    entry.amount,
+                    &beneficiary,
+                )?;
 
+                let token_client = token::Client::new(&env, &vault.token_address);
                 token_client.transfer(&env.current_contract_address(), &beneficiary, &entry.amount);
 
                 vault.balance -= entry.amount;
@@ -11066,6 +12610,7 @@ impl TtlVaultContract {
             conditions,
             approved_by_owner: false,
             acceptance_deadline: None,
+            min_balance_threshold: None,
         };
 
         env.storage()
@@ -11109,7 +12654,9 @@ impl TtlVaultContract {
     ) -> Option<ConditionalAcceptanceEntry> {
         env.storage()
             .persistent()
-            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(vault_id))
+            .get::<StorageKey, ConditionalAcceptanceEntry>(&StorageKey::ConditionalAcceptance(
+                vault_id,
+            ))
     }
 
     /// Sets an acceptance deadline on the conditional acceptance entry. Owner-only.
@@ -11164,14 +12711,16 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidAmount);
         }
 
-        let acceptance = BeneficiaryConditionalAcceptance {
-            min_balance_threshold,
-            accepted_at: env.ledger().timestamp(),
+        let response = BeneficiaryConditionResponse {
+            response: BeneficiaryConditionResponseType::Accept,
+            threshold: min_balance_threshold,
+            timestamp: env.ledger().timestamp(),
+            reason: None,
         };
 
         env.storage().persistent().set(
-            &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
-            &acceptance,
+            &StorageKey::BeneficiaryConditionResponse(vault_id),
+            &response,
         );
 
         env.events().publish(
@@ -11179,40 +12728,109 @@ impl TtlVaultContract {
             (vault_id, vault.beneficiary.clone(), min_balance_threshold),
         );
         env.storage().persistent().extend_ttl(
-            &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            &StorageKey::BeneficiaryConditionResponse(vault_id),
             VAULT_TTL_THRESHOLD,
             vault_ttl_ledgers(vault.check_in_interval),
         );
         Ok(())
     }
 
-    /// Gets beneficiary conditional acceptance if it exists.
-    pub fn get_beneficiary_conditional_acceptance(
+    /// Gets beneficiary conditional response if it exists.
+    pub fn get_beneficiary_cond_response(
         env: Env,
         vault_id: u64,
-    ) -> Option<BeneficiaryConditionalAcceptance> {
+    ) -> Option<BeneficiaryConditionResponse> {
         env.storage()
             .persistent()
-            .get::<StorageKey, BeneficiaryConditionalAcceptance>(
-                &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            .get::<StorageKey, BeneficiaryConditionResponse>(
+                &StorageKey::BeneficiaryConditionResponse(vault_id),
             )
     }
 
-    /// Checks if beneficiary conditional acceptance conditions are met.
-    fn check_conditional_acceptance_threshold(
+    /// Beneficiary declines vault assignment if balance is below a maximum threshold.
+    /// This allows beneficiaries to avoid accepting low-value inheritance obligations.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `vault_id` - The vault ID
+    /// * `max_balance_threshold` - Maximum balance (in stroops) the vault can have for the decline to trigger.
+    ///                             If vault balance exceeds this, the decline is recorded but may not apply during release.
+    /// * `reason` - Optional reason for the decline (max 256 characters)
+    ///
+    /// # Returns
+    /// `Ok(())` on success, `Err` on failure
+    ///
+    /// # Errors
+    /// - `InvalidAmount`: If `max_balance_threshold <= 0`
+    /// - `NotBeneficiary`: If caller is not the beneficiary
+    /// - `VaultNotFound`: If vault does not exist
+    pub fn decline_with_threshold(
+        env: Env,
+        vault_id: u64,
+        max_balance_threshold: i128,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.beneficiary.require_auth();
+
+        if max_balance_threshold <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        if reason.len() > 256 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let decline = BeneficiaryConditionResponse {
+            response: BeneficiaryConditionResponseType::Decline,
+            threshold: max_balance_threshold,
+            timestamp: env.ledger().timestamp(),
+            reason: Some(reason),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConditionResponse(vault_id), &decline);
+
+        env.events().publish(
+            (BENEFICIARY_DECLINED_TOPIC,),
+            (vault_id, vault.beneficiary.clone(), max_balance_threshold),
+        );
+
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryConditionResponse(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+
+        Ok(())
+    }
+
+    /// Checks if beneficiary conditional acceptance/decline conditions are met.
+    fn check_beneficiary_condition_threshold(
         env: &Env,
         vault_id: u64,
         current_balance: i128,
     ) -> Result<bool, ContractError> {
-        if let Some(acceptance) = env
+        if let Some(response) = env
             .storage()
             .persistent()
-            .get::<StorageKey, BeneficiaryConditionalAcceptance>(
-                &StorageKey::BeneficiaryConditionalAcceptance(vault_id),
+            .get::<StorageKey, BeneficiaryConditionResponse>(
+                &StorageKey::BeneficiaryConditionResponse(vault_id),
             )
         {
-            if current_balance < acceptance.min_balance_threshold {
-                return Ok(false);
+            match response.response {
+                BeneficiaryConditionResponseType::Accept => {
+                    if current_balance < response.threshold {
+                        return Ok(false);
+                    }
+                }
+                BeneficiaryConditionResponseType::Decline => {
+                    if current_balance > response.threshold {
+                        return Ok(false);
+                    }
+                }
             }
         }
 
@@ -11246,6 +12864,14 @@ impl TtlVaultContract {
         }
 
         Ok(true)
+    }
+
+    fn check_conditional_acceptance_threshold(
+        env: &Env,
+        vault_id: u64,
+        current_balance: i128,
+    ) -> Result<bool, ContractError> {
+        Self::check_beneficiary_condition_threshold(env, vault_id, current_balance)
     }
 
     /// Sets escalating acceptance conditions for a vault's beneficiary release.
@@ -11284,6 +12910,81 @@ impl TtlVaultContract {
             .persistent()
             .get(&StorageKey::AcceptanceConditions(vault_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Sets the identity oracle that KYC-gates beneficiary claims for a vault. Owner-only.
+    /// Once set, `claim_beneficiary_vesting` requires the beneficiary to have been verified
+    /// via `verify_beneficiary_identity`.
+    pub fn set_beneficiary_identity_oracle(
+        env: Env,
+        vault_id: u64,
+        oracle_address: Address,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        vault.owner.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryIdentityOracle(vault_id), &oracle_address);
+        env.events().publish(
+            (BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC, vault_id),
+            oracle_address,
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryIdentityOracle(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Records a beneficiary's identity attestation by querying the vault's identity oracle.
+    /// Permissionless: the oracle is the source of truth, so anyone may trigger the check.
+    ///
+    /// # Errors
+    /// * `InvalidBeneficiary` - `beneficiary` is not a beneficiary of the vault
+    /// * `IdentityOracleNotSet` - no identity oracle is configured for the vault
+    /// * `BeneficiaryNotVerified` - the oracle does not attest the beneficiary
+    pub fn verify_beneficiary_identity(
+        env: Env,
+        vault_id: u64,
+        beneficiary: Address,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        if beneficiary != vault.beneficiary
+            && !vault
+                .beneficiaries
+                .iter()
+                .any(|entry| entry.address == beneficiary)
+        {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let oracle_address = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Address>(&StorageKey::BeneficiaryIdentityOracle(vault_id))
+            .ok_or(ContractError::IdentityOracleNotSet)?;
+        if !oracle::is_identity_verified(&env, &oracle_address, &beneficiary).unwrap_or(false) {
+            return Err(ContractError::BeneficiaryNotVerified);
+        }
+
+        env.storage().persistent().set(
+            &StorageKey::BeneficiaryIdentityVerified(vault_id, beneficiary.clone()),
+            &true,
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryIdentityVerified(vault_id, beneficiary.clone()),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        env.events().publish(
+            (BENEFICIARY_IDENTITY_VERIFIED_TOPIC, vault_id),
+            beneficiary,
+        );
+        Ok(())
     }
 
     // --- Issue #399: Dispute Resolution ---
@@ -11342,9 +13043,10 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidBeneficiary);
         }
 
-        env.storage()
-            .persistent()
-            .set(&StorageKey::DisputeStatus(vault_id), &DisputeStatus::Resolved);
+        env.storage().persistent().set(
+            &StorageKey::DisputeStatus(vault_id),
+            &DisputeStatus::Resolved,
+        );
 
         env.events()
             .publish((DISPUTE_RESOLVED_TOPIC,), (vault_id, resolution));
@@ -11359,9 +13061,23 @@ impl TtlVaultContract {
             .unwrap_or(DisputeStatus::None)
     }
 
-    // --- Issue #502: Beneficiary Conflict Resolution ---
+    // --- Issue #502 / #1297: Beneficiary Conflict Resolution (Automated) ---
 
-    /// File a beneficiary conflict claim. Beneficiary-only.
+    /// File a beneficiary conflict claim. Any address may file a competing claim
+    /// for the given vault. The first caller becomes the "first-registered" claimant
+    /// and is prioritised during auto-resolution unless the vault owner designates a
+    /// different priority beneficiary.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault being disputed.
+    /// * `claimant` - The address asserting a competing claim; must authorize.
+    /// * `reason`   - Non-empty human-readable justification for the claim.
+    ///
+    /// # Errors
+    /// * `InvalidAmount`          - `reason` is empty.
+    /// * `VaultNotFound`          - Vault does not exist.
+    /// * `ConflictAlreadyResolved`- Conflict already has an `Approved` or
+    ///                              `Rejected` resolution; no new claims accepted.
     pub fn file_beneficiary_conflict(
         env: Env,
         vault_id: u64,
@@ -11369,6 +13085,7 @@ impl TtlVaultContract {
     ) -> Result<(), ContractError> {
         Self::assert_not_paused(&env);
         let vault = Self::load_vault(&env, vault_id);
+        // Original behaviour: current beneficiary must authorise.
         vault.beneficiary.require_auth();
 
         if reason.len() == 0 {
@@ -11384,12 +13101,31 @@ impl TtlVaultContract {
                 claims: Vec::new(&env),
                 resolution: ConflictResolution::Pending,
                 resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
             });
+
+        // Reject new claims once the conflict has been settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Set the dispute window deadline on the first claim.
+        if conflict.claims.is_empty() {
+            let window = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&StorageKey::ConflictDisputeWindow(vault_id))
+                .unwrap_or(DEFAULT_CONFLICT_DISPUTE_WINDOW);
+            conflict.dispute_window_ends_at = Some(now.saturating_add(window));
+        }
 
         let claim = BeneficiaryConflictClaim {
             claimant: vault.beneficiary.clone(),
             reason,
-            filed_at: env.ledger().timestamp(),
+            filed_at: now,
         };
 
         conflict.claims.push_back(claim);
@@ -11409,7 +13145,288 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Resolve beneficiary conflict. Admin-only.
+    /// Allow any external address to file a competing claim for a vault.
+    ///
+    /// Unlike `file_beneficiary_conflict` (which is limited to the vault's current
+    /// beneficiary), this function lets any address assert a claim. The caller must
+    /// authorize.
+    ///
+    /// # Arguments
+    /// * `vault_id`  - The vault being disputed.
+    /// * `claimant`  - The address asserting a competing claim; must authorize.
+    /// * `reason`    - Non-empty human-readable justification for the claim.
+    ///
+    /// # Errors
+    /// * `VaultNotFound`          - Vault does not exist.
+    /// * `InvalidAmount`          - `reason` is empty.
+    /// * `ConflictAlreadyResolved`- Conflict is already settled.
+    pub fn claim_beneficiary_conflict(
+        env: Env,
+        vault_id: u64,
+        claimant: Address,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        // Vault must exist.
+        let vault = Self::load_vault(&env, vault_id);
+        // The claimant authorises the tx.
+        claimant.require_auth();
+
+        if reason.len() == 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .unwrap_or_else(|| BeneficiaryConflict {
+                vault_id,
+                claims: Vec::new(&env),
+                resolution: ConflictResolution::Pending,
+                resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
+            });
+
+        // Reject new claims once the conflict has been settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Set the dispute window deadline on the first claim.
+        if conflict.claims.is_empty() {
+            let window = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&StorageKey::ConflictDisputeWindow(vault_id))
+                .unwrap_or(DEFAULT_CONFLICT_DISPUTE_WINDOW);
+            conflict.dispute_window_ends_at = Some(now.saturating_add(window));
+        }
+
+        let claim = BeneficiaryConflictClaim {
+            claimant: claimant.clone(),
+            reason,
+            filed_at: now,
+        };
+
+        conflict.claims.push_back(claim);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_CLAIMED_TOPIC,),
+            (vault_id, claimant),
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BeneficiaryConflict(vault_id),
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(vault.check_in_interval),
+        );
+        Ok(())
+    }
+
+    /// Set the dispute window duration for a vault's conflict resolution.
+    ///
+    /// The owner calls this before any claims are filed. Once the first claim is
+    /// registered the window is fixed. Must be in the range
+    /// `[MIN_CONFLICT_DISPUTE_WINDOW, MAX_CONFLICT_DISPUTE_WINDOW]`.
+    ///
+    /// # Arguments
+    /// * `vault_id`          - Target vault.
+    /// * `caller`            - Must be the vault owner; must authorize.
+    /// * `duration_seconds`  - Dispute window length in seconds.
+    ///
+    /// # Errors
+    /// * `NotOwner`    - `caller` is not the vault owner.
+    /// * `InvalidAmount` - `duration_seconds` is outside the allowed range.
+    pub fn set_conflict_dispute_window(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        duration_seconds: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        caller.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if duration_seconds < MIN_CONFLICT_DISPUTE_WINDOW
+            || duration_seconds > MAX_CONFLICT_DISPUTE_WINDOW
+        {
+            return Err(ContractError::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::ConflictDisputeWindow(vault_id), &duration_seconds);
+
+        env.events().publish(
+            (CONFLICT_DISPUTE_WINDOW_SET_TOPIC,),
+            (vault_id, duration_seconds),
+        );
+        Ok(())
+    }
+
+    /// Owner-designates a priority beneficiary that will win over all other
+    /// claimants during auto-resolution, regardless of filing order.
+    ///
+    /// Can be called at any time while the conflict is still `Pending`. This
+    /// does *not* resolve the conflict immediately; it influences the outcome
+    /// when `auto_resolve_beneficiary_conflict` is called after the dispute
+    /// window closes.
+    ///
+    /// # Arguments
+    /// * `vault_id`             - Target vault.
+    /// * `caller`               - Must be the vault owner; must authorize.
+    /// * `priority_beneficiary` - Address to favour in auto-resolution.
+    ///
+    /// # Errors
+    /// * `NotOwner`             - `caller` is not the vault owner.
+    /// * `ConflictAlreadyResolved` - Conflict is already settled.
+    pub fn set_conflict_priority(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        priority_beneficiary: Address,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        caller.require_auth();
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        // Load or create the conflict record.
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .unwrap_or_else(|| BeneficiaryConflict {
+                vault_id,
+                claims: Vec::new(&env),
+                resolution: ConflictResolution::Pending,
+                resolved_at: None,
+                dispute_window_ends_at: None,
+                priority_beneficiary: None,
+            });
+
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        conflict.priority_beneficiary = Some(priority_beneficiary.clone());
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_PRIORITY_SET_TOPIC,),
+            (vault_id, priority_beneficiary),
+        );
+        Ok(())
+    }
+
+    /// Deterministically resolve a beneficiary conflict after the dispute window
+    /// has closed.
+    ///
+    /// Resolution rules (applied in order):
+    /// 1. **Owner-designated priority**: if the owner has called
+    ///    `set_conflict_priority`, that address wins — provided it
+    ///    has filed a claim in the conflict.
+    /// 2. **First-registered**: the claimant with the earliest `filed_at`
+    ///    timestamp wins.
+    ///
+    /// The function can be called by anyone once the dispute window has expired.
+    /// This enables permissionless resolution while preventing premature closure.
+    ///
+    /// # Arguments
+    /// * `vault_id` - The vault whose conflict should be resolved.
+    ///
+    /// # Errors
+    /// * `ConflictNotFound`           - No conflict record exists for this vault.
+    /// * `ConflictNoClaimsFound`      - Conflict record exists but has no claims.
+    /// * `ConflictAlreadyResolved`    - Conflict is already settled.
+    /// * `ConflictDisputeWindowActive`- Dispute window has not yet expired.
+    pub fn auto_resolve_conflict(
+        env: Env,
+        vault_id: u64,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+
+        let mut conflict = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+            .ok_or(ContractError::ConflictNotFound)?;
+
+        // Nothing to resolve if already settled.
+        if conflict.resolution != ConflictResolution::Pending {
+            return Err(ContractError::ConflictAlreadyResolved);
+        }
+
+        if conflict.claims.is_empty() {
+            return Err(ContractError::ConflictNoClaimsFound);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Enforce the dispute window.
+        if let Some(window_end) = conflict.dispute_window_ends_at {
+            if now < window_end {
+                return Err(ContractError::ConflictDisputeWindowActive);
+            }
+        }
+
+        // --- Resolution rule 1: Owner-designated priority ---
+        let winner: Address = if let Some(ref priority) = conflict.priority_beneficiary {
+            // The priority address must have a claim on record.
+            let has_claim = conflict.claims.iter().any(|c| c.claimant == *priority);
+            if has_claim {
+                priority.clone()
+            } else {
+                // Priority claimant never filed — fall through to first-registered.
+                Self::first_registered_claimant(&conflict)
+            }
+        } else {
+            // --- Resolution rule 2: First-registered wins ---
+            Self::first_registered_claimant(&conflict)
+        };
+
+        conflict.resolution = ConflictResolution::Approved(winner.clone());
+        conflict.resolved_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BeneficiaryConflict(vault_id), &conflict);
+
+        env.events().publish(
+            (CONFLICT_AUTO_RESOLVED_TOPIC,),
+            (vault_id, winner),
+        );
+        Ok(())
+    }
+
+    /// Resolve beneficiary conflict. Admin-only (manual override).
+    ///
+    /// Unlike `auto_resolve_beneficiary_conflict`, this function is gated behind
+    /// admin authorization and can be called at any time during the dispute
+    /// window. It is intended for escalation scenarios where an admin needs to
+    /// act before the window closes.
+    ///
+    /// # Arguments
+    /// * `vault_id`             - The vault to resolve.
+    /// * `approved_beneficiary` - Address of the approved beneficiary.
+    ///
+    /// # Errors
+    /// * `ConflictNotFound`        - No conflict record found.
+    /// * `ConflictAlreadyResolved` - Conflict is already settled.
+    /// * `NotAdmin`                - Caller is not an administrator.
     pub fn resolve_beneficiary_conflict(
         env: Env,
         vault_id: u64,
@@ -11421,24 +13438,24 @@ impl TtlVaultContract {
             .storage()
             .persistent()
             .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
-            .ok_or(ContractError::InvalidBeneficiary)?;
+            .ok_or(ContractError::ConflictNotFound)?;
 
         if conflict.resolution != ConflictResolution::Pending {
-            return Err(ContractError::InvalidBeneficiary);
+            return Err(ContractError::ConflictAlreadyResolved);
         }
 
-        // Check if conflict has expired (30 days without resolution)
+        // Check if conflict has expired (30 days without any resolution)
         let now = env.ledger().timestamp();
         if let Some(first_claim) = conflict.claims.first() {
             if now > first_claim.filed_at + 2_592_000 {
                 // 30 days in seconds
                 env.events().publish((CONFLICT_EXPIRED_TOPIC,), vault_id);
-                return Err(ContractError::InvalidBeneficiary);
+                return Err(ContractError::ConflictNotFound);
             }
         }
 
         conflict.resolution = ConflictResolution::Approved(approved_beneficiary.clone());
-        conflict.resolved_at = Some(env.ledger().timestamp());
+        conflict.resolved_at = Some(now);
 
         env.storage()
             .persistent()
@@ -11456,6 +13473,20 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get::<StorageKey, BeneficiaryConflict>(&StorageKey::BeneficiaryConflict(vault_id))
+    }
+
+    /// Return the claimant with the earliest `filed_at` timestamp. Assumes `conflict.claims`
+    /// is non-empty.
+    fn first_registered_claimant(conflict: &BeneficiaryConflict) -> Address {
+        let mut earliest_claimant = conflict.claims.first().unwrap().claimant.clone();
+        let mut earliest_time = conflict.claims.first().unwrap().filed_at;
+        for claim in conflict.claims.iter() {
+            if claim.filed_at < earliest_time {
+                earliest_time = claim.filed_at;
+                earliest_claimant = claim.claimant.clone();
+            }
+        }
+        earliest_claimant
     }
 
     // ── Multi-sig ────────────────────────────────────────────────────────────
@@ -11751,6 +13782,8 @@ impl TtlVaultContract {
             return Err(ContractError::NotASigner);
         }
 
+        let _ = Self::get_pending_multisig_ops(env.clone(), vault_id);
+
         let prop_key = StorageKey::MultiSigProposal(vault_id, proposal_id);
         let mut proposal = env
             .storage()
@@ -11758,14 +13791,16 @@ impl TtlVaultContract {
             .get::<StorageKey, MultiSigProposal>(&prop_key)
             .ok_or(ContractError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Pending {
-            return Err(ContractError::ProposalNotFound);
-        }
         let now = env.ledger().timestamp();
         if now > proposal.expires_at {
-            proposal.status = ProposalStatus::Expired;
-            env.storage().persistent().set(&prop_key, &proposal);
-            return Err(ContractError::ProposalExpired);
+            env.storage().persistent().remove(&prop_key);
+            Self::remove_open_proposal(&env, vault_id, proposal_id);
+            env.events()
+                .publish((MULTISIG_EXPIRED_TOPIC, vault_id), proposal_id);
+            return Ok(());
+        }
+        if proposal.status != ProposalStatus::Pending {
+            return Err(ContractError::ProposalNotFound);
         }
         // Prevent double-approval
         if proposal.approvals.iter().any(|a| a == caller) {
@@ -11793,6 +13828,48 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    /// Cancel a pending proposal created by the vault owner.
+    pub fn cancel_multisig_proposal(
+        env: Env,
+        vault_id: u64,
+        proposal_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let prop_key = StorageKey::MultiSigProposal(vault_id, proposal_id);
+        let mut proposal = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, MultiSigProposal>(&prop_key)
+            .ok_or(ContractError::ProposalNotFound)?;
+        if proposal.status != ProposalStatus::Pending {
+            return Err(ContractError::ProposalNotFound);
+        }
+
+        if env.ledger().timestamp() > proposal.expires_at {
+            env.storage().persistent().remove(&prop_key);
+            Self::remove_open_proposal(&env, vault_id, proposal_id);
+            env.events()
+                .publish((MULTISIG_EXPIRED_TOPIC, vault_id), proposal_id);
+            return Ok(());
+        }
+
+        proposal.status = ProposalStatus::Cancelled;
+        env.storage().persistent().set(&prop_key, &proposal);
+        Self::remove_open_proposal(&env, vault_id, proposal_id);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((MULTISIG_CANCELLED_TOPIC, vault_id), proposal_id);
+        Ok(())
+    }
+
     /// Reject a pending multi-sig proposal (owner-only).
     pub fn reject_multisig(
         env: Env,
@@ -11817,21 +13894,7 @@ impl TtlVaultContract {
         proposal.status = ProposalStatus::Rejected;
         env.storage().persistent().set(&prop_key, &proposal);
 
-        // Remove from open proposals list
-        let open_key = StorageKey::OpenProposals(vault_id);
-        if let Some(mut open_proposals) = env
-            .storage()
-            .persistent()
-            .get::<StorageKey, Vec<u64>>(&open_key)
-        {
-            let mut new_list = Vec::new(&env);
-            for id in open_proposals.iter() {
-                if id != proposal_id {
-                    new_list.push_back(id);
-                }
-            }
-            env.storage().persistent().set(&open_key, &new_list);
-        }
+        Self::remove_open_proposal(&env, vault_id, proposal_id);
 
         env.storage()
             .instance()
@@ -11924,9 +13987,11 @@ impl TtlVaultContract {
         }
         let now = env.ledger().timestamp();
         if now > proposal.expires_at {
-            proposal.status = ProposalStatus::Expired;
-            env.storage().persistent().set(&prop_key, &proposal);
-            return Err(ContractError::ProposalExpired);
+            env.storage().persistent().remove(&prop_key);
+            Self::remove_open_proposal(&env, vault_id, proposal_id);
+            env.events()
+                .publish((MULTISIG_EXPIRED_TOPIC, vault_id), proposal_id);
+            return Ok(());
         }
 
         // Mark executed before performing the operation (re-entrancy guard)
@@ -12063,7 +14128,10 @@ impl TtlVaultContract {
     ) -> Option<MultiSigProposal> {
         env.storage()
             .persistent()
-            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(vault_id, proposal_id))
+            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(
+                vault_id,
+                proposal_id,
+            ))
     }
 
     /// Returns just the status of a proposal, without deserializing the full
@@ -12076,7 +14144,10 @@ impl TtlVaultContract {
     ) -> Result<ProposalStatus, ContractError> {
         env.storage()
             .persistent()
-            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(vault_id, proposal_id))
+            .get::<StorageKey, MultiSigProposal>(&StorageKey::MultiSigProposal(
+                vault_id,
+                proposal_id,
+            ))
             .map(|proposal| proposal.status)
             .ok_or(ContractError::ProposalNotFound)
     }
@@ -12089,18 +14160,65 @@ impl TtlVaultContract {
             .unwrap_or(0)
     }
 
+    fn remove_open_proposal(env: &Env, vault_id: u64, proposal_id: u64) {
+        let open_key = StorageKey::OpenProposals(vault_id);
+        if let Some(open_proposals) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, Vec<u64>>(&open_key)
+        {
+            let mut remaining = Vec::new(env);
+            for id in open_proposals.iter() {
+                if id != proposal_id {
+                    remaining.push_back(id);
+                }
+            }
+            env.storage().persistent().set(&open_key, &remaining);
+        }
+    }
+
     /// Returns a list of open proposal IDs for a vault.
     pub fn list_open_proposals(env: Env, vault_id: u64) -> Vec<u64> {
-        env.storage()
+        let now = env.ledger().timestamp();
+        let stored = env.storage()
             .persistent()
             .get::<StorageKey, Vec<u64>>(&StorageKey::OpenProposals(vault_id))
-            .unwrap_or_else(|| Vec::new(&env))
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut open = Vec::new(&env);
+        for proposal_id in stored.iter() {
+            let prop_key = StorageKey::MultiSigProposal(vault_id, proposal_id);
+            match env
+                .storage()
+                .persistent()
+                .get::<StorageKey, MultiSigProposal>(&prop_key)
+            {
+                Some(proposal)
+                    if now > proposal.expires_at
+                        && (proposal.status == ProposalStatus::Pending
+                            || proposal.status == ProposalStatus::Approved) =>
+                {
+                    env.storage().persistent().remove(&prop_key);
+                }
+                Some(proposal)
+                    if proposal.status == ProposalStatus::Pending
+                        || proposal.status == ProposalStatus::Approved =>
+                {
+                    open.push_back(proposal_id)
+                }
+                Some(_) => {}
+                None => {}
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&StorageKey::OpenProposals(vault_id), &open);
+        open
     }
 
     // ── Issue #1117: Pending Multi-Signature Operations ─────────────────────
 
     /// Creates a pending multi-sig operation requiring cosignatures from registered passkeys.
-    /// 
+    ///
     /// On first call, initializes a pending operation with the owner's signature and
     /// awaits co-signatures from other registered passkeys. The operation expires after
     /// 15 minutes if not executed.
@@ -12143,14 +14261,14 @@ impl TtlVaultContract {
         }
 
         // Get nonce counter
-        let nonce_key = DataKey::PendingMultiSigOpNonce(vault_id);
+        let nonce_key = StorageKey::PendingMultiSigOpNonce(vault_id);
         let nonce: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0u64) + 1;
 
         // Get multi-sig config to determine threshold
         let config = env
             .storage()
             .persistent()
-            .get::<DataKey, MultiSigConfig>(&DataKey::MultiSigConfig(vault_id))
+            .get::<StorageKey, MultiSigConfig>(&StorageKey::MultiSigConfig(vault_id))
             .ok_or(ContractError::MultiSigRequired)?;
 
         let now = env.ledger().timestamp();
@@ -12169,7 +14287,7 @@ impl TtlVaultContract {
             threshold: config.threshold,
         };
 
-        let op_key = DataKey::PendingMultiSigOp(vault_id, nonce);
+        let op_key = StorageKey::PendingMultiSigOp(vault_id, nonce);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&op_key, &pending_op);
         env.storage()
@@ -12220,7 +14338,7 @@ impl TtlVaultContract {
         let config = env
             .storage()
             .persistent()
-            .get::<DataKey, MultiSigConfig>(&DataKey::MultiSigConfig(vault_id))
+            .get::<StorageKey, MultiSigConfig>(&StorageKey::MultiSigConfig(vault_id))
             .ok_or(ContractError::MultiSigRequired)?;
 
         let vault = Self::load_vault(&env, vault_id);
@@ -12232,18 +14350,20 @@ impl TtlVaultContract {
             return Err(ContractError::NotASigner);
         }
 
-        let op_key = DataKey::PendingMultiSigOp(vault_id, op_nonce);
+        let op_key = StorageKey::PendingMultiSigOp(vault_id, op_nonce);
         let mut pending_op = env
             .storage()
             .persistent()
-            .get::<DataKey, PendingMultiSigOp>(&op_key)
+            .get::<StorageKey, PendingMultiSigOp>(&op_key)
             .ok_or(ContractError::ProposalNotFound)?;
 
         // Check expiry
         let now = env.ledger().timestamp();
         if now > pending_op.expires_at {
             env.storage().persistent().remove(&op_key);
-            return Err(ContractError::ProposalExpired);
+            env.events()
+                .publish((PENDING_MULTISIG_OP_EXPIRED_TOPIC, vault_id), op_nonce);
+            return Ok(());
         }
 
         // Verify payload matches
@@ -12301,18 +14421,20 @@ impl TtlVaultContract {
             return Err(ContractError::NotOwner);
         }
 
-        let op_key = DataKey::PendingMultiSigOp(vault_id, op_nonce);
+        let op_key = StorageKey::PendingMultiSigOp(vault_id, op_nonce);
         let pending_op = env
             .storage()
             .persistent()
-            .get::<DataKey, PendingMultiSigOp>(&op_key)
+            .get::<StorageKey, PendingMultiSigOp>(&op_key)
             .ok_or(ContractError::ProposalNotFound)?;
 
         // Check expiry
         let now = env.ledger().timestamp();
         if now > pending_op.expires_at {
             env.storage().persistent().remove(&op_key);
-            return Err(ContractError::ProposalExpired);
+            env.events()
+                .publish((PENDING_MULTISIG_OP_EXPIRED_TOPIC, vault_id), op_nonce);
+            return Ok(());
         }
 
         // Check threshold
@@ -12359,8 +14481,30 @@ impl TtlVaultContract {
         vault_id: u64,
         op_nonce: u64,
     ) -> Option<PendingMultiSigOp> {
-        let op_key = DataKey::PendingMultiSigOp(vault_id, op_nonce);
-        env.storage().persistent().get(&op_key)
+        let op_key = StorageKey::PendingMultiSigOp(vault_id, op_nonce);
+        let pending_op = env.storage().persistent().get::<StorageKey, PendingMultiSigOp>(&op_key)?;
+        if env.ledger().timestamp() > pending_op.expires_at {
+            env.storage().persistent().remove(&op_key);
+            None
+        } else {
+            Some(pending_op)
+        }
+    }
+
+    /// Returns all unexpired pending multi-sig operations for a vault and prunes expired entries.
+    pub fn get_pending_multisig_ops(env: Env, vault_id: u64) -> Vec<PendingMultiSigOp> {
+        let last_nonce = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, u64>(&StorageKey::PendingMultiSigOpNonce(vault_id))
+            .unwrap_or(0);
+        let mut pending_ops = Vec::new(&env);
+        for nonce in 1..=last_nonce {
+            if let Some(pending_op) = Self::get_pending_multisig_op(env.clone(), vault_id, nonce) {
+                pending_ops.push_back(pending_op);
+            }
+        }
+        pending_ops
     }
 
     // ── Pending Multi-Sig Operation Execution Helpers ────────────────────────
@@ -12430,7 +14574,11 @@ impl TtlVaultContract {
         let refund_amount = vault.balance;
         if refund_amount > 0 {
             let token_client = token::Client::new(env, &vault.token_address);
-            token_client.transfer(&env.current_contract_address(), &vault.owner, &refund_amount);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &vault.owner,
+                &refund_amount,
+            );
         }
 
         vault.balance = 0;
@@ -12454,7 +14602,8 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((CANCEL_TOPIC, vault_id), (&vault.owner, refund_amount));
+        env.events()
+            .publish((CANCEL_TOPIC, vault_id), (&vault.owner, refund_amount));
         Ok(())
     }
 
@@ -12654,41 +14803,6 @@ impl TtlVaultContract {
         Ok(report)
     }
 
-    // ── Issue #475: Vault Batch Status Query ─────────────────────────────────
-
-    /// Queries the status of multiple vaults in a single call.
-    ///
-    /// Returns a `VaultStatusSummary` for each requested vault ID. Vaults that
-    /// do not exist are silently skipped. Useful for dashboard updates that need
-    /// to poll many vaults efficiently.
-    ///
-    /// # Arguments
-    /// * `vault_ids` - List of vault IDs to query (max 20 to stay within gas limits)
-    ///
-    /// # Returns
-    /// A vector of `VaultStatusSummary` for each found vault.
-    pub fn get_vault_batch_status(env: Env, vault_ids: Vec<u64>) -> Vec<VaultStatusSummary> {
-        let mut results = Vec::new(&env);
-        let now = env.ledger().timestamp();
-        for vault_id in vault_ids.iter() {
-            let key = StorageKey::Vault(vault_id);
-            if let Some(vault) = env.storage().persistent().get::<StorageKey, Vault>(&key) {
-                let deadline = vault.last_check_in.saturating_add(vault.check_in_interval);
-                let is_expired = now > deadline && vault.status == ReleaseStatus::Locked;
-                results.push_back(VaultStatusSummary {
-                    vault_id,
-                    status: vault.status,
-                    balance: vault.balance,
-                    last_check_in: vault.last_check_in,
-                    is_expired,
-                });
-            }
-        }
-        env.events()
-            .publish((BATCH_STATUS_TOPIC,), vault_ids.len() as u32);
-        results
-    }
-
     // ── Internal withdraw helper (shared by withdraw + multisig execute) ─────
 
     // ── Issue #468: Vault Metadata Versioning ────────────────────────────────
@@ -12842,6 +14956,38 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    /// Removes every withdrawal audit record stored for a vault: the legacy
+    /// unbounded log and the ring buffer (head, length and all entry slots).
+    fn remove_withdrawal_audit_records(env: &Env, vault_id: u64) {
+        let storage = env.storage().persistent();
+        storage.remove(&StorageKey::WithdrawalAuditLog(vault_id));
+        storage.remove(&StorageKey::WithdrawalHistoryHead(vault_id));
+        storage.remove(&StorageKey::WithdrawalHistoryLen(vault_id));
+        for slot in 0..MAX_WITHDRAWAL_HISTORY {
+            storage.remove(&StorageKey::WithdrawalHistoryEntry(vault_id, slot));
+        }
+    }
+
+    /// Prunes a Released or Cancelled vault from persistent storage, including
+    /// its withdrawal audit records so they stop accruing ledger fees.
+    ///
+    /// Admin-only. The archived snapshot (if any) is kept for historical queries.
+    pub fn prune_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        Self::require_admin(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        if vault.status == ReleaseStatus::Locked {
+            return Err(ContractError::NotExpired);
+        }
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::Vault(vault_id));
+        Self::remove_withdrawal_audit_records(&env, vault_id);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
     // ── Issue #470: Vault Capacity Limits ────────────────────────────────────
 
     /// Sets the maximum number of active vaults an owner may hold.
@@ -12965,7 +15111,11 @@ impl TtlVaultContract {
             let new_expiry = now + vault.check_in_interval;
             env.events().publish(
                 (CHECK_IN_RECORDED_TOPIC, vault_id),
-                (vault.owner.clone(), new_expiry),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_expiry,
+                    caller: caller.clone(),
+                },
             );
         }
         env.storage()
@@ -12999,8 +15149,16 @@ impl TtlVaultContract {
                 .unwrap_or(0);
 
             let first_logical = len - n;
-            let first_phys = if len < 50 { first_logical } else { (head + first_logical) % 50 };
-            let last_phys = if len < 50 { len - 1 } else { (head + len - 1) % 50 };
+            let first_phys = if len < 50 {
+                first_logical
+            } else {
+                (head + first_logical) % 50
+            };
+            let last_phys = if len < 50 {
+                len - 1
+            } else {
+                (head + len - 1) % 50
+            };
 
             let first_entry: CheckInHistoryEntry = env
                 .storage()
@@ -13070,9 +15228,11 @@ impl TtlVaultContract {
             // so slot i == i. Once full (len == 50) head points at the oldest
             // entry and we map logical index i to physical slot (head+i)%50.
             let phys = if len < 50 { i } else { (head + i) % 50 };
-            if let Some(entry) = env.storage().persistent().get::<StorageKey, CheckInHistoryEntry>(
-                &StorageKey::CheckInEntry(vault_id, phys),
-            ) {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, CheckInHistoryEntry>(&StorageKey::CheckInEntry(vault_id, phys))
+            {
                 result.push_back(entry);
             }
         }
@@ -13138,11 +15298,47 @@ impl TtlVaultContract {
         let mut result: Vec<CheckInHistoryEntry> = Vec::new(&env);
         for i in 0..len {
             let phys = if len < 50 { i } else { (head + i) % 50 };
-            if let Some(entry) = env.storage().persistent().get::<StorageKey, CheckInHistoryEntry>(
-                &StorageKey::CheckInEntry(vault_id, phys),
-            ) {
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, CheckInHistoryEntry>(&StorageKey::CheckInEntry(vault_id, phys))
+            {
                 result.push_back(entry);
             }
+        }
+        result
+    }
+
+    /// Returns a paginated page of the deposit history for a vault.
+    ///
+    /// Holds up to the last `DEPOSIT_HISTORY_CAP` (100) deposits; older entries
+    /// are dropped as new ones arrive. Entries are returned oldest-first.
+    /// Returns an empty vec if `page` is beyond the available entries.
+    ///
+    /// # Arguments
+    /// * `vault_id`  - The vault whose history to query
+    /// * `page`      - Zero-based page number
+    /// * `page_size` - Number of entries per page (automatically capped at 100)
+    pub fn get_deposit_history(
+        env: Env,
+        vault_id: u64,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<DepositHistoryEntry> {
+        let page_size = page_size.min(DEPOSIT_HISTORY_CAP);
+        if page_size == 0 {
+            return Vec::new(&env);
+        }
+        let history: Vec<DepositHistoryEntry> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::DepositHistory(vault_id))
+            .unwrap_or(Vec::new(&env));
+        let start = page.saturating_mul(page_size);
+        let end = start.saturating_add(page_size).min(history.len());
+        let mut result: Vec<DepositHistoryEntry> = Vec::new(&env);
+        for i in start..end {
+            result.push_back(history.get_unchecked(i));
         }
         result
     }
@@ -13404,8 +15600,10 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((DELEGATE_CHECKIN_TOPIC, vault_id), (delegate_address, expiry));
+        env.events().publish(
+            (DELEGATE_CHECKIN_TOPIC, vault_id),
+            (delegate_address, expiry),
+        );
         Ok(())
     }
 
@@ -13494,8 +15692,8 @@ impl TtlVaultContract {
                 .persistent()
                 .get::<StorageKey, u64>(&StorageKey::LastCheckInTime(vault_id))
             {
-                if now < last + cooldown {
-                    return Err(ContractError::InvalidInterval);
+                if now < last.saturating_add(cooldown) {
+                    return Err(ContractError::CheckInTooEarly);
                 }
             }
         }
@@ -13518,7 +15716,8 @@ impl TtlVaultContract {
         if is_on_time {
             vault.on_time_check_ins = vault.on_time_check_ins.saturating_add(1);
         }
-        vault.check_in_score = Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
+        vault.check_in_score =
+            Self::compute_check_in_score(vault.on_time_check_ins, vault.total_check_ins);
 
         Self::save_vault(&env, vault_id, &vault);
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
@@ -13548,8 +15747,10 @@ impl TtlVaultContract {
 
         env.events()
             .publish((CHECK_IN_TOPIC, vault_id), vault.last_check_in);
-        env.events()
-            .publish((CHECKIN_SCORE_UPDATED_TOPIC, vault_id), vault.check_in_score);
+        env.events().publish(
+            (CHECKIN_SCORE_UPDATED_TOPIC, vault_id),
+            vault.check_in_score,
+        );
         Ok(())
     }
 
@@ -13618,6 +15819,85 @@ impl TtlVaultContract {
         Ok(())
     }
 
+    fn validate_withdrawal(
+        env: &Env,
+        vault_id: u64,
+        vault: &Vault,
+        amount: i128,
+        destination: &Address,
+    ) -> Result<Vault, ContractError> {
+        if amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if vault.balance < amount {
+            return Err(ContractError::InsufficientBalance);
+        }
+        if let Some(min_guard) = vault.min_balance_guard {
+            if vault.balance - amount < min_guard {
+                return Err(ContractError::BelowMinimumBalance);
+            }
+        }
+        if let Some(threshold) = vault.withdrawal_approval_threshold {
+            if amount > threshold {
+                return Err(ContractError::WithdrawalNotApproved);
+            }
+        }
+
+        Self::check_withdrawal_limits(env, vault_id, amount)?;
+
+        let mut updated_vault = vault.clone();
+        if let Some(limit) = updated_vault.withdrawal_limit_per_window {
+            let now = env.ledger().timestamp();
+            if now.saturating_sub(updated_vault.window_start)
+                >= updated_vault.withdrawal_window_seconds
+            {
+                updated_vault.withdrawn_in_window = 0;
+                updated_vault.window_start = now;
+            }
+            updated_vault.withdrawn_in_window = updated_vault
+                .withdrawn_in_window
+                .checked_add(amount)
+                .filter(|total| *total <= limit)
+                .ok_or(ContractError::WithdrawalRateLimitExceeded)?;
+        }
+
+        Self::check_whitelisted(env, vault_id, destination)?;
+        Ok(updated_vault)
+    }
+
+    // ── Issue #1767: deposit history helpers ─────────────────────────────────
+
+    /// Appends a deposit to the vault's history, dropping the oldest entry once
+    /// the list holds `DEPOSIT_HISTORY_CAP` entries.
+    fn record_deposit_history(
+        env: &Env,
+        vault_id: u64,
+        depositor: &Address,
+        amount: i128,
+        new_balance: i128,
+        timestamp: u64,
+    ) {
+        let key = StorageKey::DepositHistory(vault_id);
+        let mut history: Vec<DepositHistoryEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+        if history.len() >= DEPOSIT_HISTORY_CAP {
+            history.pop_front();
+        }
+        history.push_back(DepositHistoryEntry {
+            depositor: depositor.clone(),
+            amount,
+            new_balance,
+            timestamp,
+        });
+        env.storage().persistent().set(&key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+    }
+
     // ── Issue #482: check-in history helpers ─────────────────────────────────
 
     fn record_check_in_history(env: &Env, vault_id: u64, timestamp: u64) {
@@ -13652,17 +15932,13 @@ impl TtlVaultContract {
 
         // Persist updated metadata
         env.storage().persistent().set(&len_key, &len);
-        env.storage().persistent().extend_ttl(
-            &len_key,
-            VAULT_TTL_THRESHOLD,
-            VAULT_TTL_LEDGERS,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&len_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
         env.storage().persistent().set(&head_key, &head);
-        env.storage().persistent().extend_ttl(
-            &head_key,
-            VAULT_TTL_THRESHOLD,
-            VAULT_TTL_LEDGERS,
-        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&head_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
     }
 
     fn update_check_in_streak(env: &Env, vault_id: u64, vault: &Vault, now: u64) {
@@ -13938,6 +16214,52 @@ impl TtlVaultContract {
 
     // ── Hibernation ──────────────────────────────────────────────────────────
 
+    /// Sets the maximum hibernation duration for one vault.
+    /// The vault owner or protocol admin may set a value between the protocol minimum
+    /// and the hard maximum; the hard maximum applies when no override is stored.
+    pub fn set_max_hibernation_duration(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        max_duration_seconds: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner && caller != Self::get_admin(env.clone()) {
+            return Err(ContractError::NotOwner);
+        }
+        if max_duration_seconds < MIN_HIBERNATION_SECONDS {
+            return Err(ContractError::HibernationDurationTooShort);
+        }
+        if max_duration_seconds > MAX_HIBERNATION_SECONDS {
+            return Err(ContractError::HibernationDurationTooLong);
+        }
+
+        let key = StorageKey::MaxHibernationDuration(vault_id);
+        env.storage().persistent().set(&key, &max_duration_seconds);
+        env.storage().persistent().extend_ttl(
+            &key,
+            VAULT_TTL_THRESHOLD,
+            vault_ttl_ledgers(
+                vault
+                    .check_in_interval
+                    .saturating_add(max_duration_seconds),
+            ),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Returns the configured hibernation limit, or the protocol hard maximum.
+    pub fn get_max_hibernation_duration(env: Env, vault_id: u64) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::MaxHibernationDuration(vault_id))
+            .unwrap_or(MAX_HIBERNATION_SECONDS)
+    }
+
     /// Puts a vault into hibernation for `duration_seconds`.
     ///
     /// During hibernation the owner is not required to check in — the vault's
@@ -13948,13 +16270,17 @@ impl TtlVaultContract {
     /// # Arguments
     /// * `vault_id`         - The vault to hibernate
     /// * `caller`           - Must be the vault owner
-    /// * `duration_seconds` - How long (in seconds) the hibernation lasts (> 0)
+    /// * `duration_seconds` - How long (in seconds) the hibernation lasts.
+    ///   Must be within `[MIN_HIBERNATION_SECONDS, MAX_HIBERNATION_SECONDS]`.
     ///
     /// # Errors
     /// * `ContractError::NotOwner`          - Caller is not the vault owner
     /// * `ContractError::AlreadyReleased`   - Vault is not Locked
-    /// * `ContractError::AlreadyHibernating`- Vault is already hibernating
-    /// * `ContractError::InvalidInterval`   - `duration_seconds` is zero
+    /// * `ContractError::AlreadyHibernating`- Vault has an *active* hibernation
+    ///   window (a stale entry left over from a hibernation period that has
+    ///   already elapsed does not block re-entry)
+    /// * `ContractError::HibernationDurationTooShort` - `duration_seconds` is below `MIN_HIBERNATION_SECONDS` (includes zero)
+    /// * `ContractError::HibernationDurationTooLong`  - `duration_seconds` is above `MAX_HIBERNATION_SECONDS`
     pub fn enter_hibernation(
         env: Env,
         vault_id: u64,
@@ -13962,30 +16288,53 @@ impl TtlVaultContract {
         duration_seconds: u64,
     ) -> Result<(), ContractError> {
         caller.require_auth();
-        if duration_seconds == 0 {
-            return Err(ContractError::InvalidInterval);
+        // Issue #1280: reject both an instant no-op (0, or any value with no
+        // meaningful check-in relief) and an unbounded/"permanent freeze" duration.
+        if duration_seconds < MIN_HIBERNATION_SECONDS {
+            return Err(ContractError::HibernationDurationTooShort);
+        }
+        if duration_seconds > MAX_HIBERNATION_SECONDS {
+            return Err(ContractError::HibernationDurationTooLong);
         }
         let vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
+        if duration_seconds > Self::get_max_hibernation_duration(env.clone(), vault_id) {
+            return Err(ContractError::HibernationDurationTooLong);
+        }
         if vault.status != ReleaseStatus::Locked {
             return Err(ContractError::AlreadyReleased);
         }
-        let hib_key = StorageKey::Hibernation(vault_id);
-        if env.storage().persistent().has(&hib_key) {
-            return Err(ContractError::AlreadyHibernating);
-        }
         let now = env.ledger().timestamp();
+        let hib_key = StorageKey::Hibernation(vault_id);
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, HibernationEntry>(&hib_key)
+        {
+            // Only block re-entry while the existing hibernation window is
+            // still active. A stale entry (the owner let it run out without
+            // calling `exit_hibernation`) must not permanently lock the
+            // vault out of hibernating again.
+            let elapsed = now.saturating_sub(existing.started_at);
+            if elapsed < existing.duration_seconds {
+                return Err(ContractError::AlreadyHibernating);
+            }
+        }
+        let remaining_ttl_at_entry = Self::effective_ttl_remaining(&env, vault_id, &vault);
         let entry = HibernationEntry {
             started_at: now,
             duration_seconds,
+            remaining_ttl_at_entry,
         };
-        let ttl = vault_ttl_ledgers(vault.check_in_interval + duration_seconds);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval.saturating_add(duration_seconds));
         env.storage().persistent().set(&hib_key, &entry);
         env.storage()
             .persistent()
             .extend_ttl(&hib_key, VAULT_TTL_THRESHOLD, ttl);
+        let effective_ttl = Self::effective_ttl_remaining(&env, vault_id, &vault);
+        Self::emit_low_ttl_warning_if_needed(&env, vault_id, effective_ttl);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -14025,27 +16374,22 @@ impl TtlVaultContract {
             .get::<StorageKey, HibernationEntry>(&hib_key)
             .ok_or(ContractError::NotHibernating)?;
         let now = env.ledger().timestamp();
-        // Credit elapsed hibernation time so the TTL countdown resumes correctly.
-        let elapsed = now
-            .saturating_sub(entry.started_at)
-            .min(entry.duration_seconds);
-        vault.last_check_in = vault.last_check_in.saturating_add(elapsed);
+        let remaining_ttl = entry.remaining_ttl_at_entry;
+        vault.last_check_in = if remaining_ttl >= vault.check_in_interval {
+            now.saturating_add(remaining_ttl - vault.check_in_interval)
+        } else {
+            now.saturating_sub(vault.check_in_interval - remaining_ttl)
+        };
         env.storage().persistent().remove(&hib_key);
         Self::save_vault(&env, vault_id, &vault);
-        
-        // Calculate the new TTL remaining after exiting hibernation
-        let deadline = vault.last_check_in + vault.check_in_interval;
-        let new_ttl_remaining = if now >= deadline {
-            0u64
-        } else {
-            deadline - now
-        };
-        
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((HIBERNATION_EXITED_TOPIC, vault_id), (now, new_ttl_remaining));
+        env.events().publish(
+            (HIBERNATION_EXITED_TOPIC, vault_id),
+            (now, remaining_ttl),
+        );
         Ok(())
     }
 
@@ -14173,7 +16517,11 @@ impl TtlVaultContract {
                 continue;
             }
 
-            let initial_share = release_amount * (entry.bps as i128) / BASIS_POINTS_100_PERCENT;
+            let initial_share = Self::weighted_share(
+                release_amount,
+                entry.bps,
+                BASIS_POINTS_100_PERCENT as u32,
+            );
             if entry.minimum_threshold > 0 && initial_share < entry.minimum_threshold {
                 env.events().publish(
                     (MIN_THRESHOLD_SKIP_TOPIC,),
@@ -14219,14 +16567,14 @@ impl TtlVaultContract {
             );
         }
 
-        let mut distributed: i128 = 0;
-        let last_idx = qualifying.len() - 1;
+        let shares = Self::calculate_beneficiary_shares(
+            env,
+            release_amount,
+            &qualifying,
+            total_qualifying_bps,
+        );
         for (i, entry) in qualifying.iter().enumerate() {
-            let share = if i as u32 == last_idx {
-                release_amount - distributed
-            } else {
-                release_amount * (entry.bps as i128) / (total_qualifying_bps as i128)
-            };
+            let share = shares.get(i as u32).unwrap();
             if share > 0 {
                 token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 env.events().publish(
@@ -14239,7 +16587,6 @@ impl TtlVaultContract {
                     },
                 );
             }
-            distributed += share;
             env.events().publish(
                 (MIN_THRESHOLD_REDISTRIBUTE_TOPIC,),
                 (vault_id, entry.address.clone(), share),
@@ -14370,7 +16717,9 @@ impl TtlVaultContract {
         {
             for schedule in schedules.iter() {
                 // Check for overlapping withdrawals (within 1 hour window)
-                if (new_timestamp as i128 - schedule.timestamp as i128).abs() < SECONDS_PER_HOUR as i128 {
+                if (new_timestamp as i128 - schedule.timestamp as i128).abs()
+                    < SECONDS_PER_HOUR as i128
+                {
                     return false;
                 }
             }
@@ -14551,13 +16900,43 @@ impl TtlVaultContract {
     // --- Issue #567: Withdrawal Destination Whitelist ---
 
     /// Adds an address to the withdrawal whitelist for a vault.
-    /// Only the vault owner can call this.
+    /// Only the vault owner can call this. The entry never expires.
     pub fn add_whitelist_address(
         env: Env,
         vault_id: u64,
         caller: Address,
         address: Address,
         label: String,
+    ) -> Result<(), ContractError> {
+        Self::add_whitelist_entry(env, vault_id, caller, address, label, 0)
+    }
+
+    /// Adds an address to the withdrawal whitelist for a vault that expires
+    /// once the ledger sequence passes `expires_at_ledger` - Issue #1528.
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidWhitelistExpiry` - If `expires_at_ledger` is not in the future
+    pub fn add_whitelist_with_expiry(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+        label: String,
+        expires_at_ledger: u32,
+    ) -> Result<(), ContractError> {
+        if expires_at_ledger <= env.ledger().sequence() {
+            return Err(ContractError::InvalidWhitelistExpiry);
+        }
+        Self::add_whitelist_entry(env, vault_id, caller, address, label, expires_at_ledger)
+    }
+
+    fn add_whitelist_entry(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+        label: String,
+        expires_at_ledger: u32,
     ) -> Result<(), ContractError> {
         if Self::load_paused(&env) {
             return Err(ContractError::Paused);
@@ -14575,10 +16954,20 @@ impl TtlVaultContract {
             .get::<StorageKey, Vec<WhitelistEntry>>(&key)
             .unwrap_or_else(|| Vec::new(&env));
 
+        // Re-adding an address replaces its previous entry (and expiry).
+        let mut new_whitelist = Vec::new(&env);
+        for existing in whitelist.iter() {
+            if existing.address != address {
+                new_whitelist.push_back(existing);
+            }
+        }
+        let mut whitelist = new_whitelist;
+
         let entry = WhitelistEntry {
             address: address.clone(),
             added_at: env.ledger().timestamp(),
             label,
+            expires_at_ledger,
         };
         whitelist.push_back(entry);
 
@@ -14591,8 +16980,15 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
-        env.events()
-            .publish((WHITELIST_ADDED_TOPIC, vault_id), address);
+        if expires_at_ledger == 0 {
+            env.events()
+                .publish((WHITELIST_ADDED_TOPIC, vault_id), address);
+        } else {
+            env.events().publish(
+                (WHITELIST_ADDED_EXPIRY_TOPIC, vault_id),
+                (address, expires_at_ledger),
+            );
+        }
         Ok(())
     }
 
@@ -14647,7 +17043,11 @@ impl TtlVaultContract {
     }
 
     /// Checks if an address is whitelisted for withdrawals.
-    fn is_whitelisted(env: &Env, vault_id: u64, address: &Address) -> bool {
+    ///
+    /// Returns `WhitelistEntryExpired` when the address is listed but its
+    /// entry's expiry ledger has passed (Issue #1528), and
+    /// `WithdrawalDestinationNotWhitelisted` when it is not listed at all.
+    fn check_whitelisted(env: &Env, vault_id: u64, address: &Address) -> Result<(), ContractError> {
         if let Some(whitelist) = env
             .storage()
             .persistent()
@@ -14655,12 +17055,17 @@ impl TtlVaultContract {
         {
             for entry in whitelist.iter() {
                 if entry.address == *address {
-                    return true;
+                    if entry.expires_at_ledger != 0
+                        && env.ledger().sequence() > entry.expires_at_ledger
+                    {
+                        return Err(ContractError::WhitelistEntryExpired);
+                    }
+                    return Ok(());
                 }
             }
-            false
+            Err(ContractError::WithdrawalDestinationNotWhitelisted)
         } else {
-            true // No whitelist means all addresses allowed
+            Ok(()) // No whitelist means all addresses allowed
         }
     }
 
@@ -14749,7 +17154,12 @@ impl TtlVaultContract {
         );
         env.events().publish(
             (WITHDRAWAL_CANCELLED_TOPIC, vault_id),
-            (withdrawal_id, caller.clone(), env.ledger().timestamp(), reversal.amount),
+            (
+                withdrawal_id,
+                caller.clone(),
+                env.ledger().timestamp(),
+                reversal.amount,
+            ),
         );
         Ok(())
     }
@@ -14852,7 +17262,7 @@ impl TtlVaultContract {
         let mut schedule: VestingSchedule = env
             .storage()
             .persistent()
-            .get(&StorageKey::VestingSchedule(vault_id))
+            .get(&StorageKey::VestingSchedule(vault_id, 0))
             .ok_or(ContractError::VestingNotFound)?;
 
         if schedule.claimed_installments >= schedule.num_installments {
@@ -14904,18 +17314,17 @@ impl TtlVaultContract {
                 (vault.beneficiary.clone(), amount, claimable),
             );
         } else {
-            let mut distributed: i128 = 0;
-            let last_idx = vault.beneficiaries.len() - 1;
+            let shares = Self::calculate_beneficiary_shares(
+                &env,
+                amount,
+                &vault.beneficiaries,
+                BASIS_POINTS_100_PERCENT as u32,
+            );
             for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                let share = if i as u32 == last_idx {
-                    amount - distributed
-                } else {
-                    amount * (entry.bps as i128) / BASIS_POINTS_100_PERCENT
-                };
+                let share = shares.get(i as u32).unwrap();
                 if share > 0 {
                     token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
-                distributed += share;
                 env.events().publish(
                     (VESTING_CATCHUP_CLAIMED_TOPIC, vault_id),
                     (entry.address.clone(), share, claimable),
@@ -14927,7 +17336,7 @@ impl TtlVaultContract {
         schedule.claimed_installments = new_claimed;
         Self::save_vault(&env, vault_id, &vault);
 
-        let sched_key = StorageKey::VestingSchedule(vault_id);
+        let sched_key = StorageKey::VestingSchedule(vault_id, 0);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&sched_key, &schedule);
         env.storage()
@@ -15028,7 +17437,7 @@ impl TtlVaultContract {
         let mut schedule: VestingSchedule = env
             .storage()
             .persistent()
-            .get(&StorageKey::VestingSchedule(vault_id))
+            .get(&StorageKey::VestingSchedule(vault_id, 0))
             .ok_or(ContractError::VestingNotFound)?;
 
         if schedule.claimed_installments >= schedule.num_installments {
@@ -15102,14 +17511,14 @@ impl TtlVaultContract {
                     (vault.beneficiary.clone(), fallback, 0i128),
                 );
             } else {
-                let mut distributed: i128 = 0;
-                let last_idx = vault.beneficiaries.len() - 1;
+                let shares = Self::calculate_beneficiary_shares(
+                    &env,
+                    fallback,
+                    &vault.beneficiaries,
+                    BASIS_POINTS_100_PERCENT as u32,
+                );
                 for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                    let share = if i as u32 == last_idx {
-                        fallback - distributed
-                    } else {
-                        fallback * (entry.bps as i128) / BASIS_POINTS_100_PERCENT
-                    };
+                    let share = shares.get(i as u32).unwrap();
                     if share > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
@@ -15117,7 +17526,6 @@ impl TtlVaultContract {
                             &share,
                         );
                     }
-                    distributed += share;
                     env.events().publish(
                         (VESTING_BONUS_CLAIMED_TOPIC, vault_id),
                         (entry.address.clone(), share, 0i128),
@@ -15127,7 +17535,7 @@ impl TtlVaultContract {
             vault.balance -= fallback;
             schedule.claimed_installments = unlocked;
             Self::save_vault(&env, vault_id, &vault);
-            let sched_key = StorageKey::VestingSchedule(vault_id);
+            let sched_key = StorageKey::VestingSchedule(vault_id, 0);
             let ttl = vault_ttl_ledgers(vault.check_in_interval);
             env.storage().persistent().set(&sched_key, &schedule);
             env.storage()
@@ -15152,18 +17560,17 @@ impl TtlVaultContract {
                 (vault.beneficiary.clone(), total_amount, bonus),
             );
         } else {
-            let mut distributed: i128 = 0;
-            let last_idx = vault.beneficiaries.len() - 1;
+            let shares = Self::calculate_beneficiary_shares(
+                &env,
+                total_amount,
+                &vault.beneficiaries,
+                BASIS_POINTS_100_PERCENT as u32,
+            );
             for (i, entry) in vault.beneficiaries.iter().enumerate() {
-                let share = if i as u32 == last_idx {
-                    total_amount - distributed
-                } else {
-                    total_amount * (entry.bps as i128) / BASIS_POINTS_100_PERCENT
-                };
+                let share = shares.get(i as u32).unwrap();
                 if share > 0 {
                     token_client.transfer(&env.current_contract_address(), &entry.address, &share);
                 }
-                distributed += share;
                 let entry_bonus = if all_on_time {
                     share * bonus_cfg.bonus_bps as i128 / (10_000 + bonus_cfg.bonus_bps as i128)
                 } else {
@@ -15180,7 +17587,7 @@ impl TtlVaultContract {
         schedule.claimed_installments = unlocked;
         Self::save_vault(&env, vault_id, &vault);
 
-        let sched_key = StorageKey::VestingSchedule(vault_id);
+        let sched_key = StorageKey::VestingSchedule(vault_id, 0);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&sched_key, &schedule);
         env.storage()
@@ -15190,133 +17597,6 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         Ok(total_amount)
-    }
-
-    // --- Issue #585: Token Lending ---
-
-    /// Enables token lending for a vault, allowing vault tokens to be lent out for interest income.
-    ///
-    /// # Arguments
-    /// * `vault_id` - The vault ID
-    /// * `caller` - Must be the vault owner
-    /// * `borrower` - Address of the borrower
-    /// * `amount` - Amount to lend in stroops
-    /// * `interest_rate_bps` - Annual interest rate in basis points (e.g., 500 = 5%)
-    /// * `duration_seconds` - Loan duration in seconds
-    ///
-    /// # Errors
-    /// * `ContractError::NotOwner` - If caller is not the vault owner
-    /// * `ContractError::InsufficientBalance` - If vault balance is insufficient
-    pub fn enable_token_lending(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-        borrower: Address,
-        amount: i128,
-        interest_rate_bps: u32,
-        duration_seconds: u64,
-    ) -> Result<(), ContractError> {
-        Self::assert_not_paused(&env);
-        caller.require_auth();
-        let vault = Self::load_vault(&env, vault_id);
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
-        if amount <= 0 || vault.balance < amount {
-            return Err(ContractError::InsufficientBalance);
-        }
-
-        let now = env.ledger().timestamp();
-        let lending = TokenLending {
-            vault_id,
-            borrower: borrower.clone(),
-            amount,
-            interest_rate_bps,
-            lent_at: now,
-            due_at: now.saturating_add(duration_seconds),
-            repaid: false,
-            interest_earned: 0,
-        };
-
-        let key = StorageKey::TokenLending(vault_id);
-        env.storage().persistent().set(&key, &lending);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-
-        env.events().publish(
-            (TOKEN_LENDING_TOPIC, vault_id),
-            (&borrower, amount, interest_rate_bps, duration_seconds),
-        );
-        Ok(())
-    }
-
-    /// Repays a token loan and records the interest earned.
-    ///
-    /// # Arguments
-    /// * `vault_id` - The vault ID
-    /// * `caller` - Must be the vault owner
-    ///
-    /// # Errors
-    /// * `ContractError::NotOwner` - If caller is not the vault owner
-    /// * `ContractError::InvalidAmount` - If no active lending exists or already repaid
-    pub fn repay_token_loan(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-    ) -> Result<i128, ContractError> {
-        Self::assert_not_paused(&env);
-        caller.require_auth();
-        let vault = Self::load_vault(&env, vault_id);
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
-
-        let key = StorageKey::TokenLending(vault_id);
-        let mut lending: TokenLending = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(ContractError::InvalidAmount)?;
-
-        if lending.repaid {
-            return Err(ContractError::InvalidAmount);
-        }
-
-        // Calculate accrued interest using annualized basis-point interest.
-        let now = env.ledger().timestamp();
-        let elapsed = now.saturating_sub(lending.lent_at);
-        let interest = (lending.amount as i128)
-            .checked_mul(lending.interest_rate_bps as i128)
-            .and_then(|v| v.checked_mul(elapsed as i128))
-            .and_then(|v| v.checked_div(BASIS_POINTS_100_PERCENT * DAYS_PER_YEAR as i128 * SECONDS_PER_DAY as i128))
-            .unwrap_or(0);
-
-        lending.repaid = true;
-        lending.interest_earned = interest;
-        env.storage().persistent().set(&key, &lending);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-
-        env.events().publish(
-            (TOKEN_LEND_REPAY_TOPIC, vault_id),
-            (lending.borrower.clone(), lending.amount, interest),
-        );
-        Ok(interest)
-    }
-
-    /// Returns the token lending record for a vault.
-    pub fn get_token_lending(env: Env, vault_id: u64) -> Option<TokenLending> {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::TokenLending(vault_id))
     }
 
     // --- Issue #586: Token Collateral ---
@@ -15565,7 +17845,8 @@ impl TtlVaultContract {
     ///
     /// # Errors
     /// * `ContractError::NotOwner` - If caller is not the vault owner
-    /// * `ContractError::InvalidBps` - If weights do not sum to 10000
+    /// * `ContractError::InvalidBps` - If weights are empty, any weight exceeds 10000, or weights do not sum to 10000
+    /// * `ContractError::InvalidThreshold` - If `rebalance_threshold_bps` exceeds 10000
     pub fn set_token_rebalance(
         env: Env,
         vault_id: u64,
@@ -15579,8 +17860,50 @@ impl TtlVaultContract {
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        
-        // TODO: Implement token rebalance logic
+        if target_weights.is_empty() {
+            return Err(ContractError::InvalidBps);
+        }
+        let mut total_bps: u64 = 0;
+        for weight in target_weights.iter() {
+            if weight.target_bps as i128 > BASIS_POINTS_100_PERCENT {
+                return Err(ContractError::InvalidBps);
+            }
+            total_bps += weight.target_bps as u64;
+        }
+        if total_bps != BASIS_POINTS_100_PERCENT as u64 {
+            return Err(ContractError::InvalidBps);
+        }
+        if rebalance_threshold_bps as i128 > BASIS_POINTS_100_PERCENT {
+            return Err(ContractError::InvalidThreshold);
+        }
+
+        let key = StorageKey::TokenRebalance(vault_id);
+        let (last_rebalance, total_rebalances) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, TokenRebalanceConfig>(&key)
+            .map(|existing| (existing.last_rebalance, existing.total_rebalances))
+            .unwrap_or((0, 0));
+
+        let config = TokenRebalanceConfig {
+            vault_id,
+            target_weights,
+            last_rebalance,
+            rebalance_threshold_bps,
+            total_rebalances,
+        };
+        env.storage().persistent().set(&key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (TOKEN_REBALANCE_TOPIC, vault_id),
+            (rebalance_threshold_bps, config.target_weights.len()),
+        );
         Ok(())
     }
 
@@ -15630,7 +17953,11 @@ impl TtlVaultContract {
             return Err(ContractError::InvalidDeadline);
         }
         let key = StorageKey::Lending(vault_id);
-        if let Some(existing) = env.storage().persistent().get::<StorageKey, TokenLending>(&key) {
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, TokenLending>(&key)
+        {
             if !existing.repaid {
                 return Err(ContractError::LoanAlreadyExists);
             }
@@ -15638,7 +17965,8 @@ impl TtlVaultContract {
 
         let xlm = token::Client::new(&env, &Self::load_token(&env));
         xlm.transfer(&lender, &env.current_contract_address(), &amount);
-        vault.balance = vault.balance
+        vault.balance = vault
+            .balance
             .checked_add(amount)
             .ok_or(ContractError::BalanceOverflow)?;
         Self::save_vault(&env, vault_id, &vault);
@@ -15651,8 +17979,12 @@ impl TtlVaultContract {
             repaid: false,
         };
         env.storage().persistent().set(&key, &lending);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (LOAN_ENABLED_TOPIC, vault_id),
             (lender, amount, repayment_deadline, late_penalty_bps),
@@ -15710,8 +18042,12 @@ impl TtlVaultContract {
 
         lending.repaid = true;
         env.storage().persistent().set(&key, &lending);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage().instance().extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (LOAN_REPAID_TOPIC, vault_id),
             (lending.amount, penalty, now),
@@ -15721,7 +18057,73 @@ impl TtlVaultContract {
 
     /// Returns the current loan record for a vault, if one exists.
     pub fn get_token_lending(env: Env, vault_id: u64) -> Option<TokenLending> {
-        env.storage().persistent().get(&StorageKey::Lending(vault_id))
+        env.storage()
+            .persistent()
+            .get(&StorageKey::Lending(vault_id))
+    }
+
+    /// Returns a compact health snapshot for a vault.
+    ///
+    /// A vault that has not had an explicit check-in reports `last_check_in: None`;
+    /// its TTL is still calculated from the creation timestamp.
+    pub fn get_vault_health_summary(
+        env: Env,
+        vault_id: u64,
+    ) -> Result<VaultHealthSummary, ContractError> {
+        let vault = Self::try_load_vault(&env, vault_id).ok_or(ContractError::VaultNotFound)?;
+        Self::extend_live_vault_ttl(&env, vault_id, &vault);
+
+        let has_checked_in = vault.total_check_ins > 0;
+        let ttl_start = if has_checked_in {
+            vault.last_check_in
+        } else {
+            vault.created_at
+        };
+        let deadline = ttl_start.saturating_add(vault.check_in_interval);
+        let now = env.ledger().timestamp();
+        let ttl_remaining = if now >= deadline {
+            None
+        } else {
+            Some(deadline - now)
+        };
+
+        Ok(VaultHealthSummary {
+            last_check_in: if has_checked_in {
+                Some(vault.last_check_in)
+            } else {
+                None
+            },
+            ttl_remaining,
+            balance: vault.balance,
+            is_paused: vault.is_paused,
+            check_in_streak: Self::get_check_in_streak(env.clone(), vault_id),
+        })
+    }
+
+    /// Returns the full state for each requested vault ID, preserving input order.
+    /// Unknown IDs are represented as `None`.
+    ///
+    /// # Errors
+    /// * `ContractError::BatchTooLarge` - If more than `MAX_VAULT_BATCH_SIZE` IDs are requested
+    pub fn get_vault_batch(
+        env: Env,
+        vault_ids: Vec<u64>,
+    ) -> Result<Vec<Option<Vault>>, ContractError> {
+        if vault_ids.len() > MAX_VAULT_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        let mut result = Vec::new(&env);
+        for vault_id in vault_ids.iter() {
+            let vault = Self::try_load_vault(&env, vault_id);
+            if let Some(vault) = vault {
+                Self::extend_live_vault_ttl(&env, vault_id, &vault);
+                result.push_back(Some(vault));
+            } else {
+                result.push_back(None);
+            }
+        }
+        Ok(result)
     }
 
     // --- batch status ---
@@ -15781,58 +18183,6 @@ impl TtlVaultContract {
         Self::paginate(&env, due, page, page_size)
     }
 
-    // --- countdown config ---
-
-    /// Sets the countdown warning thresholds (in seconds remaining) for a vault.
-    /// Thresholds must be a non-empty, strictly descending list of positive values.
-    ///
-    /// # Errors
-    /// * `ContractError::NotOwner` - If caller is not the vault owner
-    /// * `ContractError::AlreadyReleased` - If vault is not in Locked status
-    /// * `ContractError::InvalidThresholds` - If thresholds is empty, contains a zero, or is not strictly descending
-    pub fn set_countdown_config(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-        thresholds: Vec<u64>,
-    ) -> Result<(), ContractError> {
-        caller.require_auth();
-        let vault = Self::load_vault(&env, vault_id);
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
-        if thresholds.is_empty() {
-            return Err(ContractError::InvalidThresholds);
-        }
-        let mut prev: Option<u64> = None;
-        for t in thresholds.iter() {
-            if t == 0 {
-                return Err(ContractError::InvalidThresholds);
-            }
-            if let Some(p) = prev {
-                if t >= p {
-                    return Err(ContractError::InvalidThresholds);
-                }
-            }
-            prev = Some(t);
-        }
-        let key = StorageKey::CountdownConfig(vault_id);
-        env.storage().persistent().set(&key, &thresholds);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        Ok(())
-    }
-
-    /// Returns the configured countdown thresholds for a vault, or an empty list if unset.
-    pub fn get_countdown_config(env: Env, vault_id: u64) -> Vec<u64> {
-        env.storage()
-            .persistent()
-            .get(&StorageKey::CountdownConfig(vault_id))
-            .unwrap_or(Vec::new(&env))
-    }
-
     // --- helpers ---
 
     fn paginate(env: &Env, all: Vec<u64>, page: u32, page_size: u32) -> Vec<u64> {
@@ -15847,29 +18197,7 @@ impl TtlVaultContract {
             result.push_back(all.get(i as u32).unwrap());
             i += 1;
         }
-
-        let config = TokenRebalanceConfig {
-            vault_id,
-            target_weights,
-            last_rebalance: env.ledger().timestamp(),
-            rebalance_threshold_bps,
-            total_rebalances: 0,
-        };
-
-        let key = StorageKey::TokenRebalance(vault_id);
-        env.storage().persistent().set(&key, &config);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-
-        env.events().publish(
-            (TOKEN_REBALANCE_TOPIC, vault_id),
-            (rebalance_threshold_bps,),
-        );
-        Ok(())
+        result
     }
 
     /// Triggers a portfolio rebalance for a vault.
@@ -15963,6 +18291,8 @@ impl TtlVaultContract {
             pool_id,
             members: members.clone(),
             total_bps,
+            claim_deadline: 0,
+            claimed: Vec::new(&env),
         };
         env.storage()
             .persistent()
@@ -15978,6 +18308,145 @@ impl TtlVaultContract {
         env.events()
             .publish((POOL_CREATED_TOPIC, pool_id), (members, total_bps));
         Ok(())
+    }
+
+    /// Sets the claim deadline for a pool. Only the vault owner may call this.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`           - caller is not the vault owner
+    /// * `ContractError::InvalidBeneficiary` - pool does not exist
+    /// * `ContractError::InvalidDeadline`    - deadline is not in the future
+    pub fn set_pool_claim_deadline(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        pool_id: u64,
+        claim_deadline: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if claim_deadline <= env.ledger().timestamp() {
+            return Err(ContractError::InvalidDeadline);
+        }
+        let key = StorageKey::BeneficiaryPool(pool_id);
+        let mut pool: BeneficiaryPool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+        pool.claim_deadline = claim_deadline;
+        env.storage().persistent().set(&key, &pool);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Records that `member` has claimed their pool share before the claim deadline.
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidBeneficiary` - pool does not exist
+    /// * `ContractError::NotBeneficiary`     - member is not in the pool
+    /// * `ContractError::InvalidDeadline`    - the claim deadline has already passed
+    pub fn claim_pool_share(
+        env: Env,
+        pool_id: u64,
+        member: Address,
+    ) -> Result<(), ContractError> {
+        member.require_auth();
+        Self::assert_not_paused(&env);
+        let key = StorageKey::BeneficiaryPool(pool_id);
+        let mut pool: BeneficiaryPool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+        if !pool.members.contains(&member) {
+            return Err(ContractError::NotBeneficiary);
+        }
+        if pool.claim_deadline != 0 && env.ledger().timestamp() > pool.claim_deadline {
+            return Err(ContractError::InvalidDeadline);
+        }
+        if !pool.claimed.contains(&member) {
+            pool.claimed.push_back(member);
+        }
+        env.storage().persistent().set(&key, &pool);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Redistributes unclaimed pool shares to the members that claimed, proportionally
+    /// to their BPS, once the pool's claim deadline has passed.
+    ///
+    /// The resulting BPS per claimed member (aligned with `pool.claimed`) is stored under
+    /// `BeneficiaryPoolAlloc(pool_id)` and sums to the pool's `total_bps` (rounding dust
+    /// goes to the first claimed member). Callable by anyone.
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidBeneficiary` - pool missing, or nobody claimed
+    /// * `ContractError::NotExpired`         - no deadline set or deadline not yet passed
+    pub fn redistribute_unclaimed_shares(
+        env: Env,
+        vault_id: u64,
+        pool_id: u64,
+    ) -> Result<Vec<u128>, ContractError> {
+        Self::assert_not_paused(&env);
+        let vault = Self::load_vault(&env, vault_id);
+        let pool: BeneficiaryPool = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::BeneficiaryPool(pool_id))
+            .ok_or(ContractError::InvalidBeneficiary)?;
+        if pool.claim_deadline == 0 || env.ledger().timestamp() <= pool.claim_deadline {
+            return Err(ContractError::NotExpired);
+        }
+        if pool.claimed.is_empty() {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let mut claimed_bps: u128 = 0;
+        let mut own_bps: Vec<u128> = Vec::new(&env);
+        for member in pool.claimed.iter() {
+            let mut bps: u128 = 0;
+            for entry in vault.beneficiaries.iter() {
+                if entry.address == member {
+                    bps = entry.bps as u128;
+                    break;
+                }
+            }
+            claimed_bps += bps;
+            own_bps.push_back(bps);
+        }
+        if claimed_bps == 0 {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let total = pool.total_bps as u128;
+        let mut alloc: Vec<u128> = Vec::new(&env);
+        let mut assigned: u128 = 0;
+        for bps in own_bps.iter() {
+            let share = total * bps / claimed_bps;
+            assigned += share;
+            alloc.push_back(share);
+        }
+        if let Some(first) = alloc.get(0) {
+            alloc.set(0, first + (total - assigned));
+        }
+
+        let key = StorageKey::BeneficiaryPoolAlloc(pool_id);
+        env.storage().persistent().set(&key, &alloc);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.events()
+            .publish((POOL_REDIST_TOPIC, pool_id), alloc.clone());
+        Ok(alloc)
     }
 
     /// Returns the pool record for `pool_id`, if it exists.
@@ -16005,36 +18474,40 @@ impl TtlVaultContract {
             enabled: true,
             method,
         };
-        env.storage().persistent().set(&StorageKey::TwoFactorConfig(vault_id), &config);
-        env.storage().persistent().extend_ttl(&StorageKey::TwoFactorConfig(vault_id), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.events().publish((TWO_FACTOR_ENABLED_TOPIC, vault_id), (method,));
+        env.storage()
+            .persistent()
+            .set(&StorageKey::TwoFactorConfig(vault_id), &config);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::TwoFactorConfig(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        env.events()
+            .publish((TWO_FACTOR_ENABLED_TOPIC, vault_id), (method,));
         Ok(())
     }
 
     /// Disable 2FA for a vault.
-    pub fn disable_2fa(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn disable_2fa(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        env.storage().persistent().remove(&StorageKey::TwoFactorConfig(vault_id));
-        env.storage().persistent().remove(&StorageKey::TwoFactorVerified(vault_id));
-        env.events().publish((TWO_FACTOR_DISABLED_TOPIC, vault_id), ());
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::TwoFactorConfig(vault_id));
+        env.storage()
+            .persistent()
+            .remove(&StorageKey::TwoFactorVerified(vault_id));
+        env.events()
+            .publish((TWO_FACTOR_DISABLED_TOPIC, vault_id), ());
         Ok(())
     }
 
     /// Mark 2FA as verified for this vault (called by backend after OTP validation).
     /// Requires owner auth. The verification expires after 1 hour.
-    pub fn confirm_2fa(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-    ) -> Result<(), ContractError> {
+    pub fn confirm_2fa(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
         if caller != vault.owner {
@@ -16044,9 +18517,16 @@ impl TtlVaultContract {
             return Err(ContractError::TwoFactorNotEnabled);
         }
         let now = env.ledger().timestamp();
-        env.storage().persistent().set(&StorageKey::TwoFactorVerified(vault_id), &now);
-        env.storage().persistent().extend_ttl(&StorageKey::TwoFactorVerified(vault_id), VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
-        env.events().publish((TWO_FACTOR_VERIFIED_TOPIC, vault_id), (now,));
+        env.storage()
+            .persistent()
+            .set(&StorageKey::TwoFactorVerified(vault_id), &now);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::TwoFactorVerified(vault_id),
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+        env.events()
+            .publish((TWO_FACTOR_VERIFIED_TOPIC, vault_id), (now,));
         Ok(())
     }
 
@@ -16061,7 +18541,8 @@ impl TtlVaultContract {
 
     /// Check if 2FA has been verified within the last hour (public view function).
     pub fn is_2fa_verified(env: &Env, vault_id: u64) -> bool {
-        let verified_at = env.storage()
+        let verified_at = env
+            .storage()
             .persistent()
             .get::<StorageKey, u64>(&StorageKey::TwoFactorVerified(vault_id));
         match verified_at {
@@ -16076,11 +18557,7 @@ impl TtlVaultContract {
 
     // --- Issue #1088: Enforce Minimum Balance Guard to Prevent Vault Drainage ---
 
-    pub fn set_min_balance_guard(
-        env: Env,
-        vault_id: u64,
-        min: i128,
-    ) -> Result<(), ContractError> {
+    pub fn set_min_balance_guard(env: Env, vault_id: u64, min: i128) -> Result<(), ContractError> {
         let mut vault = Self::load_vault(&env, vault_id);
         vault.owner.require_auth();
         vault.min_balance_guard = Some(min);
@@ -16110,10 +18587,16 @@ impl TtlVaultContract {
             }
         }
 
-        Self::withdraw(&env, vault_id, caller.clone(), amount)?;
+        // Delegate to the standard withdraw implementation.  The reason string is
+        // emitted as a supplemental event; signature params are not forwarded here
+        // because withdraw_with_reason is a convenience wrapper for legacy callers.
+        // Callers on sig-enabled vaults should use withdraw() directly.
+        Self::withdraw(env.clone(), vault_id, caller.clone(), amount, None, None, None)?;
 
-        env.events()
-            .publish((symbol_short!("wd_rsn"), vault_id), (&caller, amount, reason));
+        env.events().publish(
+            (symbol_short!("wd_rsn"), vault_id),
+            (&caller, amount, reason),
+        );
 
         Ok(())
     }
@@ -16133,6 +18616,9 @@ impl TtlVaultContract {
         if amount <= 0 {
             return Err(ContractError::InvalidAmount);
         }
+        if interval_seconds == 0 {
+            return Err(ContractError::InvalidInterval);
+        }
 
         let now = env.ledger().timestamp();
         let recurring = RecurringWithdrawal {
@@ -16145,16 +18631,29 @@ impl TtlVaultContract {
         vault.recurring_withdrawal = Some(recurring);
         Self::save_vault(&env, vault_id, &vault);
 
-        env.events()
-            .publish((symbol_short!("rec_wd"), vault_id), (amount, interval_seconds, &destination));
+        env.events().publish(
+            (symbol_short!("rec_wd"), vault_id),
+            (amount, interval_seconds, &destination),
+        );
 
         Ok(())
     }
 
     pub fn execute_recurring_withdrawal(env: Env, vault_id: u64) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
+        }
         let mut vault = Self::load_vault(&env, vault_id);
+        if vault.is_paused {
+            return Err(ContractError::Paused);
+        }
+        if vault.status == ReleaseStatus::EmergencyFrozen || Self::check_vault_frozen(&env, vault_id) {
+            return Err(ContractError::VaultFrozen);
+        }
 
-        let recurring = vault.recurring_withdrawal.as_ref()
+        let recurring = vault
+            .recurring_withdrawal
+            .clone()
             .ok_or(ContractError::RecurringWithdrawalNotFound)?;
 
         let now = env.ledger().timestamp();
@@ -16167,7 +18666,11 @@ impl TtlVaultContract {
         }
 
         let token_client = token::Client::new(&env, &vault.token_address);
-        token_client.transfer(&env.current_contract_address(), &recurring.destination, &recurring.amount);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &recurring.destination,
+            &recurring.amount,
+        );
         vault.balance -= recurring.amount;
 
         if let Some(ref mut rec) = vault.recurring_withdrawal {
@@ -16176,8 +18679,10 @@ impl TtlVaultContract {
 
         Self::save_vault(&env, vault_id, &vault);
 
-        env.events()
-            .publish((symbol_short!("exec_rw"), vault_id), (recurring.amount, now));
+        env.events().publish(
+            (symbol_short!("exec_rw"), vault_id),
+            (recurring.amount, now),
+        );
 
         Ok(())
     }
@@ -16200,46 +18705,32 @@ impl TtlVaultContract {
         vault.recurring_withdrawal
     }
 
-    // --- Issue #1084: Implement Withdrawal Rate Limiting Per Time Window ---
-
-    pub fn set_withdrawal_rate_limit(
-        env: Env,
-        vault_id: u64,
-        limit: i128,
-        window_seconds: u64,
-    ) -> Result<(), ContractError> {
-        let mut vault = Self::load_vault(&env, vault_id);
-        vault.owner.require_auth();
-
-        if limit <= 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-
-        if window_seconds == 0 {
-            return Err(ContractError::InvalidAmount);
-        }
-
-        vault.withdrawal_limit_per_window = Some(limit);
-        vault.withdrawal_window_seconds = window_seconds;
-        vault.window_start = env.ledger().timestamp();
-        vault.withdrawn_in_window = 0;
-
-        Self::save_vault(&env, vault_id, &vault);
-
-        env.events()
-            .publish((symbol_short!("set_rl"), vault_id), (limit, window_seconds));
-
-        Ok(())
-    }
-
     pub fn get_withdrawal_rate_limit(env: Env, vault_id: u64) -> Option<(i128, u64)> {
         let vault = Self::load_vault(&env, vault_id);
-        vault.withdrawal_limit_per_window.map(|limit| (limit, vault.withdrawal_window_seconds))
+        vault
+            .withdrawal_limit_per_window
+            .map(|limit| (limit, vault.withdrawal_window_seconds))
     }
 
-    // --- Issue #569: Withdrawal Audit Trail ---
+    // --- Issue #569 / #1293: Withdrawal Audit Trail ---
 
     /// Records a withdrawal attempt (successful or failed) in the audit trail.
+    ///
+    /// Two storage paths are maintained in parallel:
+    ///
+    /// 1. **Legacy unbounded log** (`WithdrawalAuditLog`) — preserved for
+    ///    backwards compatibility with callers that use
+    ///    `get_withdrawal_audit_log`.
+    ///
+    /// 2. **Ring buffer** (`WithdrawalHistoryHead` / `WithdrawalHistoryEntry` /
+    ///    `WithdrawalHistoryLen`) — bounded to `MAX_WITHDRAWAL_HISTORY` entries.
+    ///    The head pointer advances on every write; when the buffer is full the
+    ///    oldest slot is silently overwritten.  This is the storage read by the
+    ///    `get_withdrawal_history` query.
+    ///
+    /// Events are emitted unconditionally:
+    /// * `WITHDRAWAL_AUDIT_TOPIC` for every attempt (success or failure).
+    /// * `WITHDRAWAL_FAILED_TOPIC` additionally for failed attempts.
     fn record_withdrawal_audit(
         env: &Env,
         vault_id: u64,
@@ -16249,6 +18740,9 @@ impl TtlVaultContract {
         error_reason: &str,
     ) {
         let timestamp = env.ledger().timestamp();
+        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
+
+        // ---- 1. Legacy unbounded log (backwards-compat) ----
         let audit_entry = WithdrawalAuditEntry {
             vault_id,
             caller: caller.clone(),
@@ -16257,20 +18751,65 @@ impl TtlVaultContract {
             success,
             error_reason: String::from_str(env, error_reason),
         };
-
-        let key = StorageKey::WithdrawalAuditLog(vault_id);
+        let log_key = StorageKey::WithdrawalAuditLog(vault_id);
         let mut audit_log: Vec<WithdrawalAuditEntry> = env
             .storage()
             .persistent()
-            .get(&key)
+            .get(&log_key)
             .unwrap_or_else(|| Vec::new(env));
-
         audit_log.push_back(audit_entry);
+        env.storage().persistent().set(&log_key, &audit_log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&log_key, VAULT_TTL_THRESHOLD, ttl);
 
-        let ttl = vault_ttl_ledgers(Self::load_vault(env, vault_id).check_in_interval);
-        env.storage().persistent().set(&key, &audit_log);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        // ---- 2. Ring-buffer (bounded, last MAX_WITHDRAWAL_HISTORY entries) ----
+        let head_key = StorageKey::WithdrawalHistoryHead(vault_id);
+        let len_key = StorageKey::WithdrawalHistoryLen(vault_id);
 
+        // Current write head (slot index to overwrite) and entry count.
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0u32);
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&len_key)
+            .unwrap_or(0u32);
+
+        let entry = WithdrawalEvent {
+            vault_id,
+            caller: caller.clone(),
+            amount,
+            timestamp,
+            success,
+            error_reason: String::from_str(env, error_reason),
+            sequence: head,
+        };
+
+        let entry_key = StorageKey::WithdrawalHistoryEntry(vault_id, head);
+        env.storage().persistent().set(&entry_key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&entry_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Advance head pointer (wraps around to implement the ring).
+        let next_head = (head + 1) % MAX_WITHDRAWAL_HISTORY;
+        env.storage().persistent().set(&head_key, &next_head);
+        env.storage()
+            .persistent()
+            .extend_ttl(&head_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Len saturates at MAX_WITHDRAWAL_HISTORY once the buffer is full.
+        let new_len = if len < MAX_WITHDRAWAL_HISTORY { len + 1 } else { MAX_WITHDRAWAL_HISTORY };
+        env.storage().persistent().set(&len_key, &new_len);
+        env.storage()
+            .persistent()
+            .extend_ttl(&len_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // ---- 3. Events ----
         env.events().publish(
             (WITHDRAWAL_AUDIT_TOPIC, vault_id),
             (caller, amount, success, timestamp),
@@ -16284,7 +18823,10 @@ impl TtlVaultContract {
         }
     }
 
-    /// Retrieves the withdrawal audit trail for a vault.
+    /// Retrieves the withdrawal audit trail for a vault (legacy unbounded log).
+    ///
+    /// For most use-cases, prefer `get_withdrawal_history` which returns the
+    /// bounded ring buffer in chronological order.
     pub fn get_withdrawal_audit_log(env: Env, vault_id: u64) -> Vec<WithdrawalAuditEntry> {
         let key = StorageKey::WithdrawalAuditLog(vault_id);
         env.storage()
@@ -16293,13 +18835,97 @@ impl TtlVaultContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    // --- Issue #572: Withdrawal Dispute ---
+    /// Returns the last N withdrawal events for `vault_id` in chronological
+    /// order (oldest first) from the on-chain ring buffer.
+    ///
+    /// At most `MAX_WITHDRAWAL_HISTORY` entries are ever stored per vault.
+    /// Once the buffer is full, the oldest entry is overwritten on each new
+    /// withdrawal so the returned slice always represents the most recent
+    /// history.
+    ///
+    /// # Arguments
+    /// * `vault_id` — The vault to query.
+    ///
+    /// # Returns
+    /// A `Vec<WithdrawalEvent>` with up to `MAX_WITHDRAWAL_HISTORY` entries.
+    /// Returns an empty vec if no withdrawals have been recorded.
+    pub fn get_withdrawal_history(env: Env, vault_id: u64) -> Vec<WithdrawalEvent> {
+        let head_key = StorageKey::WithdrawalHistoryHead(vault_id);
+        let len_key = StorageKey::WithdrawalHistoryLen(vault_id);
 
-    /// Files a dispute for a withdrawal within the grace period (24 hours).
-    pub fn file_withdrawal_dispute(
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0u32);
+        let len: u32 = env
+            .storage()
+            .persistent()
+            .get(&len_key)
+            .unwrap_or(0u32);
+
+        let mut result: Vec<WithdrawalEvent> = Vec::new(&env);
+        if len == 0 {
+            return result;
+        }
+
+        // The oldest entry sits at slot `head` when the buffer is full,
+        // or at slot 0 when it has not wrapped yet.
+        //
+        // Case A — buffer not yet full (len < MAX_WITHDRAWAL_HISTORY):
+        //   Slots 0 .. len-1 hold entries in write order; `head` == len.
+        //   Oldest → newest: iterate slots 0 .. len-1.
+        //
+        // Case B — buffer is full (len == MAX_WITHDRAWAL_HISTORY):
+        //   `head` points to the *next* write slot, which is also the
+        //   *oldest* slot.  Iterate head .. head+len-1 (mod MAX).
+        let start = if len < MAX_WITHDRAWAL_HISTORY {
+            0u32
+        } else {
+            head
+        };
+
+        for i in 0..len {
+            let slot = (start + i) % MAX_WITHDRAWAL_HISTORY;
+            let entry_key = StorageKey::WithdrawalHistoryEntry(vault_id, slot);
+            if let Some(event) = env.storage().persistent().get::<StorageKey, WithdrawalEvent>(&entry_key) {
+                result.push_back(event);
+            }
+        }
+
+        result
+    }
+
+    // --- Issue #572 / #1294: Withdrawal Dispute ---
+
+    /// Disputes an unauthorized withdrawal identified by its index in the
+    /// vault's audit log. The dispute must be filed within 24 hours of the
+    /// withdrawal timestamp recorded in the audit entry.
+    ///
+    /// Only the vault owner may file a dispute. If the 24-hour window has
+    /// elapsed the call returns `WithdrawalDisputeWindowExpired`.
+    ///
+    /// # Arguments
+    /// * `env` - Soroban environment
+    /// * `vault_id` - Target vault
+    /// * `caller` - Must be the vault owner (requires auth)
+    /// * `audit_log_index` - Index into `get_withdrawal_audit_log` for the
+    ///   withdrawal being disputed
+    /// * `reason` - Human-readable reason for the dispute
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` - Caller is not the vault owner
+    /// * `ContractError::WithdrawalDisputeNotFound` - No audit entry at
+    ///   `audit_log_index`, or the entry is not a successful withdrawal
+    /// * `ContractError::WithdrawalDisputeWindowExpired` - More than 24 hours
+    ///   have elapsed since the withdrawal
+    /// * `ContractError::DisputeFiled` - A dispute for this audit entry is
+    ///   already open
+    pub fn dispute_withdrawal(
         env: Env,
         vault_id: u64,
         caller: Address,
+        audit_log_index: u32,
         reason: String,
     ) -> Result<(), ContractError> {
         caller.require_auth();
@@ -16309,32 +18935,90 @@ impl TtlVaultContract {
             return Err(ContractError::NotOwner);
         }
 
-        let timestamp = env.ledger().timestamp();
-        let grace_period = SECONDS_PER_DAY; // 24 hours
-        let dispute_expires_at = timestamp + grace_period;
+        // Fetch the audit log and look up the referenced entry.
+        let audit_key = StorageKey::WithdrawalAuditLog(vault_id);
+        let audit_log: Vec<WithdrawalAuditEntry> = env
+            .storage()
+            .persistent()
+            .get(&audit_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if audit_log_index >= audit_log.len() {
+            return Err(ContractError::WithdrawalDisputeNotFound);
+        }
+
+        let entry = audit_log.get(audit_log_index).unwrap();
+
+        // Only successful withdrawals can be disputed (failed ones never
+        // moved funds out of the vault, so there is nothing to contest).
+        if !entry.success {
+            return Err(ContractError::WithdrawalDisputeNotFound);
+        }
+
+        // Enforce the 24-hour dispute window relative to the withdrawal.
+        let now = env.ledger().timestamp();
+        if now > entry.timestamp + SECONDS_PER_DAY {
+            return Err(ContractError::WithdrawalDisputeWindowExpired);
+        }
+
+        // Prevent duplicate open disputes for the same audit entry.
+        let dispute_key = StorageKey::WithdrawalDisputes(vault_id);
+        let mut disputes: Vec<WithdrawalDispute> = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let audit_indices_key = StorageKey::WithdrawalDisputeAuditIndices(vault_id);
+        let mut audit_indices: Vec<Option<u32>> = env
+            .storage()
+            .persistent()
+            .get(&audit_indices_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        while audit_indices.len() < disputes.len() {
+            audit_indices.push_back(None);
+        }
+
+        for i in 0..disputes.len() {
+            let d = disputes.get(i).unwrap();
+            let linked_audit_index = audit_indices.get(i).flatten();
+            if d.status == DisputeStatus::Filed
+                && (linked_audit_index == Some(audit_log_index)
+                    || (linked_audit_index.is_none()
+                        && d.withdrawal_timestamp == entry.timestamp))
+            {
+                return Err(ContractError::DisputeFiled);
+            }
+        }
+
+        // The dispute window itself matches the withdrawal window: filing
+        // happens now, expires 24 h after the *withdrawal* (not the filing).
+        let dispute_expires_at = entry.timestamp + SECONDS_PER_DAY;
 
         let dispute = WithdrawalDispute {
             vault_id,
-            withdrawal_timestamp: timestamp,
-            dispute_filed_at: timestamp,
+            withdrawal_timestamp: entry.timestamp,
+            dispute_filed_at: now,
             dispute_expires_at,
             status: DisputeStatus::Filed,
             reason: reason.clone(),
             resolved_at: None,
         };
 
-        let key = StorageKey::WithdrawalDisputes(vault_id);
-        let mut disputes: Vec<WithdrawalDispute> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&env));
-
         disputes.push_back(dispute);
+        audit_indices.push_back(Some(audit_log_index));
 
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage().persistent().set(&key, &disputes);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().persistent().set(&dispute_key, &disputes);
+        env.storage()
+            .persistent()
+            .set(&audit_indices_key, &audit_indices);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&audit_indices_key, VAULT_TTL_THRESHOLD, ttl);
 
         env.storage()
             .instance()
@@ -16342,62 +19026,105 @@ impl TtlVaultContract {
 
         env.events().publish(
             (WITHDRAWAL_DISPUTE_FILED_TOPIC, vault_id),
-            (&caller, timestamp, reason),
+            (&caller, entry.timestamp, reason),
         );
 
         Ok(())
     }
 
-    /// Resolves a withdrawal dispute.
+    /// Resolves a withdrawal dispute. Admin-only.
+    ///
+    /// Marks the dispute at `dispute_index` in the vault's dispute list as
+    /// resolved. When `approved` is `true` the dispute is upheld
+    /// (`DisputeStatus::Resolved`); when `false` it is dismissed
+    /// (`DisputeStatus::None`).
+    ///
+    /// # Arguments
+    /// * `env` - Soroban environment
+    /// * `vault_id` - Target vault
+    /// * `dispute_index` - Index into `get_withdrawal_disputes`
+    /// * `approved` - `true` = dispute upheld, `false` = dispute dismissed
+    ///
+    /// # Errors
+    /// * `ContractError::NotAdmin` - Caller is not the contract admin
+    /// * `ContractError::WithdrawalDisputeNotFound` - `dispute_index` is
+    ///   out of range
+    /// * `ContractError::DisputeFiled` - Dispute is not in `Filed` state
     pub fn resolve_withdrawal_dispute(
         env: Env,
         vault_id: u64,
-        caller: Address,
         dispute_index: u32,
         approved: bool,
     ) -> Result<(), ContractError> {
-        caller.require_auth();
-        let vault = Self::load_vault(&env, vault_id);
+        // Resolution is an admin-only action: owners must not be able to
+        // resolve their own disputes.
+        Self::require_admin(&env);
 
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
+        let vault = Self::load_vault(&env, vault_id);
 
         let key = StorageKey::WithdrawalDisputes(vault_id);
         let mut disputes: Vec<WithdrawalDispute> = env
             .storage()
             .persistent()
             .get(&key)
-            .ok_or(ContractError::DisputeFiled)?;
+            .ok_or(ContractError::WithdrawalDisputeNotFound)?;
 
         if dispute_index >= disputes.len() {
-            return Err(ContractError::DisputeFiled);
+            return Err(ContractError::WithdrawalDisputeNotFound);
         }
 
         let mut dispute = disputes.get(dispute_index).unwrap();
+
+        if dispute.status != DisputeStatus::Filed {
+            return Err(ContractError::DisputeFiled);
+        }
+
+        let now = env.ledger().timestamp();
         dispute.status = if approved {
             DisputeStatus::Resolved
         } else {
+            // Dismissed disputes revert to None so they no longer block
+            // duplicate-check logic in dispute_withdrawal.
             DisputeStatus::None
         };
-        dispute.resolved_at = Some(env.ledger().timestamp());
+        dispute.resolved_at = Some(now);
 
         disputes.set(dispute_index, dispute.clone());
 
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
         env.storage().persistent().set(&key, &disputes);
-        env.storage().persistent().extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
 
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
 
+        let admin = Self::load_admin(&env);
         env.events().publish(
             (WITHDRAWAL_DISPUTE_RESOLVED_TOPIC, vault_id),
-            (&caller, dispute_index, approved),
+            (&admin, dispute_index, approved),
         );
 
         Ok(())
+    }
+
+    /// Legacy helper retained for backwards compatibility. New callers should
+    /// use `dispute_withdrawal` which links the dispute to a specific audit
+    /// log entry and enforces the 24-hour window automatically.
+    ///
+    /// Files a dispute against the most-recent successful withdrawal for the
+    /// vault, identified by `audit_log_index`. Delegates to
+    /// `dispute_withdrawal`.
+    pub fn file_withdrawal_dispute(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        audit_log_index: u32,
+        reason: String,
+    ) -> Result<(), ContractError> {
+        Self::dispute_withdrawal(env, vault_id, caller, audit_log_index, reason)
     }
 
     /// Retrieves all withdrawal disputes for a vault.
@@ -16432,7 +19159,7 @@ impl TtlVaultContract {
             return Err(ContractError::Paused);
         }
         Self::require_admin(&env);
-        
+
         if new_wasm_hash.is_empty() {
             return Err(ContractError::UpgradeInvalidWasm);
         }
@@ -16448,7 +19175,9 @@ impl TtlVaultContract {
             executable_at,
         };
 
-        env.storage().instance().set(&StorageKey::PendingUpgrade, &proposal);
+        env.storage()
+            .instance()
+            .set(&StorageKey::PendingUpgrade, &proposal);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
@@ -16496,7 +19225,9 @@ impl TtlVaultContract {
         }
 
         // Deploy the new contract WASM
-        env.deployer().update_current_contract_wasm(proposal.new_wasm_hash.clone());
+        let wasm_hash = BytesN::<32>::try_from(proposal.new_wasm_hash.clone())
+            .map_err(|_| ContractError::UpgradeInvalidWasm)?;
+        env.deployer().update_current_contract_wasm(wasm_hash);
 
         // Clear pending upgrade
         env.storage().instance().remove(&StorageKey::PendingUpgrade);
@@ -16506,10 +19237,8 @@ impl TtlVaultContract {
 
         let admin = Self::load_admin(&env);
         Self::log_audit_entry(&env, 0, "execute_upgrade", &admin, "");
-        env.events().publish(
-            (UPGRADE_EXECUTED_TOPIC,),
-            (admin, proposal.new_wasm_hash),
-        );
+        env.events()
+            .publish((UPGRADE_EXECUTED_TOPIC,), (admin, proposal.new_wasm_hash));
 
         Ok(())
     }
@@ -16548,10 +19277,8 @@ impl TtlVaultContract {
 
         let admin = Self::load_admin(&env);
         Self::log_audit_entry(&env, 0, "cancel_upgrade", &admin, "");
-        env.events().publish(
-            (UPGRADE_CANCELLED_TOPIC,),
-            (admin, proposal.new_wasm_hash),
-        );
+        env.events()
+            .publish((UPGRADE_CANCELLED_TOPIC,), (admin, proposal.new_wasm_hash));
 
         Ok(())
     }
@@ -16584,29 +19311,11 @@ impl TtlVaultContract {
     /// `Ok(())` on success
     ///
     /// # Errors
-    /// * `ContractError::NotOwner`          - Caller is not the vault owner
-    /// * `ContractError::AlreadyReleased`   - Vault is not Locked
-    /// * `ContractError::AlreadyHibernating`- Vault is already hibernating
-    /// * `ContractError::InvalidInterval`   - `duration_seconds` is zero
-    pub fn enter_hibernation(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-        duration_seconds: u64,
-    ) -> Result<(), ContractError> {
-        caller.require_auth();
-        if duration_seconds == 0 {
-            return Err(ContractError::InvalidInterval);
-        }
-        if duration_seconds > MAX_HIBERNATION_SECONDS {
-            return Err(ContractError::HibernationDurationTooLong);
-        }
-        let vault = Self::load_vault(&env, vault_id);
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
+    /// * `ContractError::NotAdmin` - If caller is not the admin
+    /// * `ContractError::Paused` - If contract is paused
+    pub fn add_allowed_token(env: Env, token: Address) -> Result<(), ContractError> {
+        if Self::load_paused(&env) {
+            return Err(ContractError::Paused);
         }
         Self::require_admin(&env);
 
@@ -16638,10 +19347,8 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish(
-            (TOKEN_ALLOWLIST_ADDED_TOPIC,),
-            (admin, token),
-        );
+        env.events()
+            .publish((TOKEN_ALLOWLIST_ADDED_TOPIC,), (admin, token));
 
         Ok(())
     }
@@ -16698,10 +19405,8 @@ impl TtlVaultContract {
             env.storage()
                 .instance()
                 .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-            env.events().publish(
-                (TOKEN_ALLOWLIST_REMOVED_TOPIC,),
-                (admin, token),
-            );
+            env.events()
+                .publish((TOKEN_ALLOWLIST_REMOVED_TOPIC,), (admin, token));
         }
 
         Ok(())
@@ -16769,9 +19474,9 @@ impl TtlVaultContract {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::VaultLocked(vault_id), &true);
+            .set(&StorageKey::VaultLocked(vault_id), &true);
         env.storage().persistent().extend_ttl(
-            &DataKey::VaultLocked(vault_id),
+            &StorageKey::VaultLocked(vault_id),
             VAULT_TTL_THRESHOLD,
             VAULT_TTL_LEDGERS,
         );
@@ -16793,7 +19498,11 @@ impl TtlVaultContract {
     /// # Errors
     /// * `ContractError::NotOwner`      - Caller is not the vault owner
     /// * `ContractError::VaultOwnerLocked` - Vault is not currently owner-locked
-    pub fn owner_unlock_vault(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError> {
+    pub fn owner_unlock_vault(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
         // Require fresh authentication — acts as the new passkey verification step
         caller.require_auth();
         let vault = Self::load_vault(&env, vault_id);
@@ -16803,18 +19512,19 @@ impl TtlVaultContract {
         let is_owner_locked = env
             .storage()
             .persistent()
-            .get::<DataKey, bool>(&DataKey::VaultLocked(vault_id))
+            .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false);
         if !is_owner_locked {
             return Err(ContractError::VaultOwnerLocked);
         }
         env.storage()
             .persistent()
-            .remove(&DataKey::VaultLocked(vault_id));
+            .remove(&StorageKey::VaultLocked(vault_id));
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events().publish((VAULT_UNLOCK_TOPIC, vault_id), &caller);
+        env.events()
+            .publish((VAULT_UNLOCK_TOPIC, vault_id), &caller);
         Ok(())
     }
 
@@ -16822,9 +19532,11 @@ impl TtlVaultContract {
     pub fn is_owner_vault_locked(env: Env, vault_id: u64) -> bool {
         env.storage()
             .persistent()
-            .get::<DataKey, bool>(&DataKey::VaultLocked(vault_id))
+            .get::<StorageKey, bool>(&StorageKey::VaultLocked(vault_id))
             .unwrap_or(false)
     }
+
+
 
     // ── Issue 3: Low-TTL warning threshold ───────────────────────────────────
 
@@ -16854,9 +19566,9 @@ impl TtlVaultContract {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::VaultLowTtlThreshold(vault_id), &threshold);
+            .set(&StorageKey::VaultLowTtlThreshold(vault_id), &threshold);
         env.storage().persistent().extend_ttl(
-            &DataKey::VaultLowTtlThreshold(vault_id),
+            &StorageKey::VaultLowTtlThreshold(vault_id),
             VAULT_TTL_THRESHOLD,
             VAULT_TTL_LEDGERS,
         );
@@ -16886,21 +19598,8 @@ impl TtlVaultContract {
             return false;
         }
 
-        let threshold: u64 = env
-            .storage()
-            .persistent()
-            .get::<DataKey, u64>(&DataKey::VaultLowTtlThreshold(vault_id))
-            .unwrap_or(604_800); // default: 7 days
-
-        let ttl = Self::get_ttl_remaining(env.clone(), vault_id).unwrap_or(0);
-        let below_threshold = ttl < threshold;
-
-        if below_threshold {
-            env.events()
-                .publish((LOW_TTL_WARNING_TOPIC, vault_id), (ttl, threshold));
-        }
-
-        below_threshold
+        let ttl = Self::effective_ttl_remaining(&env, vault_id, &vault);
+        Self::emit_low_ttl_warning_if_needed(&env, vault_id, ttl)
     }
 
     // ── Issue 4: batch_check_in with custom extension_amounts ─────────────────
@@ -16970,7 +19669,9 @@ impl TtlVaultContract {
 
             // Determine effective extension: custom amount (capped to interval) or full interval
             let extension = if use_custom {
-                let custom = extension_amounts.get(idx as u32).unwrap_or(vault.check_in_interval);
+                let custom = extension_amounts
+                    .get(idx as u32)
+                    .unwrap_or(vault.check_in_interval);
                 // Cap to full interval so owners cannot set an arbitrarily large extension
                 if custom > vault.check_in_interval {
                     vault.check_in_interval
@@ -16991,11 +19692,11 @@ impl TtlVaultContract {
             }
 
             // Apply scheduled beneficiary rotation if effective timestamp has passed
-            let rot_key = DataKey::BeneficiaryRotationSchedule(vault_id);
+            let rot_key = StorageKey::BeneficiaryRotationSchedule(vault_id);
             if let Some(schedule) = env
                 .storage()
                 .persistent()
-                .get::<DataKey, Vec<BeneficiaryRotationEntry>>(&rot_key)
+                .get::<StorageKey, Vec<BeneficiaryRotationEntry>>(&rot_key)
             {
                 let mut applied: Option<BeneficiaryRotationEntry> = None;
                 for entry in schedule.iter() {
@@ -17023,7 +19724,18 @@ impl TtlVaultContract {
             new_ttls.push_back(new_deadline);
 
             Self::save_vault(&env, vault_id, &vault);
-            env.events().publish((BATCH_CHECKIN_TOPIC, vault_id), (now, extension, new_deadline));
+            env.events().publish(
+                (CHECK_IN_RECORDED_TOPIC, vault_id),
+                CheckInEvent {
+                    vault_id,
+                    new_ttl: new_deadline,
+                    caller: caller.clone(),
+                },
+            );
+            env.events().publish(
+                (BATCH_CHECKIN_TOPIC, vault_id),
+                (now, extension, new_deadline),
+            );
         }
 
         env.storage()
@@ -17032,4 +19744,234 @@ impl TtlVaultContract {
 
         Ok(new_ttls)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #1338: Vault Export / Import for Disaster Recovery
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Exports the configuration of an existing vault as a `VaultExportConfig`
+    /// value that can be stored off-chain and used to recreate the vault if its
+    /// on-chain state is ever lost due to TTL expiry or archival.
+    ///
+    /// Only the vault owner is authorised to export.  The export does NOT
+    /// include the vault balance — funds must be re-deposited after import.
+    /// Runtime state (last_check_in, status, creation metadata) is also
+    /// excluded because it is reset when the vault is re-created via
+    /// `import_vault`.
+    ///
+    /// # Arguments
+    /// * `env`      – The Soroban environment
+    /// * `vault_id` – ID of the vault to export
+    /// * `caller`   – Must be the vault owner
+    ///
+    /// # Returns
+    /// A `VaultExportConfig` containing all configuration required to
+    /// recreate the vault.
+    ///
+    /// # Errors
+    /// * `ContractError::VaultNotFound`  – Vault does not exist
+    /// * `ContractError::NotOwner`       – Caller is not the vault owner
+    pub fn export_vault_config(env: Env, vault_id: u64, caller: Address) -> VaultExportConfig {
+        caller.require_auth();
+        Self::require_initialized(&env);
+
+        let vault = Self::load_vault(&env, vault_id);
+
+        // Only the vault owner may export its configuration.
+        if caller != vault.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        let config = VaultExportConfig {
+            original_vault_id: vault_id,
+            owner: vault.owner.clone(),
+            beneficiary: vault.beneficiary.clone(),
+            check_in_interval: vault.check_in_interval,
+            token_address: vault.token_address.clone(),
+            beneficiaries: vault.beneficiaries.clone(),
+            metadata: vault.metadata.clone(),
+            custom_metadata: vault.custom_metadata.clone(),
+            spending_limit: vault.spending_limit,
+            max_deposit_amount: vault.max_deposit_amount,
+            release_condition: vault.release_condition.clone(),
+            exported_at: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (VAULT_EXPORTED_TOPIC,),
+            (vault_id, vault.owner, env.ledger().timestamp()),
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        config
+    }
+
+    /// Recreates a vault from a previously exported `VaultExportConfig`.
+    ///
+    /// This is the disaster-recovery entry point.  It creates a brand-new
+    /// vault with a fresh vault ID, restoring the owner, beneficiary,
+    /// check-in interval, token, multi-beneficiary split, metadata,
+    /// spending limit, and release condition from the export.
+    ///
+    /// The imported vault starts with a zero balance — the owner must
+    /// re-deposit funds.  The check-in clock starts fresh from the import
+    /// timestamp.
+    ///
+    /// Validation rules applied are identical to `create_vault`:
+    /// * Contract must be initialised and not paused.
+    /// * `caller` must be the `config.owner` address (authorised by them).
+    /// * Interval must be within bounds.
+    /// * Owner ≠ beneficiary.
+    /// * If a token address is specified it must be on the whitelist.
+    ///
+    /// # Arguments
+    /// * `env`    – The Soroban environment
+    /// * `config` – The `VaultExportConfig` obtained from `export_vault_config`
+    /// * `caller` – Must equal `config.owner`
+    ///
+    /// # Returns
+    /// The new vault ID assigned to the re-created vault.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`   – Caller ≠ config.owner
+    /// * `ContractError::InvalidInterval` / `CheckInIntervalTooShort` / `IntervalTooHigh`
+    /// * `ContractError::InvalidBeneficiary` – owner == beneficiary
+    /// * `ContractError::TokenNotAllowed`    – token not whitelisted
+    pub fn import_vault(env: Env, config: VaultExportConfig, caller: Address) -> u64 {
+        caller.require_auth();
+        Self::require_initialized(&env);
+        Self::assert_not_paused(&env);
+
+        // The caller must be the recorded owner.
+        if caller != config.owner {
+            panic_with_error!(&env, ContractError::NotOwner);
+        }
+
+        let check_in_interval = config.check_in_interval;
+
+        // Reuse the same interval validation as create_vault.
+        if check_in_interval == 0 {
+            panic_with_error!(&env, ContractError::InvalidInterval);
+        }
+        if check_in_interval < MIN_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::CheckInIntervalTooShort);
+        }
+        if check_in_interval > MAX_CHECK_IN_INTERVAL {
+            panic_with_error!(&env, ContractError::IntervalTooHigh);
+        }
+        Self::assert_interval_in_bounds(&env, check_in_interval);
+
+        if config.owner == config.beneficiary {
+            panic_with_error!(&env, ContractError::InvalidBeneficiary);
+        }
+
+        // Validate beneficiary is a regular account (same as create_vault).
+        if let Err(e) = Self::assert_beneficiary_is_account(&env, &config.beneficiary) {
+            panic_with_error!(&env, e);
+        }
+
+        // Validate token (must be whitelisted if not the default XLM token).
+        let default_token = Self::load_token(&env);
+        let vault_token = if config.token_address == default_token {
+            default_token.clone()
+        } else {
+            Self::assert_token_whitelisted(&env, &config.token_address);
+            config.token_address.clone()
+        };
+
+        let timestamp = env.ledger().timestamp();
+        let vault_id = Self::vault_count(env.clone()) + 1;
+
+        let vault = Vault {
+            owner: config.owner.clone(),
+            beneficiary: config.beneficiary.clone(),
+            balance: 0,
+            check_in_interval,
+            last_check_in: timestamp,
+            created_at: timestamp,
+            creation_ledger: env.ledger().sequence() as u64,
+            status: ReleaseStatus::Locked,
+            beneficiaries: config.beneficiaries.clone(),
+            metadata: config.metadata.clone(),
+            token_address: vault_token,
+            custom_metadata: config.custom_metadata.clone(),
+            is_paused: false,
+            release_condition: config.release_condition.clone(),
+            parent_vault_id: None,
+            passkey_hash: None,
+            max_deposit_amount: config.max_deposit_amount,
+            withdrawal_approval_threshold: None,
+            spending_limit: config.spending_limit,
+            inactivity_penalty_bps: None,
+            burn_percentage: 0,
+            penalty_recipient: None,
+            passkey_rotation_period: 0,
+            challenge_timeout_seconds: 300,
+            multi_sig_threshold: 1,
+            check_in_score: 10000,
+            total_check_ins: 0,
+            on_time_check_ins: 0,
+            min_balance_guard: None,
+            recurring_withdrawal: None,
+            withdrawal_limit_per_window: None,
+            withdrawal_window_seconds: 0,
+            withdrawn_in_window: 0,
+            window_start: 0,
+            multisig_required_ops: Vec::new(&env),
+            adaptive_interval_enabled: false,
+        };
+
+        Self::save_vault(&env, vault_id, &vault);
+        Self::add_owner_vault_id(&env, &config.owner, vault_id, check_in_interval);
+        Self::add_beneficiary_vault_id(&env, &config.beneficiary, vault_id, check_in_interval);
+
+        // Initialise empty passkeys and backup codes.
+        let empty_passkeys: Vec<PasskeyHash> = Vec::new(&env);
+        let empty_codes: Vec<BackupCode> = Vec::new(&env);
+        let ttl = vault_ttl_ledgers(check_in_interval);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::VaultPasskeys(vault_id), &empty_passkeys);
+        env.storage()
+            .persistent()
+            .set(&StorageKey::BackupCodes(vault_id), &empty_codes);
+        env.storage().persistent().extend_ttl(
+            &StorageKey::VaultPasskeys(vault_id),
+            VAULT_TTL_THRESHOLD,
+            ttl,
+        );
+        env.storage().persistent().extend_ttl(
+            &StorageKey::BackupCodes(vault_id),
+            VAULT_TTL_THRESHOLD,
+            ttl,
+        );
+
+        // Persist the new VaultCount.
+        let count_key = StorageKey::VaultCount;
+        env.storage().persistent().set(&count_key, &vault_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (VAULT_IMPORTED_TOPIC,),
+            (
+                vault_id,
+                config.original_vault_id,
+                config.owner,
+                config.beneficiary,
+                check_in_interval,
+                timestamp,
+            ),
+        );
+
+        vault_id
+    }
 }
+

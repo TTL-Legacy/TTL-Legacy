@@ -1,11 +1,5 @@
 use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, String, Symbol, Vec};
 
-/// Maximum number of vesting schedules per vault.
-pub const MAX_VESTING_SCHEDULES: u32 = 20;
-
-/// Maximum number of beneficiaries allowed per vault.
-pub const MAX_BENEFICIARIES: u32 = 20;
-
 pub const RELEASE_TOPIC: Symbol = symbol_short!("release");
 pub const VAULT_CREATED_TOPIC: Symbol = symbol_short!("v_created");
 pub const PING_EXPIRY_TOPIC: Symbol = symbol_short!("ping_exp");
@@ -33,6 +27,8 @@ pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
 pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
 pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vest");
 pub const VESTING_CANCELLED_TOPIC: Symbol = symbol_short!("vest_can");
+pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_ana");
+pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bkp_enc");
 // Issue #534: vesting cliff period reached
 pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("clif_rch");
 pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
@@ -41,6 +37,8 @@ pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
 pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inherit");
 pub const ADD_PASSKEY_TOPIC: Symbol = symbol_short!("add_pk");
 pub const REMOVE_PASSKEY_TOPIC: Symbol = symbol_short!("rm_pk");
+// Issue #1525: emitted when a passkey is revoked, for off-chain monitoring
+pub const PASSKEY_REVOKED_TOPIC: Symbol = symbol_short!("pk_revoke");
 pub const ROTATE_PASSKEY_TOPIC: Symbol = symbol_short!("rot_pk");
 pub const BACKUP_CODE_USED_TOPIC: Symbol = symbol_short!("bk_used");
 pub const BACKUP_CODES_GENERATED_TOPIC: Symbol = symbol_short!("bk_gen");
@@ -55,7 +53,7 @@ pub const SET_MAX_TTL_TOPIC: Symbol = symbol_short!("set_ttl");
 pub const SET_DECAY_RATE_TOPIC: Symbol = symbol_short!("set_dec");
 pub const ACCEPTANCE_DEADLINE_EXPIRED_TOPIC: Symbol = symbol_short!("acc_exp");
 pub const TTL_DECAY_TOPIC: Symbol = symbol_short!("ttl_dec");
-pub const SET_BURN_PERCENTAGE_TOPIC: Symbol = symbol_short!("set_burn_pct");
+pub const SET_BURN_PERCENTAGE_TOPIC: Symbol = symbol_short!("set_burn");
 pub const BURN_EVENT_TOPIC: Symbol = symbol_short!("burn_evt");
 pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
 pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_exp");
@@ -67,6 +65,11 @@ pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vf
 pub const BENEFICIARY_CONFLICT_FILED_TOPIC: Symbol = symbol_short!("ben_conf");
 pub const BENEFICIARY_CONFLICT_RESOLVED_TOPIC: Symbol = symbol_short!("ben_res");
 pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
+// Issue #1297: automated conflict resolution
+pub const CONFLICT_CLAIMED_TOPIC: Symbol = symbol_short!("conf_clm");
+pub const CONFLICT_AUTO_RESOLVED_TOPIC: Symbol = symbol_short!("conf_aut");
+pub const CONFLICT_PRIORITY_SET_TOPIC: Symbol = symbol_short!("conf_pri");
+pub const CONFLICT_DISPUTE_WINDOW_SET_TOPIC: Symbol = symbol_short!("conf_dw");
 pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
 pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
 // Issue #934: emergency vault recovery code
@@ -92,6 +95,8 @@ pub const MULTISIG_APPROVED_TOPIC: Symbol = symbol_short!("ms_app");
 pub const MULTISIG_REJECTED_TOPIC: Symbol = symbol_short!("ms_rej");
 pub const MULTISIG_EXECUTED_TOPIC: Symbol = symbol_short!("ms_exec");
 pub const MULTISIG_VETOED_TOPIC: Symbol = symbol_short!("ms_veto");
+pub const MULTISIG_CANCELLED_TOPIC: Symbol = symbol_short!("ms_cancel");
+pub const MULTISIG_EXPIRED_TOPIC: Symbol = symbol_short!("ms_exp");
 pub const MULTISIG_SIGNER_REMOVED_TOPIC: Symbol = symbol_short!("ms_rm_sig");
 pub const MULTISIG_PROPOSAL_EXPIRY: u64 = 604_800; // 7 days
 
@@ -140,6 +145,8 @@ pub const WITHDRAWAL_LIMIT_EXCEEDED_TOPIC: Symbol = symbol_short!("wd_exc");
 pub const WHITELIST_ADDED_TOPIC: Symbol = symbol_short!("wl_add");
 pub const WHITELIST_REMOVED_TOPIC: Symbol = symbol_short!("wl_rem");
 pub const WHITELIST_VIOLATION_TOPIC: Symbol = symbol_short!("wl_vio");
+// Issue #1528: whitelist entry added with an expiry ledger
+pub const WHITELIST_ADDED_EXPIRY_TOPIC: Symbol = symbol_short!("wl_add_ex");
 pub const TOKEN_WHITELIST_VALIDATED_TOPIC: Symbol = symbol_short!("tok_wl");
 pub const TOKEN_CONVERSION_TOPIC: Symbol = symbol_short!("tok_conv");
 pub const TOKEN_STAKING_TOPIC: Symbol = symbol_short!("tok_stk");
@@ -149,6 +156,9 @@ pub const YIELD_REINVESTED_TOPIC: Symbol = symbol_short!("yld_rin");
 // Wrapped token registration for cross-chain compatibility
 pub const WRAPPED_TOKEN_REGISTERED_TOPIC: Symbol = symbol_short!("wrp_reg");
 pub const WRAPPED_TOKEN_UNREGISTERED_TOPIC: Symbol = symbol_short!("wrp_unr");
+// Issue #1836: vault-scoped bridge config and bridge deposit events
+pub const VAULT_BRIDGE_CONFIG_SET_TOPIC: Symbol = symbol_short!("vbr_cfg");
+pub const VAULT_BRIDGE_DEPOSIT_TOPIC: Symbol = symbol_short!("vbr_dep");
 // Issue #568: withdrawal reversal
 pub const WITHDRAWAL_REVERSED_TOPIC: Symbol = symbol_short!("wd_rev");
 // Issue #1134: withdrawal cancellation
@@ -180,12 +190,17 @@ pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
 pub const WITHDRAWAL_APPROVAL_REQUESTED_TOPIC: Symbol = symbol_short!("wd_req");
 pub const WITHDRAWAL_APPROVAL_GRANTED_TOPIC: Symbol = symbol_short!("wd_grant");
 pub const WITHDRAWAL_APPROVAL_DENIED_TOPIC: Symbol = symbol_short!("wd_deny");
+// Issue #1848: WebAuthn credential backup eligibility
+pub const PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC: Symbol = symbol_short!("pk_wbk");
+pub const SET_PASSKEY_BACKUP_ELIGIBLE_TOPIC: Symbol = PASSKEY_WEBAUTHN_BACKUP_SET_TOPIC;
 // Issue #563: passkey recovery
 pub const PASSKEY_RECOVERY_INITIATED_TOPIC: Symbol = symbol_short!("pk_rec");
 pub const PASSKEY_RECOVERED_TOPIC: Symbol = symbol_short!("pk_rcvd");
 // Issue #562: passkey compromise response
 pub const PASSKEY_LOCKOUT_TOPIC: Symbol = symbol_short!("pk_lock");
 pub const PASSKEY_UNLOCKED_TOPIC: Symbol = symbol_short!("pk_unlk");
+// Issue #1847: passkey lockout threshold configuration
+pub const PASSKEY_LOCKOUT_THRESHOLD_SET_TOPIC: Symbol = symbol_short!("pk_lk_th");
 // Issue #561: passkey rotation enforcement
 pub const PASSKEY_ROTATION_REQUIRED_TOPIC: Symbol = symbol_short!("pk_rot_r");
 pub const PASSKEY_ROTATION_ENFORCED_TOPIC: Symbol = symbol_short!("pk_rot_e");
@@ -226,6 +241,7 @@ pub const TOKEN_REBALANCED_TOPIC: Symbol = symbol_short!("tok_rebd");
 
 // Issue #529: beneficiary pooling
 pub const POOL_CREATED_TOPIC: Symbol = symbol_short!("pool_crt");
+pub const POOL_REDIST_TOPIC: Symbol = symbol_short!("pool_rdst");
 
 // Issue #813: admin transfer timelock
 pub const ADMIN_TRANSFER_PROPOSED_TOPIC: Symbol = symbol_short!("adm_prop");
@@ -287,6 +303,31 @@ pub const ARBITRATION_RULED_TOPIC: Symbol = symbol_short!("arb_rul");
 // Issue #497: Beneficiary Notification
 pub const VAULT_NOTIFY_TOPIC: Symbol = symbol_short!("v_notif");
 
+// Issue #1337: beneficiary archival notification opt-in/out
+pub const BENEFICIARY_ARCHIVAL_OPTIN_TOPIC: Symbol = symbol_short!("ben_ao");
+pub const BENEFICIARY_CONTACT_SET_TOPIC: Symbol = symbol_short!("ben_cs");
+
+/// On-chain beneficiary contact record for archival notifications (Issue #1337).
+///
+/// Stores only an opaque, owner-encrypted contact blob — the plaintext is never
+/// readable on-chain.  The vault owner or beneficiary stores a base64-encoded,
+/// symmetrically-encrypted payload (e.g., AES-256-GCM) so that only the
+/// designated off-chain notification service (which holds the decryption key)
+/// can read the contact details.  The `opted_in` flag is stored in cleartext
+/// so the scheduler can honour opt-out requests without decrypting.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryContactInfo {
+    /// Opaque encrypted contact blob (max 512 bytes).
+    /// Plaintext (before encryption) format: `email:<addr>|sms:<phone>`
+    pub encrypted_contact: Bytes,
+    /// Whether this beneficiary has opted in to archival notifications.
+    /// Defaults to `true` on first set.
+    pub opted_in: bool,
+    /// Ledger timestamp when this entry was last updated.
+    pub updated_at: u64,
+}
+
 // Issue #569: Withdrawal Audit Trail
 pub const WITHDRAWAL_AUDIT_TOPIC: Symbol = symbol_short!("wd_audit");
 pub const WITHDRAWAL_FAILED_TOPIC: Symbol = symbol_short!("wd_fail");
@@ -302,6 +343,8 @@ pub const BENEFICIARY_TRIGGER_SET_TOPIC: Symbol = symbol_short!("ben_trg");
 pub const BENEFICIARY_TIER_SET_TOPIC: Symbol = symbol_short!("ben_tier");
 pub const BENEFICIARY_WATERFALL_TOPIC: Symbol = symbol_short!("ben_wfl");
 pub const BENEFICIARY_REBALANCED_TOPIC: Symbol = symbol_short!("ben_reb");
+pub const BEN_COMMITTED_TOPIC: Symbol = symbol_short!("ben_cmt");
+pub const BEN_REVEALED_TOPIC: Symbol = symbol_short!("ben_rev");
 
 // Issue #573: Withdrawal Proof
 pub const WITHDRAWAL_PROOF_TOPIC: Symbol = symbol_short!("wd_prf");
@@ -340,23 +383,6 @@ pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 #[allow(dead_code)]
 pub const RECOVERY_EXTENSION_DURATION: u64 = 2_592_000;
 
-/// Maximum length for vault metadata string
-pub const MAX_METADATA_LEN: u32 = 256;
-
-/// Maximum length for vault name
-pub const MAX_NAME_LEN: u32 = 64;
-
-/// Maximum length for vault description
-pub const MAX_DESCRIPTION_LEN: u32 = 512;
-
-/// Maximum length for vault notes
-pub const MAX_NOTES_LEN: u32 = 1024;
-
-/// Maximum length for custom metadata bytes (2KB) - Issue #378
-pub const MAX_CUSTOM_METADATA_LEN: u32 = 2048;
-/// Maximum length, in bytes, of a vault's release memo (Issue #791).
-pub const MAX_RELEASE_MEMO_LEN: u32 = 256;
-
 #[contracttype(export = false)]
 #[derive(Clone)]
 pub enum StorageKey {
@@ -373,8 +399,8 @@ pub enum StorageKey {
     MaxCheckInInterval,
     Version,
     VestingSchedule(u64, u32),
-    VestingPenalty(u64, u32),
-    VestingPendingClaim(u64, u32),
+    VestingPenalty(u64),
+    VestingPendingClaim(u64),
     VestingScheduleCount(u64),
     MilestoneVestingSchedule(u64),
     CountdownFired(u64),
@@ -388,7 +414,7 @@ pub enum StorageKey {
     BeneficiaryDelegationChain(u64),
     WithdrawalSchedule(u64),
     DisputeStatus(u64),
-    ConditionalAcceptance(u64),
+    BeneficiaryConditionResponse(u64),
     ArchivedVault(u64),
     MaxTtlSeconds,
     TtlDecayRate,
@@ -416,6 +442,8 @@ pub enum StorageKey {
     VaultSnapshotTimestamps(u64),
     // Issue #482: TTL prediction history
     CheckInHistory(u64),
+    // Issue #1767: capped list of recent deposit events for audit queries
+    DepositHistory(u64),
     // Issue #873: individual check-in history entry for paginated access
     CheckInEntry(u64, u32),
     // Issue #873: ring buffer head pointer for check-in history
@@ -447,6 +475,8 @@ pub enum StorageKey {
     BeneficiaryStatusEntry(u64, Address),
     // Issue: beneficiary veto of owner-defined release conditions before expiry
     BeneficiaryReleaseConditionVeto(u64),
+    // Issue #1291: multi-condition release triggers
+    ReleaseConditions(u64),
     // Track whether a vault has already been released once to prevent replayed releases
     ReleaseAttempted(u64),
     // Hibernation: temporary suspension of check-in requirement
@@ -461,8 +491,17 @@ pub enum StorageKey {
     EncryptedBackupCodes(u64),
     // Issue #569: Withdrawal Audit Trail
     WithdrawalAuditLog(u64),
+    // Issue #1293: withdrawal history ring buffer
+    /// Head pointer (0-based) into the per-vault ring buffer.
+    WithdrawalHistoryHead(u64),
+    /// Individual ring buffer slot: (vault_id, slot_index).
+    WithdrawalHistoryEntry(u64, u32),
+    /// Number of withdrawal events ever recorded (saturates at MAX_WITHDRAWAL_HISTORY
+    /// once the buffer is full, then stays there).
+    WithdrawalHistoryLen(u64),
     // Issue #572: Withdrawal Dispute
     WithdrawalDisputes(u64),
+    WithdrawalDisputeAuditIndices(u64),
     // Issue #565: withdrawal scheduling validation
     WithdrawalScheduleValidation(u64),
     // Issue #566: withdrawal limits by time
@@ -490,6 +529,9 @@ pub enum StorageKey {
     // Issue #529: beneficiary pooling
     BeneficiaryPool(u64),
     BeneficiaryPoolAlloc(u64),
+    // Optional privacy layer: hash commitment to beneficiary identity before release.
+    BeneficiaryCommitment(u64),
+    RevealedBeneficiary(u64),
     // Issue #525: beneficiary vesting schedules
     BeneficiaryVestingSchedule(u64, Address),
     BeneficiaryVestingCount(u64),
@@ -497,6 +539,8 @@ pub enum StorageKey {
     BeneficiaryAuction(u64),
     BeneficiaryAuctionBid(u64, Address),
     BeneficiaryAuctionCount,
+    // Issue #1806: minimum winning bid required to finalize a beneficiary auction
+    BeneficiaryAuctionReserve(u64),
     // Issue #809: two-step protocol configuration
     PendingProtocolConfig,
     ProtocolConfigProposedAt,
@@ -521,13 +565,69 @@ pub enum StorageKey {
     VaultLocked(u64),
     // Issue 3: per-vault configurable low-TTL warning threshold (seconds)
     VaultLowTtlThreshold(u64),
+    // Issue #1337: beneficiary archival notification contact info
+    BeneficiaryContactInfo(u64, Address),
+    // Issue #1283: on-chain secp256r1 public key for passkey signature verification.
+    // Key: (vault_id, passkey_hash) → SEC-1 uncompressed 65-byte public key.
+    PasskeyPublicKey(u64, BytesN<32>),
+    // Issue #1288: multi-beneficiary splits and previously-missing storage keys
+    AcceptanceConditions(u64),
+    ConditionalAcceptance(u64),
+    AdminTransferProposedAt,
+    BeneficiaryClaimDelegation(u64),
+    BeneficiaryConflict(u64),
+    // Issue #1297: automated conflict resolution
+    /// Duration in seconds of the dispute window before auto-resolution.
+    ConflictDisputeWindow(u64),
+    /// Owner-designated priority beneficiary address for conflict tie-breaking.
+    ConflictPriorityBeneficiary(u64),
+    /// Marks a beneficiary of a vault as identity-verified by the vault's identity oracle.
+    BeneficiaryIdentityVerified(u64, Address),
+    BeneficiaryVaultLimit,
+    CompromisedPasskeys(u64),
+    CountdownConfig(u64),
+    LastPasskeyRotation(u64, BytesN<32>),
+    // Ledger timestamp of the most recent `rotate_passkey` call for a vault.
+    LastVaultPasskeyRotation(u64),
+    Lending(u64),
+    PasskeyLockout(u64),
+    PasskeyRecoveryRequest(u64),
+    PasskeyRotationPolicy(u64),
+    PauseRecord,
+    RecoveryCodeHash(u64),
+    RecoveryContacts(u64),
+    ReleaseSchedule(u64),
+    VestingAcceleration(u64),
+    VestingForfeiture(u64),
+    VestingMilestoneCount(u64),
+    VestingMilestones(u64),
+    VestingRollover(u64),
+    VestingStagger(u64),
+    WithdrawalApprovalRequest(u64),
+    WithdrawalApprovers(u64),
+    WithdrawalEscrow(u64),
+    WithdrawalProof(u64, u64),
+    WithdrawalRateLimit(u64),
+    WithdrawalRollback(u64),
+    MaxHibernationDuration(u64),
+    // Issue #1836: vault-scoped bridge configuration for cross-chain deposits
+    VaultBridgeConfig(u64),
 }
-
 
 /// Check-in history entry for TTL prediction - Issue #482
 #[contracttype]
 #[derive(Clone)]
 pub struct CheckInHistoryEntry {
+    pub timestamp: u64,
+}
+
+/// Deposit history entry for audit queries - Issue #1767
+#[contracttype]
+#[derive(Clone)]
+pub struct DepositHistoryEntry {
+    pub depositor: Address,
+    pub amount: i128,
+    pub new_balance: i128,
     pub timestamp: u64,
 }
 
@@ -637,6 +737,11 @@ pub enum ReleaseStatus {
     Released,
     Cancelled,
     EmergencyFrozen,
+    /// Issue #1281: a release was initiated (conditions passed, release
+    /// attempted) but the token transfer to the beneficiary/beneficiaries
+    /// failed, leaving the vault's funds in the contract rather than either
+    /// still-Locked or fully Released.
+    Failed,
 }
 
 #[contracttype]
@@ -668,6 +773,34 @@ pub struct BeneficiaryEntry {
     pub bps: u32,
     /// Minimum amount in stroops. If calculated share < minimum_threshold, beneficiary gets 0.
     pub minimum_threshold: i128,
+}
+
+/// A percentage-based beneficiary split for use with `create_vault_with_splits`.
+///
+/// Each entry specifies an address and an integer percentage (0–100). The
+/// percentages across all entries in a splits list must sum to exactly 100.
+/// Internally the percentage is converted to basis points (BPS) by multiplying
+/// by 100 before being stored in `BeneficiaryEntry.bps`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeneficiarySplit {
+    /// The beneficiary's Stellar address.
+    pub address: Address,
+    /// Whole-number percentage share (1–100). Must be ≥ 1 and the sum of all
+    /// entries must equal exactly 100.
+    pub percentage: u32,
+}
+
+/// Privacy-preserving commitment for a vault beneficiary.
+/// The plain beneficiary address remains available in `Vault.beneficiary` for
+/// compatibility and public indexing, while the commitment stores a hash that
+/// keeps the identity hidden until release time. The hash is computed as
+/// `sha256(raw_beneficiary_address_bytes)` and revealed with `reveal_beneficiary`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeneficiaryCommitment {
+    pub commitment: BytesN<32>,
+    pub committed_at: u64,
 }
 
 /// Bridge configuration for cross-chain support.
@@ -732,6 +865,8 @@ pub struct PasskeyHash {
     pub deprecated_at: Option<u64>,
     pub usage_count: u64,
     pub last_used_timestamp: u64,
+    /// Whether this passkey is eligible for WebAuthn credential backup — Issue #1848
+    pub webauthn_backup_eligible: bool,
 }
 
 /// Backup code entry - Issue #393
@@ -759,6 +894,20 @@ pub struct WithdrawalRequest {
     pub amount: i128,
     pub requested_at: u64,
     pub approved: bool,
+}
+
+/// Batch withdrawal instruction - Issue #1292
+///
+/// Describes a single pending withdrawal to be executed as part of a batched
+/// `batch_withdraw` call. By grouping several instructions into a single
+/// transaction an owner can settle multiple withdrawals while paying network
+/// fees only once.
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchWithdrawal {
+    pub vault_id: u64,
+    pub destination: Address,
+    pub amount: i128,
 }
 
 /// Deposit proof - Issue #405
@@ -849,6 +998,16 @@ pub struct VaultStatusSummary {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct VaultHealthSummary {
+    pub last_check_in: Option<u64>,
+    pub ttl_remaining: Option<u64>,
+    pub balance: i128,
+    pub is_paused: bool,
+    pub check_in_streak: CheckInStreak,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct Vault {
     pub owner: Address,
     /// Primary beneficiary kept for backwards-compatible single-beneficiary reads.
@@ -858,6 +1017,7 @@ pub struct Vault {
     pub check_in_interval: u64, // seconds
     pub last_check_in: u64,     // ledger timestamp
     pub created_at: u64,        // vault creation timestamp
+    pub creation_ledger: u64,   // ledger sequence number at vault creation
     pub status: ReleaseStatus,
     /// Multi-beneficiary split. Empty means use `beneficiary` (100%).
     pub beneficiaries: Vec<BeneficiaryEntry>,
@@ -888,7 +1048,7 @@ pub struct Vault {
     /// Address that receives inactivity penalty transfers
     pub penalty_recipient: Option<Address>,
     /// Passkey rotation grace period in seconds - Issue #936
-    pub passkey_rotation_period_seconds: u64,
+    pub passkey_rotation_period: u64,
     /// Challenge-response timeout window in seconds - Issue #938
     pub challenge_timeout_seconds: u64,
     /// Multi-sig passkey threshold for withdrawals - Issue #939
@@ -897,6 +1057,24 @@ pub struct Vault {
     pub multisig_required_ops: Vec<MultiSigOperation>,
     /// Whether adaptive interval adjustment is enabled for this vault - Issue #2
     pub adaptive_interval_enabled: bool,
+    /// Composite check-in reliability score scaled to 10000 (100%) - check-in scoring
+    pub check_in_score: u32,
+    /// Total number of check-ins recorded for the vault
+    pub total_check_ins: u32,
+    /// Number of check-ins performed on time (within the check-in interval)
+    pub on_time_check_ins: u32,
+    /// Minimum balance guard to prevent vault drainage - Issue #1088
+    pub min_balance_guard: Option<i128>,
+    /// Recurring withdrawal configuration - Issue #1086
+    pub recurring_withdrawal: Option<RecurringWithdrawal>,
+    /// Withdrawal rate limit per time window - Issue #1084
+    pub withdrawal_limit_per_window: Option<i128>,
+    /// Time window for withdrawal rate limiting in seconds - Issue #1084
+    pub withdrawal_window_seconds: u64,
+    /// Amount withdrawn in current window - Issue #1084
+    pub withdrawn_in_window: i128,
+    /// Start time of current withdrawal window - Issue #1084
+    pub window_start: u64,
 }
 
 /// Passkey usage entry for tracking check-ins - Issue #395
@@ -914,15 +1092,8 @@ pub struct PasskeyAnalytics {
     pub passkey_hash: BytesN<32>,
     pub usage_count: u64,
     pub last_used_timestamp: u64,
-}
-
-/// Archived vault metadata - Issue #1123
-/// Stores information about archived vaults in cheaper persistent storage
-#[contracttype]
-#[derive(Clone)]
-pub struct ArchivedVaultInfo {
-    pub vault: Vault,
-    pub archived_at: u64,  // Ledger timestamp when archived
+    /// Whether this passkey is eligible for WebAuthn credential backup — Issue #1848
+    pub webauthn_backup_eligible: bool,
 }
 
 /// Beneficiary status enum - Issue #397
@@ -999,12 +1170,25 @@ pub struct ConditionalAcceptanceEntry {
     pub min_balance_threshold: Option<i128>,
 }
 
-/// Beneficiary conditional acceptance with threshold - Issue #503
+/// Discriminant for beneficiary condition response type.
 #[contracttype]
 #[derive(Clone)]
-pub struct BeneficiaryConditionalAcceptance {
-    pub min_balance_threshold: i128,
-    pub accepted_at: u64,
+pub enum BeneficiaryConditionResponseType {
+    Accept,
+    Decline,
+}
+
+/// Unified beneficiary conditional response with threshold - Issue #1849.
+/// Combines the former `BeneficiaryConditionalAcceptance` and
+/// `BeneficiaryConditionalDecline` into a single type with a
+/// `response: Accept | Decline` discriminant.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryConditionResponse {
+    pub response: BeneficiaryConditionResponseType,
+    pub threshold: i128,
+    pub timestamp: u64,
+    pub reason: Option<String>,
 }
 
 /// Beneficiary delegation of claim rights to a trusted proxy address - Issue #944
@@ -1035,14 +1219,14 @@ pub struct BeneficiaryConflictClaim {
 
 /// Beneficiary conflict resolution - Issue #502
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ConflictResolution {
     Pending,
     Approved(Address),
     Rejected,
 }
 
-/// Beneficiary conflict entry - Issue #502
+/// Beneficiary conflict entry - Issue #502, #1297
 #[contracttype]
 #[derive(Clone)]
 pub struct BeneficiaryConflict {
@@ -1050,6 +1234,12 @@ pub struct BeneficiaryConflict {
     pub claims: Vec<BeneficiaryConflictClaim>,
     pub resolution: ConflictResolution,
     pub resolved_at: Option<u64>,
+    /// Unix timestamp after which auto-resolution may be triggered.
+    /// Set to `filed_at + dispute_window_seconds` when the first claim is filed.
+    pub dispute_window_ends_at: Option<u64>,
+    /// Owner-designated priority beneficiary. When set, this address wins over
+    /// first-registered claim order during auto-resolution.
+    pub priority_beneficiary: Option<Address>,
 }
 
 /// Activity log entry for forensic audit trail
@@ -1128,6 +1318,35 @@ pub struct WithdrawalAuditEntry {
     pub error_reason: String,
 }
 
+/// On-chain withdrawal event record stored in the ring buffer - Issue #1293
+///
+/// This is the canonical representation emitted and stored for every
+/// withdrawal attempt, whether the attempt succeeded or failed.  Fields are
+/// intentionally a superset of `WithdrawalAuditEntry` so that callers of
+/// `get_withdrawal_history` receive richer context without having to
+/// cross-reference the legacy audit log.
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawalEvent {
+    /// Vault that was the target of the withdrawal attempt.
+    pub vault_id: u64,
+    /// Address that initiated the withdrawal (may differ from the vault owner
+    /// in multi-sig or delegated-withdrawal flows).
+    pub caller: Address,
+    /// Requested withdrawal amount in stroops.  Negative values are rejected
+    /// before reaching this point, but the raw value is stored for auditability.
+    pub amount: i128,
+    /// Ledger timestamp (Unix seconds) at which the attempt was recorded.
+    pub timestamp: u64,
+    /// `true` if the withdrawal completed successfully, `false` otherwise.
+    pub success: bool,
+    /// Human-readable failure reason.  Empty string for successful withdrawals.
+    pub error_reason: String,
+    /// Sequential index within this vault's ring buffer (wraps at
+    /// `MAX_WITHDRAWAL_HISTORY`).  Useful for pagination and de-duplication.
+    pub sequence: u32,
+}
+
 /// Withdrawal dispute entry - Issue #572
 #[contracttype]
 #[derive(Clone)]
@@ -1199,20 +1418,7 @@ pub enum ProposalStatus {
     Executed,
     Expired,
     Vetoed,
-}
-
-/// Pending multi-sig operation with nonce and signature collection - Issue #1117
-#[contracttype]
-#[derive(Clone)]
-pub struct PendingMultiSigOp {
-    pub vault_id: u64,
-    pub nonce: u64,
-    pub operation: MultiSigOperation,
-    pub payload: Bytes,
-    pub address_payload: Option<Address>,
-    pub signers: Vec<Address>,
-    pub created_at: u64,
-    pub expires_at: u64,
+    Cancelled,
 }
 
 /// State transition record for vault status changes - Issue #472
@@ -1233,7 +1439,7 @@ pub struct PendingMultiSigOp {
     pub nonce: u64,
     pub vault_id: u64,
     pub operation: MultiSigOperation,
-    pub signers: Vec<Address>,  // Addresses that have signed
+    pub signers: Vec<Address>, // Addresses that have signed
     pub payload: Bytes,
     pub address_payload: Option<Address>,
     pub created_at: u64,
@@ -1259,17 +1465,6 @@ pub struct IntegrityReport {
     pub checksum: BytesN<32>,
     pub is_valid: bool,
     pub timestamp: u64,
-}
-
-/// Vault status summary for batch queries - Issue #475
-#[contracttype]
-#[derive(Clone)]
-pub struct VaultStatusSummary {
-    pub vault_id: u64,
-    pub status: ReleaseStatus,
-    pub balance: i128,
-    pub last_check_in: u64,
-    pub is_expired: bool,
 }
 
 /// A shared TTL pool that multiple vaults can join.
@@ -1304,6 +1499,8 @@ pub struct HibernationEntry {
     pub started_at: u64,
     /// How many seconds the hibernation lasts.
     pub duration_seconds: u64,
+    /// TTL remaining when hibernation started, restored when it ends.
+    pub remaining_ttl_at_entry: u64,
 }
 
 #[contracttype]
@@ -1387,6 +1584,9 @@ pub struct WhitelistEntry {
     pub address: Address,
     pub added_at: u64,
     pub label: String,
+    /// Ledger sequence after which this entry is no longer valid - Issue #1528.
+    /// `0` means the entry never expires.
+    pub expires_at_ledger: u32,
 }
 
 /// Withdrawal reversal entry - Issue #568
@@ -1422,22 +1622,6 @@ pub struct VestingBonusConfig {
     pub bonus_bps: u32,
     /// Seconds after an installment unlocks within which a claim is considered "on time".
     pub on_time_window_seconds: u64,
-}
-
-/// Token lending record - Issue #585.
-/// Tracks a loan of vault tokens lent out for interest income.
-#[contracttype]
-#[derive(Clone)]
-pub struct TokenLending {
-    pub vault_id: u64,
-    pub borrower: Address,
-    pub amount: i128,
-    /// Annual interest rate in basis points (e.g., 500 = 5%).
-    pub interest_rate_bps: u32,
-    pub lent_at: u64,
-    pub due_at: u64,
-    pub repaid: bool,
-    pub interest_earned: i128,
 }
 
 /// Token collateral configuration - Issue #586.
@@ -1500,6 +1684,10 @@ pub struct BeneficiaryPool {
     pub pool_id: u64,
     pub members: Vec<Address>,
     pub total_bps: u32,
+    /// Unix timestamp after which unclaimed shares are redistributed (0 = no deadline).
+    pub claim_deadline: u64,
+    /// Members that have claimed their share before the deadline.
+    pub claimed: Vec<Address>,
 }
 
 /// Beneficiary-specific vesting schedule - Issue #525.
@@ -1572,7 +1760,7 @@ pub const PROTOCOL_CONFIG_PROPOSED_TOPIC: Symbol = symbol_short!("pc_prop");
 pub const PROTOCOL_CONFIG_APPLIED_TOPIC: Symbol = symbol_short!("pc_apply");
 
 /// Issue #1117: Pending multi-sig operation topics
-pub const PENDING_MULTISIG_OP_CREATED_TOPIC: Symbol = symbol_short!("pm_created");
+pub const PENDING_MULTISIG_OP_CREATED_TOPIC: Symbol = symbol_short!("pm_crtd");
 pub const PENDING_MULTISIG_OP_COSIGNED_TOPIC: Symbol = symbol_short!("pm_cosign");
 pub const PENDING_MULTISIG_OP_EXECUTED_TOPIC: Symbol = symbol_short!("pm_exec");
 pub const PENDING_MULTISIG_OP_EXPIRED_TOPIC: Symbol = symbol_short!("pm_exp");
@@ -1602,144 +1790,6 @@ pub struct VaultSnapshot {
     pub timestamp: u64,
     pub content_hash: BytesN<32>,
 }
-
-
-// All remaining event topic constants
-pub const BENEFICIARY_CAP_TOPIC: Symbol = symbol_short!("ben_cap");
-pub const BENEFICIARY_CONDITION_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_cond_acc");
-pub const BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC: Symbol = symbol_short!("ben_id_ora");
-pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vrf");
-pub const BENEFICIARY_REBALANCED_TOPIC: Symbol = symbol_short!("ben_reb");
-pub const BENEFICIARY_TIER_SET_TOPIC: Symbol = symbol_short!("ben_tier");
-pub const BENEFICIARY_TRIGGER_SET_TOPIC: Symbol = symbol_short!("ben_trig");
-pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acc");
-pub const BENEFICIARY_DECLINED_TOPIC: Symbol = symbol_short!("ben_dec");
-pub const BENEFICIARY_UPDATED_TOPIC: Symbol = symbol_short!("ben_upd");
-pub const BENEFICIARY_WATERFALL_TOPIC: Symbol = symbol_short!("ben_wtr");
-pub const BEN_ROTATION_TOPIC: Symbol = symbol_short!("ben_rot");
-pub const CHECKIN_GEO_TOPIC: Symbol = symbol_short!("chk_geo");
-pub const CHECKIN_POW_TOPIC: Symbol = symbol_short!("chk_pow");
-pub const CHECKIN_RATE_LIMITED_TOPIC: Symbol = symbol_short!("chk_ratelim");
-pub const BATCH_CHECKIN_TOPIC: Symbol = symbol_short!("batch_chk");
-pub const BATCH_STATUS_TOPIC: Symbol = symbol_short!("batch_st");
-pub const CLAIM_VEST_TOPIC: Symbol = symbol_short!("clm_vst");
-pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("cliff_rch");
-pub const CONDITIONS_ACCEPTED_TOPIC: Symbol = symbol_short!("cond_acc");
-pub const CONFLICT_EXPIRED_TOPIC: Symbol = symbol_short!("conf_exp");
-pub const DELEGATE_BENEFICIARY_TOPIC: Symbol = symbol_short!("del_ben");
-pub const DELEGATE_CHECKIN_TOPIC: Symbol = symbol_short!("del_chk");
-pub const DISPUTE_FILED_TOPIC: Symbol = symbol_short!("disp_fil");
-pub const DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("disp_res");
-pub const DUPLICATE_VAULT_TOPIC: Symbol = symbol_short!("dup_vlt");
-pub const HIBERNATION_ENTERED_TOPIC: Symbol = symbol_short!("hiber_ent");
-pub const HIBERNATION_EXITED_TOPIC: Symbol = symbol_short!("hiber_exit");
-pub const INACTIVITY_PENALTY_TOPIC: Symbol = symbol_short!("inact_pen");
-pub const INHERITANCE_TOPIC: Symbol = symbol_short!("inhert");
-pub const INTEGRITY_TOPIC: Symbol = symbol_short!("intgr");
-pub const META_REVERT_TOPIC: Symbol = symbol_short!("meta_rev");
-pub const META_VERSION_TOPIC: Symbol = symbol_short!("meta_ver");
-pub const MIN_THRESHOLD_REDISTRIBUTE_TOPIC: Symbol = symbol_short!("min_thres_red");
-pub const MIN_THRESHOLD_SET_TOPIC: Symbol = symbol_short!("min_thres_set");
-pub const MIN_THRESHOLD_SKIP_TOPIC: Symbol = symbol_short!("min_thres_skip");
-pub const OWNERSHIP_ACCEPTED_TOPIC: Symbol = symbol_short!("own_acc");
-pub const OWNERSHIP_CANCELLED_TOPIC: Symbol = symbol_short!("own_canc");
-pub const OWNERSHIP_INITIATED_TOPIC: Symbol = symbol_short!("own_init");
-pub const OWNERSHIP_PROOF_TOPIC: Symbol = symbol_short!("own_proof");
-pub const OWNERSHIP_TRANSFER_EXPIRED_TOPIC: Symbol = symbol_short!("own_exp");
-pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_ana");
-pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_ext");
-pub const PASSKEY_LOCKOUT_TOPIC: Symbol = symbol_short!("pk_lock");
-pub const PASSKEY_RECOVERED_TOPIC: Symbol = symbol_short!("pk_rec");
-pub const PASSKEY_RECOVERY_INITIATED_TOPIC: Symbol = symbol_short!("pk_rec_init");
-pub const PASSKEY_ROTATION_ENFORCED_TOPIC: Symbol = symbol_short!("pk_rot_enf");
-pub const PASSKEY_ROTATION_REQUIRED_TOPIC: Symbol = symbol_short!("pk_rot_req");
-pub const PASSKEY_UNLOCKED_TOPIC: Symbol = symbol_short!("pk_unlock");
-pub const PASSKEY_USAGE_TOPIC: Symbol = symbol_short!("pk_usage");
-pub const PASSKEY_EXPIRED_TOPIC: Symbol = symbol_short!("pk_exp");
-pub const PASSKEY_COMPROMISED_TOPIC: Symbol = symbol_short!("pk_comp");
-pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("pause_vlt");
-pub const POOL_CREATED_TOPIC: Symbol = symbol_short!("pool_crt");
-pub const PROOF_OF_LIFE_TOPIC: Symbol = symbol_short!("pol");
-pub const RECOVERY_EXTEND_TOPIC: Symbol = symbol_short!("rec_ext");
-pub const RELEASE_VOTE_PASSED_TOPIC: Symbol = symbol_short!("rel_vote_pass");
-pub const RELEASE_VOTE_TOPIC: Symbol = symbol_short!("rel_vote");
-pub const REMOVE_PASSKEY_TOPIC: Symbol = symbol_short!("rm_pk");
-pub const RESTORE_VAULT_TOPIC: Symbol = symbol_short!("rest_vlt");
-pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("res_vlt");
-pub const REVERSAL_GRACE_EXPIRED_TOPIC: Symbol = symbol_short!("rev_grace_exp");
-pub const REVOKE_DELEGATE_TOPIC: Symbol = symbol_short!("rev_del");
-pub const ROTATE_PASSKEY_TOPIC: Symbol = symbol_short!("rot_pk");
-pub const SET_BENEFICIARIES_TOPIC: Symbol = symbol_short!("set_ben");
-pub const SET_DECAY_RATE_TOPIC: Symbol = symbol_short!("set_decay");
-pub const SET_MAX_INTERVAL_TOPIC: Symbol = symbol_short!("set_max_int");
-pub const SET_MAX_TTL_TOPIC: Symbol = symbol_short!("set_max_ttl");
-pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
-pub const SET_MIN_INTERVAL_TOPIC: Symbol = symbol_short!("set_min_int");
-pub const SET_RECOVERY_TOPIC: Symbol = symbol_short!("set_rec");
-pub const SET_SPENDING_LIMIT_TOPIC: Symbol = symbol_short!("set_spend");
-pub const SET_VESTING_TOPIC: Symbol = symbol_short!("set_vest");
-pub const STATE_TRANSITION_TOPIC: Symbol = symbol_short!("state_trans");
-pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
-pub const TOKEN_COLLATERAL_TOPIC: Symbol = symbol_short!("tok_col");
-pub const TOKEN_COLLAT_RLSD_TOPIC: Symbol = symbol_short!("tok_col_rls");
-pub const TOKEN_CONVERSION_TOPIC: Symbol = symbol_short!("tok_conv");
-pub const TOKEN_HEDGE_CLOSE_TOPIC: Symbol = symbol_short!("tok_hedge_close");
-pub const TOKEN_HEDGE_TOPIC: Symbol = symbol_short!("tok_hedge");
-pub const TOKEN_LENDING_TOPIC: Symbol = symbol_short!("tok_lend");
-pub const TOKEN_LEND_REPAY_TOPIC: Symbol = symbol_short!("tok_lend_rep");
-pub const TOKEN_REBALANCED_TOPIC: Symbol = symbol_short!("tok_rebal");
-pub const TOKEN_REBALANCE_TOPIC: Symbol = symbol_short!("tok_rebal_cfg");
-pub const TOKEN_STAKING_TOPIC: Symbol = symbol_short!("tok_stake");
-pub const TOKEN_UNSTAKING_TOPIC: Symbol = symbol_short!("tok_unstake");
-pub const TOKEN_WHITELIST_VALIDATED_TOPIC: Symbol = symbol_short!("tok_wl_val");
-pub const TTL_ACCELERATE_TOPIC: Symbol = symbol_short!("ttl_accel");
-pub const TTL_BORROW_TOPIC: Symbol = symbol_short!("ttl_borrow");
-pub const TTL_DECAY_TOPIC: Symbol = symbol_short!("ttl_decay");
-pub const TTL_PREDICTED_TOPIC: Symbol = symbol_short!("ttl_pred");
-pub const TTL_REPAY_TOPIC: Symbol = symbol_short!("ttl_repay");
-pub const UNPAUSE_TOPIC: Symbol = symbol_short!("unpause");
-pub const UPDATE_INTERVAL_TOPIC: Symbol = symbol_short!("upd_int");
-pub const UPDATE_METADATA_TOPIC: Symbol = symbol_short!("upd_meta");
-pub const VAULT_ARCHIVED_TOPIC: Symbol = symbol_short!("vlt_arch");
-pub const VAULT_CAP_TOPIC: Symbol = symbol_short!("vlt_cap");
-pub const VAULT_CLONED_OVERRIDE_TOPIC: Symbol = symbol_short!("vlt_clone_ovr");
-pub const VAULT_CLONED_TOPIC: Symbol = symbol_short!("vlt_clone");
-pub const VAULT_MERGED_TOPIC: Symbol = symbol_short!("vlt_mrg");
-pub const VESTING_BONUS_CLAIMED_TOPIC: Symbol = symbol_short!("vest_bon_clm");
-pub const VESTING_BONUS_SET_TOPIC: Symbol = symbol_short!("vest_bon_set");
-pub const VESTING_CANCELLED_TOPIC: Symbol = symbol_short!("vest_canc");
-pub const VESTING_CATCHUP_CLAIMED_TOPIC: Symbol = symbol_short!("vest_catch_clm");
-pub const VESTING_CATCHUP_SET_TOPIC: Symbol = symbol_short!("vest_catch_set");
-pub const WHITELIST_ADDED_TOPIC: Symbol = symbol_short!("wl_add");
-pub const WHITELIST_REMOVED_TOPIC: Symbol = symbol_short!("wl_rem");
-pub const WHITELIST_VIOLATION_TOPIC: Symbol = symbol_short!("wl_vio");
-pub const WITHDRAWAL_APPROVAL_DENIED_TOPIC: Symbol = symbol_short!("wd_app_den");
-pub const WITHDRAWAL_APPROVAL_GRANTED_TOPIC: Symbol = symbol_short!("wd_app_grn");
-pub const WITHDRAWAL_APPROVAL_REQUESTED_TOPIC: Symbol = symbol_short!("wd_app_req");
-pub const WITHDRAWAL_AUDIT_TOPIC: Symbol = symbol_short!("wd_audit");
-pub const WITHDRAWAL_DISPUTE_FILED_TOPIC: Symbol = symbol_short!("wd_disp_fil");
-pub const WITHDRAWAL_DISPUTE_RESOLVED_TOPIC: Symbol = symbol_short!("wd_disp_res");
-pub const WITHDRAWAL_EXECUTED_TOPIC: Symbol = symbol_short!("wd_exec");
-pub const WITHDRAWAL_FAILED_TOPIC: Symbol = symbol_short!("wd_fail");
-pub const WITHDRAWAL_LIMIT_EXCEEDED_TOPIC: Symbol = symbol_short!("wd_lim_exc");
-pub const WITHDRAWAL_LIMIT_SET_TOPIC: Symbol = symbol_short!("wd_lim_set");
-pub const WITHDRAWAL_NOTIF_TOPIC: Symbol = symbol_short!("wd_notif");
-pub const WITHDRAWAL_REVERSED_TOPIC: Symbol = symbol_short!("wd_rev");
-pub const WITHDRAWAL_SCHEDULED_TOPIC: Symbol = symbol_short!("wd_sched");
-pub const WITHDRAWAL_VALIDATION_TOPIC: Symbol = symbol_short!("wd_valid");
-pub const WRAPPED_TOKEN_REGISTERED_TOPIC: Symbol = symbol_short!("wrap_reg");
-pub const WRAPPED_TOKEN_UNREGISTERED_TOPIC: Symbol = symbol_short!("wrap_unreg");
-pub const YIELD_DISTRIBUTED_TOPIC: Symbol = symbol_short!("yield_dist");
-pub const YIELD_REINVESTED_TOPIC: Symbol = symbol_short!("yield_rein");
-pub const FREEZE_VAULT_TOPIC: Symbol = symbol_short!("freeze_vlt");
-pub const UNFREEZE_VAULT_TOPIC: Symbol = symbol_short!("unfreeze_vlt");
-pub const ADMIN_TRANSFER_PROPOSED_TOPIC: Symbol = symbol_short!("admin_prop");
-pub const ADMIN_TRANSFER_COMPLETED_TOPIC: Symbol = symbol_short!("admin_comp");
-pub const BACKUP_CODES_GENERATED_TOPIC: Symbol = symbol_short!("bkp_gen");
-pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bkp_enc");
-pub const BACKUP_CODE_USED_TOPIC: Symbol = symbol_short!("bkp_used");
-pub const ACCEPTANCE_DEADLINE_EXPIRED_TOPIC: Symbol = symbol_short!("acc_exp");
-pub const ADD_PASSKEY_TOPIC: Symbol = symbol_short!("add_pk");
 
 // ============================================================
 // Issue #951: Graduated Release Schedule
@@ -1778,3 +1828,196 @@ pub struct ReleaseSchedule {
 // Issue #951: topic constants for release schedule events
 pub const SET_RELEASE_SCHEDULE_TOPIC: Symbol = symbol_short!("rl_sched");
 pub const TRANCHE_CLAIMED_TOPIC: Symbol = symbol_short!("tr_claim");
+
+// Issue #1338: vault export/import for disaster recovery
+pub const VAULT_EXPORTED_TOPIC: Symbol = symbol_short!("v_export");
+pub const VAULT_IMPORTED_TOPIC: Symbol = symbol_short!("v_import");
+
+/// Exported vault configuration for disaster recovery (Issue #1338).
+///
+/// This struct captures all configuration needed to reconstruct a vault
+/// if its on-chain state is lost due to TTL expiry/archival. It does NOT
+/// include the balance (funds must be re-deposited) or runtime state
+/// (last_check_in, creation_ledger, status) — those are reset on import.
+///
+/// The `exported_at` timestamp and `original_vault_id` serve as a
+/// content-fingerprint so importers can verify they are re-creating the
+/// right vault and detect stale / tampered exports.
+#[contracttype]
+#[derive(Clone)]
+pub struct VaultExportConfig {
+    /// ID of the vault this config was exported from.
+    pub original_vault_id: u64,
+    /// Vault owner address.
+    pub owner: Address,
+    /// Primary beneficiary address.
+    pub beneficiary: Address,
+    /// Check-in interval in seconds.
+    pub check_in_interval: u64,
+    /// Token contract address used by the vault.
+    pub token_address: Address,
+    /// Multi-beneficiary split (empty = 100% to `beneficiary`).
+    pub beneficiaries: Vec<BeneficiaryEntry>,
+    /// Optional short metadata / IPFS label.
+    pub metadata: String,
+    /// Optional custom metadata bytes (max 2 KB).
+    pub custom_metadata: Bytes,
+    /// Optional spending limit per trigger_release call (stroops).
+    pub spending_limit: Option<i128>,
+    /// Optional maximum deposit amount (stroops).
+    pub max_deposit_amount: Option<i128>,
+    /// Release condition (TTLExpiry, OwnerInitiated, or Oracle).
+    pub release_condition: ReleaseCondition,
+    /// Ledger timestamp when this config was exported.
+    pub exported_at: u64,
+}
+
+/// Structured event emitted by `create_vault` on successful vault creation.
+/// Issue #1325: allows off-chain indexers to detect new vaults without polling.
+#[contracttype]
+#[derive(Clone)]
+pub struct VaultCreatedEvent {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub beneficiary: Address,
+    pub check_in_interval: u64,
+}
+
+/// Structured event emitted by `check_in` on successful TTL extension.
+/// Issue #1323: allows off-chain listeners (reminders, dashboards) to detect check-ins
+/// without polling vault state.
+#[contracttype]
+#[derive(Clone)]
+pub struct CheckInEvent {
+    pub vault_id: u64,
+    /// The new expiry timestamp after the check-in (last_check_in + check_in_interval).
+    pub new_ttl: u64,
+    pub caller: Address,
+}
+
+/// Structured event emitted by `update_beneficiary` when a beneficiary change is initiated.
+/// Issue #1326: allows off-chain systems to audit beneficiary changes.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryUpdatedEvent {
+    pub vault_id: u64,
+    pub old_beneficiary: Address,
+    pub new_beneficiary: Address,
+}
+
+/// Lockout state recorded when a vault is temporarily locked after repeated failed
+/// passkey attempts (Issue #562).
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyLockout {
+    pub locked_at: u64,
+    pub unlock_at: u64,
+    pub failed_attempts: u32,
+    /// Configurable threshold of failed attempts that triggers lockout - Issue #1847
+    pub threshold: u32,
+}
+
+/// Pending passkey recovery request initiated via approved contacts (Issue #563).
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyRecoveryRequest {
+    pub new_passkey_hash: BytesN<32>,
+    pub initiated_at: u64,
+    pub recovery_code: String,
+    pub approved_contacts: Vec<Address>,
+    pub required_contacts: u32,
+}
+
+/// Policy enforcing periodic passkey rotation (Issue #561).
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyRotationPolicy {
+    pub rotation_period_days: u32,
+    pub enforce: bool,
+}
+
+/// Record stored when the contract is paused, tracking who paused it and why
+/// (Issue #820).
+#[contracttype]
+#[derive(Clone)]
+pub struct PauseRecord {
+    pub paused_by: Address,
+    pub reason: Bytes,
+    pub paused_at: u64,
+}
+
+/// An individual vesting milestone with a human-readable description and a
+/// designated attestor (Issue #827).
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingMilestone {
+    pub milestone_id: u64,
+    pub description: String,
+    pub attestor: Address,
+    pub unlocked: bool,
+}
+
+/// Configuration enabling oracle-accelerated vesting (Issue #855).
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingAccelerationConfig {
+    pub oracle: Address,
+    pub accelerated: bool,
+}
+
+/// Configuration for vesting forfeiture to a designated recipient (Issue #856).
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingForfeitureConfig {
+    pub forfeiture_recipient: Address,
+    pub forfeited: bool,
+}
+
+/// Configuration allowing unclaimed installments to roll over (Issue #857).
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingRolloverConfig {
+    pub enabled: bool,
+    pub rolled_amount: i128,
+}
+
+/// A staggered vesting entry for one beneficiary (Issue #544).
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingStaggerEntry {
+    pub beneficiary: Address,
+    pub bps: u32,
+    pub start_time: u64,
+    pub interval: u64,
+    pub num_installments: u32,
+    pub claimed_installments: u32,
+}
+
+/// A withdrawal requiring approval from multiple parties before execution.
+#[contracttype]
+#[derive(Clone)]
+pub struct WithdrawalApprovalRequest {
+    pub amount: i128,
+    pub requested_at: u64,
+    pub approvals: Vec<Address>,
+    pub required_approvals: u32,
+    pub expires_at: u64,
+}
+
+/// Timelock delay (seconds) applied to admin ownership transfers.
+pub const ADMIN_TRANSFER_TIMELOCK: u64 = 172_800;
+
+/// Expiry (seconds) for pending multi-signature operations once created.
+pub const PENDING_MULTISIG_OP_EXPIRY: u64 = 604_800;
+
+/// Timelock delay (seconds) before a proposed protocol config takes effect.
+pub const PROTOCOL_CONFIG_TIMELOCK: u64 = 172_800;
+
+/// Versioned milestone topic labels.
+pub const MILESTONE_ADDED_TOPIC: Symbol = symbol_short!("ms_add");
+pub const MILESTONE_ATTESTED_TOPIC: Symbol = symbol_short!("ms_attest");
+pub const LOAN_ENABLED_TOPIC: Symbol = symbol_short!("loan_en");
+pub const LOAN_REPAID_TOPIC: Symbol = symbol_short!("loan_rep");
+pub const TWO_FACTOR_ENABLED_TOPIC: Symbol = symbol_short!("2fa_en");
+pub const TWO_FACTOR_DISABLED_TOPIC: Symbol = symbol_short!("2fa_dis");
+pub const TWO_FACTOR_VERIFIED_TOPIC: Symbol = symbol_short!("2fa_vrf");

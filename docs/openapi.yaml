@@ -37,6 +37,8 @@ tags:
     description: Backup and recovery operations
   - name: Release Simulator
     description: Project vault release dates under different check-in behaviour scenarios
+  - name: Beneficiary
+    description: Beneficiary acceptance, decline, conflict resolution, auctions, and waterfall
 
 paths:
   /health:
@@ -170,6 +172,7 @@ paths:
                     - email
                   hours_before_expiry: 24
                   frequency: daily
+                  timezone: America/New_York
               multiChannel:
                 summary: Multiple notification channels
                 value:
@@ -543,6 +546,96 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/vaults/{vault_id}/hibernation:
+    parameters:
+      - name: vault_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: The vault ID
+    get:
+      summary: Get vault hibernation status
+      operationId: getVaultHibernation
+      tags:
+        - Vaults
+      responses:
+        '200':
+          description: Current hibernation entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HibernationEntry'
+        '404':
+          description: Vault or hibernation entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      summary: Enter vault hibernation
+      operationId: enterVaultHibernation
+      tags:
+        - Vaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HibernationRequest'
+      responses:
+        '201':
+          description: Hibernation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HibernationEntry'
+        '400':
+          description: Invalid hibernation duration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not the vault owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Exit vault hibernation
+      operationId: exitVaultHibernation
+      tags:
+        - Vaults
+      parameters:
+        - name: caller
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault owner address
+      responses:
+        '204':
+          description: Hibernation ended and the entry TTL was restored
+        '403':
+          description: Caller is not the vault owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault or hibernation entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/vaults/{vault_id}/share:
     post:
       summary: Share vault access
@@ -802,6 +895,383 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/vaults/{vault_id}/beneficiary/accept:
+    post:
+      summary: Accept beneficiary designation
+      description: >
+        Beneficiary accepts their designation on a vault. Once accepted, the
+        beneficiary becomes eligible to receive the vault contents on release.
+      operationId: acceptBeneficiary
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeneficiaryActionRequest'
+      responses:
+        '200':
+          description: Beneficiary designation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryStatus'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not the designated beneficiary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Beneficiary designation already accepted or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/decline:
+    post:
+      summary: Decline beneficiary designation
+      description: >
+        Beneficiary declines their designation on a vault. A declined
+        beneficiary is no longer eligible to receive the vault contents.
+      operationId: declineBeneficiary
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeneficiaryActionRequest'
+      responses:
+        '200':
+          description: Beneficiary designation declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryStatus'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not the designated beneficiary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Beneficiary designation already accepted or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/conflict:
+    get:
+      summary: Get beneficiary conflict status
+      description: >
+        Reports whether the vault has conflicting beneficiary designations
+        (for example, multiple accepted beneficiaries or an accepted
+        beneficiary that no longer matches the on-chain designation).
+      operationId: getBeneficiaryConflict
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Conflict status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryConflict'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/auction:
+    post:
+      summary: Start beneficiary auction
+      description: >
+        Starts an auction to resolve competing beneficiary claims on a vault.
+        The auction runs for the configured duration and the highest bidder
+        becomes the beneficiary.
+      operationId: startBeneficiaryAuction
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeneficiaryAuctionRequest'
+      responses:
+        '201':
+          description: Auction started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryAuction'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not permitted to start an auction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: An auction is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/waterfall:
+    get:
+      summary: Get beneficiary waterfall
+      description: >
+        Returns the ordered waterfall of beneficiaries and the share of the
+        vault each receives on release.
+      operationId: getBeneficiaryWaterfall
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Beneficiary waterfall retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryWaterfall'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/vesting/bonus:
+    get:
+      summary: Get vesting bonus configuration
+      operationId: getVestingBonus
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Vesting bonus configuration for the vault
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [vault_id, configured]
+                properties:
+                  vault_id:
+                    type: string
+                  configured:
+                    type: boolean
+                  bonus_bps:
+                    type: integer
+                    nullable: true
+                  on_time_window_seconds:
+                    type: integer
+                    format: int64
+                    nullable: true
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/vesting/claim-bonus:
+    post:
+      summary: Submit a beneficiary-signed vesting bonus claim
+      description: >
+        Relays the signed Soroban transaction to the configured RPC endpoint and
+        returns the transaction hash reported by the network. The backend does
+        not sign transactions on behalf of beneficiaries.
+      operationId: claimVestingBonus
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [beneficiary, transaction_xdr]
+              properties:
+                beneficiary:
+                  type: string
+                  description: Stellar account address of the vault beneficiary
+                transaction_xdr:
+                  type: string
+                  maxLength: 2000000
+                  description: Base64-encoded, beneficiary-signed Soroban transaction XDR
+                memo:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Transaction accepted by Soroban RPC
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [vault_id, claimed_amount, bonus_amount, tx_hash, claimed_at]
+                properties:
+                  vault_id:
+                    type: string
+                  claimed_amount:
+                    type: integer
+                    format: int64
+                  bonus_amount:
+                    type: integer
+                    format: int64
+                  tx_hash:
+                    type: string
+                    pattern: '^[a-fA-F0-9]{64}$'
+                  claimed_at:
+                    type: string
+                    format: date-time
+        '403':
+          description: Caller is not the vault beneficiary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault or vesting bonus configuration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid transaction request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Soroban RPC rejected the transaction or could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Soroban RPC URL is not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     ErrorResponse:
@@ -849,11 +1319,20 @@ components:
           description: Hours before expiry to send reminder
         frequency:
           $ref: '#/components/schemas/Frequency'
+        timezone:
+          type: string
+          default: UTC
+          description: >
+            IANA timezone used to resolve the 09:00 local reminder time
+            (issue #1752). The UTC offset is re-evaluated for every occurrence,
+            so DST transitions do not shift the reminder.
+          example: America/New_York
       required:
         - vault_id
         - channels
         - hours_before_expiry
         - frequency
+        - timezone
 
     SetPreferencesRequest:
       type: object
@@ -870,6 +1349,12 @@ components:
           description: Hours before expiry to send reminder
         frequency:
           $ref: '#/components/schemas/Frequency'
+        timezone:
+          type: string
+          description: >
+            IANA timezone for the local reminder time. Omit to keep the
+            backwards-compatible `UTC` default (issue #1752).
+          example: America/New_York
       required:
         - channels
         - hours_before_expiry
@@ -1044,6 +1529,42 @@ components:
         - created_at
         - status
 
+    HibernationRequest:
+      type: object
+      properties:
+        caller:
+          type: string
+          description: Vault owner address
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 3600
+          maximum: 15552000
+          description: Requested duration, bounded by the per-vault maximum
+      required:
+        - caller
+        - duration_seconds
+
+    HibernationEntry:
+      type: object
+      properties:
+        started_at:
+          type: integer
+          format: int64
+          description: Ledger timestamp when hibernation started
+        duration_seconds:
+          type: integer
+          format: int64
+          description: Configured hibernation duration in seconds
+        remaining_ttl_at_entry:
+          type: integer
+          format: int64
+          description: TTL remaining when hibernation started, restored on exit
+      required:
+        - started_at
+        - duration_seconds
+        - remaining_ttl_at_entry
+
     SearchQuery:
       type: object
       properties:
@@ -1063,15 +1584,15 @@ components:
           type: string
           format: date-time
           description: Filter vaults created before this date
-        page:
-          type: integer
-          minimum: 1
-          default: 1
         limit:
           type: integer
           minimum: 1
           maximum: 100
           default: 20
+          description: Maximum number of results to return
+        cursor:
+          type: string
+          description: Opaque cursor from a previous response; omit for the first page
 
     SearchResult:
       type: object
@@ -1080,17 +1601,14 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Vault'
-        total:
-          type: integer
-          description: Total matching vaults
-        page:
-          type: integer
+        next_cursor:
+          type: string
+          nullable: true
+          description: Cursor to pass in the next request; absent when there are no more results
         limit:
           type: integer
       required:
         - vaults
-        - total
-        - page
         - limit
 
     ComparisonResult:
@@ -1326,6 +1844,137 @@ components:
         - seconds_until_release
         - confidence
         - notes
+
+    BeneficiaryStatus:
+      type: string
+      enum: [pending, accepted, declined]
+      description: Current beneficiary designation status
+
+    BeneficiaryActionRequest:
+      type: object
+      properties:
+        beneficiary:
+          type: string
+          description: Stellar account address of the beneficiary performing the action
+        signature:
+          type: string
+          description: Optional signed proof of beneficiary ownership
+      required:
+        - beneficiary
+
+    BeneficiaryConflict:
+      type: object
+      properties:
+        vault_id:
+          type: string
+        has_conflict:
+          type: boolean
+        conflicting_beneficiaries:
+          type: array
+          items:
+            type: string
+          description: Beneficiary addresses involved in the conflict
+        reason:
+          type: string
+          nullable: true
+          description: Human-readable explanation of the conflict
+      required:
+        - vault_id
+        - has_conflict
+        - conflicting_beneficiaries
+
+    BeneficiaryAuctionRequest:
+      type: object
+      properties:
+        initiator:
+          type: string
+          description: Address starting the auction
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          description: Auction duration in seconds
+        reserve_price:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Minimum bid in stroops
+      required:
+        - initiator
+        - duration_seconds
+
+    BeneficiaryAuction:
+      type: object
+      properties:
+        auction_id:
+          type: string
+          format: uuid
+        vault_id:
+          type: string
+        initiator:
+          type: string
+        status:
+          type: string
+          enum: [open, closed, cancelled]
+        reserve_price:
+          type: integer
+          format: int64
+        highest_bid:
+          type: integer
+          format: int64
+          nullable: true
+        highest_bidder:
+          type: string
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+      required:
+        - auction_id
+        - vault_id
+        - initiator
+        - status
+        - starts_at
+        - ends_at
+
+    BeneficiaryWaterfallEntry:
+      type: object
+      properties:
+        beneficiary:
+          type: string
+          description: Beneficiary address
+        rank:
+          type: integer
+          minimum: 1
+          description: Position in the waterfall (1 = first to receive)
+        share_bps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          description: Share of the vault in basis points
+        status:
+          $ref: '#/components/schemas/BeneficiaryStatus'
+      required:
+        - beneficiary
+        - rank
+        - share_bps
+        - status
+
+    BeneficiaryWaterfall:
+      type: object
+      properties:
+        vault_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/BeneficiaryWaterfallEntry'
+      required:
+        - vault_id
+        - entries
 
     SimulateReleaseResponse:
       type: object
