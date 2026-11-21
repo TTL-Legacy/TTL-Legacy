@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use std::sync::Arc;
+
 use actix_web::{
     http::StatusCode,
     web::{Data, Json, Path, Query},
@@ -18,9 +20,9 @@ use crate::{
         simulate_release_handler,
     },
     models::{
-        AuditLogEntry, ClaimBonusRequest, ReminderPreferences, SetPreferencesRequest,
-        SetSubscriptionRequest, SimulateReleaseQuery, SimulateReleaseResponse, Subscription,
-        VaultReleaseHistory,
+        AuditLogEntry, ClaimBonusRequest, PauseHistoryResponse, ReminderPreferences,
+        SetPreferencesRequest, SetSubscriptionRequest, SimulateReleaseQuery,
+        SimulateReleaseResponse, Subscription, VaultReleaseHistory,
     },
 };
 
@@ -432,4 +434,43 @@ pub async fn submit_proof_of_life(
         "vault_id": vault_id,
         "beneficiary": body.beneficiary,
     })))
+}
+
+// ── Vault pause/resume history (Issue #2053) ─────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PauseHistoryQuery {
+    /// Zero-based page number (default 0).
+    pub page: Option<u32>,
+    /// Events per page, capped at 100 (default 20).
+    pub page_size: Option<u32>,
+}
+
+/// GET /vaults/{id}/pause-history
+///
+/// Returns paginated `PauseEvent` records for the vault, newest first.
+/// Each record includes `actor`, `event_type` (`"pause"` or `"resume"`),
+/// `reason`, and `timestamp`.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_pause_history(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+    query: Query<PauseHistoryQuery>,
+) -> Result<Json<PauseHistoryResponse>, AppError> {
+    let vault_id = vault_id.into_inner();
+    let page = query.page.unwrap_or(0);
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100);
+
+    let (events, total) = state
+        .db
+        .get_pause_history(&vault_id, page, page_size)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok(Json(PauseHistoryResponse {
+        vault_id,
+        events,
+        page,
+        page_size,
+        total,
+    }))
 }

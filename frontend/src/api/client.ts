@@ -147,6 +147,68 @@ export class ApiClient {
     return response.admin;
   }
 
+  // ── Vault notes (Issue #2055) ──────────────────────────────────────────────
+
+  /**
+   * Fetches the notes for a vault via `get_vault_notes`.
+   */
+  public async getVaultNotes(vaultId: string | number): Promise<GetVaultNotesResponse> {
+    return this.request<GetVaultNotesResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/notes`,
+    );
+  }
+
+  /**
+   * Persists vault notes via `set_vault_notes`.
+   */
+  public async setVaultNotes(
+    vaultId: string | number,
+    payload: SetVaultNotesRequest,
+  ): Promise<GetVaultNotesResponse> {
+    return this.request<GetVaultNotesResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/notes`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  // ── Check-in history (Issue #2052) ────────────────────────────────────────
+
+  /**
+   * Returns a paginated list of check-in records for a vault.
+   */
+  public async getCheckInHistory(
+    vaultId: string | number,
+    page = 0,
+    pageSize = 20,
+  ): Promise<CheckInHistoryResponse> {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return this.request<CheckInHistoryResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/check-in-history?${params}`,
+    );
+  }
+
+  // ── Vault pause history (Issue #2053) ─────────────────────────────────────
+
+  /**
+   * Returns paginated pause/resume events for a vault.
+   */
+  public async getVaultPauseHistory(
+    vaultId: string | number,
+    page = 0,
+    pageSize = 20,
+  ): Promise<PauseHistoryResponse> {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return this.request<PauseHistoryResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/pause-history?${params}`,
+    );
+  }
+
   public async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const method = (init.method ?? "GET").toUpperCase() as ApiMethod;
     const isMutatingMethod = !["GET", "HEAD", "OPTIONS"].includes(method);

@@ -397,6 +397,8 @@ pub enum StorageKey {
     PendingAdmin,
     MinCheckInInterval,
     MaxCheckInInterval,
+    /// Minimum deposit amount in stroops (Issue #2054). Configurable by admin.
+    MinDepositAmount,
     Version,
     VestingSchedule(u64, u32),
     VestingPenalty(u64),
@@ -619,7 +621,20 @@ pub enum StorageKey {
 #[derive(Clone)]
 pub struct CheckInHistoryEntry {
     pub timestamp: u64,
+    /// Ledger sequence number at which this check-in was recorded.
+    /// Issue #2052: included so off-chain indexers can correlate entries with
+    /// on-chain ledger state without additional RPC calls.
+    pub ledger_sequence: u32,
+    /// Encoded check-in method: 0 = owner passkey, 1 = delegate, 2 = batch.
+    /// Issue #2052: surfaced alongside timestamp so callers can filter or
+    /// audit by authentication path without decoding raw events.
+    pub method: u32,
 }
+
+/// Type alias exposed for the paginated history query (Issue #2052).
+/// `CheckInRecord` is the name used in the public API; internally the same
+/// struct is stored as `CheckInHistoryEntry`.
+pub type CheckInRecord = CheckInHistoryEntry;
 
 /// Deposit history entry for audit queries - Issue #1767
 #[contracttype]

@@ -23,5 +23,18 @@
     "retry": "Reintentar",
     "confirm": "Confirmar",
     "cancel": "Cancelar"
+  },
+  "vaultNotes": {
+    "heading": "Notas de bóveda",
+    "edit": "Editar",
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "saving": "Guardando…",
+    "noNotes": "Sin notas aún.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Vista previa",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Error al guardar. Por favor, intente de nuevo.",
+    "ariaLabel": "Notas para la bóveda {{vaultId}}"
   }
 }

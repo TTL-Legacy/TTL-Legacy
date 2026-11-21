@@ -38,5 +38,18 @@
     "retry": "Retry",
     "confirm": "Confirm",
     "cancel": "Cancel"
+  },
+  "vaultNotes": {
+    "heading": "Vault notes",
+    "edit": "Edit",
+    "save": "Save",
+    "cancel": "Cancel",
+    "saving": "Saving…",
+    "noNotes": "No notes yet.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Preview",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Save failed. Please try again.",
+    "ariaLabel": "Notes for vault {{vaultId}}"
   }
 }

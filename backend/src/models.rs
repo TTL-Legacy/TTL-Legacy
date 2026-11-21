@@ -1292,3 +1292,30 @@ pub struct SponsoredReleaseResponse {
 pub struct SponsoredReleaseListResponse {
     pub releases: Vec<serde_json::Value>,
 }
+
+// ── Vault pause/resume audit history (Issue #2053) ──────────────────────────
+
+/// A single vault pause or resume event as returned by
+/// `GET /vaults/{id}/pause-history`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PauseEvent {
+    pub id: i64,
+    pub vault_id: String,
+    /// Stellar address of the actor who triggered the pause or resume.
+    pub actor: String,
+    /// `"pause"` or `"resume"`.
+    pub event_type: String,
+    /// Human-readable reason supplied by the actor (may be empty).
+    pub reason: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Paginated response from `GET /vaults/{id}/pause-history`.
+#[derive(Debug, Serialize)]
+pub struct PauseHistoryResponse {
+    pub vault_id: String,
+    pub events: Vec<PauseEvent>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u32,
+}
