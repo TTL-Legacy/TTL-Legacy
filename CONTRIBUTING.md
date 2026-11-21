@@ -63,6 +63,10 @@ STELLAR_RPC_URL=http://localhost:8000
 
 This points the backend at your local Stellar Quickstart instance instead of testnet.
 
+For a full step-by-step walkthrough — starting the local network, funding a
+deployer, deploying the contracts, and wiring up the backend — see
+[docs/local-testnet-setup.md](docs/local-testnet-setup.md).
+
 ## Troubleshooting
 
 Common errors encountered when building the Soroban contracts, and how to fix them.
