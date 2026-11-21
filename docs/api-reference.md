@@ -103,6 +103,22 @@ per vault in the backend database; the TOTP secret is never stored in plaintext
 > `POST .../2fa/regenerate-backup-codes`) are **not yet implemented**; when they
 > land they will be documented in this section.
 
+### Endpoint summary
+
+| Endpoint | Purpose | Current implementation |
+|----------|---------|------------------------|
+| `POST /auth/2fa/setup` | Begin TOTP/SMS/email enrolment and return a TOTP secret or provisioning URI | Use `POST /api/vaults/{vault_id}/2fa/enable` in the current backend |
+| `POST /auth/2fa/verify` | Verify a TOTP or pending SMS/email code | Use `POST /api/vaults/{vault_id}/2fa/verify` in the current backend |
+| `POST /auth/2fa/disable` | Disable 2FA and clear the current session verification | Not implemented |
+| `GET /auth/2fa/backup-codes` | List or report remaining single-use TOTP recovery codes | Not implemented |
+| `POST /auth/2fa/regenerate-backup-codes` | Replace the backup-code set | Not implemented |
+
+The `/auth/2fa/*` names above describe the public API contract. The vault
+scoped routes currently implemented in `two_factor.rs` are
+`/api/vaults/{vault_id}/2fa/{status,enable,verify,rotate-key}`. Until dedicated
+disable and backup-code handlers exist, clients must not rely on those two
+endpoint families.
+
 ### Supported methods
 
 | Method  | Code delivery                                             | Code lifetime             | Verification                       |
@@ -217,6 +233,69 @@ current session.
 > A TOTP code is accepted only for the current time step and only once:
 > replaying a code from an earlier (or the same) time step is rejected, and the
 > latest consumed time step is tracked per vault.
+
+---
+
+### POST `/auth/2fa/disable`
+
+Disables 2FA for the authenticated vault and removes the vault's verified
+session state. A successful request should require the current 2FA code or a
+current authenticated session, invalidate pending enrolment codes, and remove
+stored TOTP or backup-code material.
+
+**Status:** not implemented in `backend/src/two_factor.rs`.
+
+**Planned Responses**
+
+| Status | `code` | Description |
+|--------|--------|-------------|
+| 200 | — | 2FA disabled |
+| 401 | `unauthorized` | Verification code or authenticated session is invalid |
+| 404 | `not_found` | 2FA is not configured for the vault |
+| 429 | `rate_limit_exceeded` | Per-client request quota exhausted |
+| 500 | `internal_error` | Database or key-store failure |
+
+---
+
+### GET `/auth/2fa/backup-codes`
+
+Returns metadata for the vault's remaining single-use TOTP backup codes. Backup
+codes must be returned only when the owner is currently authenticated and
+verified. The API should never expose stored plaintext codes after generation;
+this endpoint must return code status/count metadata, not recoverable secrets.
+
+**Status:** not implemented in `backend/src/two_factor.rs`.
+
+**Planned Responses**
+
+| Status | `code` | Description |
+|--------|--------|-------------|
+| 200 | — | Returns the remaining backup-code count and/or generation metadata |
+| 401 | `unauthorized` | An authenticated 2FA session is required |
+| 404 | `not_found` | 2FA or backup codes are not configured |
+| 429 | `rate_limit_exceeded` | Per-client request quota exhausted |
+| 500 | `internal_error` | Database or key-store failure |
+
+---
+
+### POST `/auth/2fa/regenerate-backup-codes`
+
+Invalidates the current backup-code set and generates a fresh set for recovery
+use. The plaintext replacement codes should be returned once and never persisted
+in plaintext; each code is single-use and may be consumed only within the
+configured method window.
+
+**Status:** not implemented in `backend/src/two_factor.rs`.
+
+**Planned Responses**
+
+| Status | `code` | Description |
+|--------|--------|-------------|
+| 200 | — | Returns replacement backup codes once |
+| 401 | `unauthorized` | An authenticated 2FA session is required |
+| 404 | `not_found` | 2FA is not configured for the vault |
+| 429 | `rate_limit_exceeded` | Per-client request quota exhausted |
+| 500 | `internal_error` | Database or key-store failure |
 
 ---
 
