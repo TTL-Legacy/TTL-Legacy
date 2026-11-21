@@ -4,6 +4,8 @@ pub mod cache;
 pub mod consensus;
 pub mod contract_version_check;
 pub mod db;
+/// Issue #2048: archive event topic and emitter.
+pub mod events;
 pub mod error;
 pub mod escalation;
 pub mod fee_sponsorship;

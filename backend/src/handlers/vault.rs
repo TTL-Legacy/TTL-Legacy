@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::events;
 use crate::models::*;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -665,6 +666,109 @@ pub fn bulk_vault_summary_handler(
         .collect();
 
     Ok(BulkSummaryResponse { summaries })
+}
+
+// ── Issue #2050: Clone vault ──────────────────────────────────────────────────
+
+/// Clone an existing vault, creating a new vault that copies the original's
+/// base fields.  `config` records the caller's intent for optional fields;
+/// since the current `Vault` struct does not carry those fields, all base
+/// fields are always copied.  The config is preserved in the audit entry for
+/// future use once the extended fields are added.
+pub fn clone_vault(
+    store: &VaultStore,
+    audit_store: &AuditStore,
+    vault_id: &str,
+    config: VaultCloneConfig,
+) -> Result<CloneVaultResponse, String> {
+    let original = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let cloned_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    let cloned_vault = Vault {
+        id: cloned_id.clone(),
+        owner: original.owner.clone(),
+        beneficiary: original.beneficiary.clone(),
+        balance: original.balance,
+        check_in_interval: original.check_in_interval,
+        last_check_in: now,
+        created_at: now,
+        status: VaultStatus::Active,
+        ttl_remaining: original.ttl_remaining,
+    };
+
+    store
+        .lock()
+        .unwrap()
+        .insert(cloned_id.clone(), cloned_vault.clone());
+
+    append_audit_entry(
+        audit_store,
+        "vault_cloned",
+        &original.owner,
+        serde_json::json!({
+            "original_vault_id": vault_id,
+            "cloned_vault_id": cloned_id,
+            "include_tags": config.include_tags,
+            "include_notes": config.include_notes,
+            "include_beneficiaries": config.include_beneficiaries,
+            "include_vesting_schedule": config.include_vesting_schedule,
+            "include_release_conditions": config.include_release_conditions,
+        }),
+    );
+
+    Ok(CloneVaultResponse {
+        original_vault_id: vault_id.to_string(),
+        cloned_vault_id: cloned_id,
+        cloned_vault,
+    })
+}
+
+// ── Issue #2048: Vault Archival ───────────────────────────────────────────────
+
+/// Archive a vault: emit the `ARCHIVE_TOPIC` event, transition status to
+/// `Archived`, remove the entry from the active store, and append an audit
+/// record.
+///
+/// Returns `Err` if the vault is not found.
+pub fn archive_vault(
+    store: &VaultStore,
+    audit_store: &AuditStore,
+    vault_id: &str,
+) -> Result<(), String> {
+    // Retrieve the vault before modifying or removing it.
+    let vault = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| format!("vault not found: {}", vault_id))?;
+
+    // Emit the archive event BEFORE purging (spec requirement).
+    events::emit_archive(vault_id, &vault.owner);
+
+    // Remove from active store (purge).
+    store.lock().unwrap().remove(vault_id);
+
+    // Append audit entry.
+    append_audit_entry(
+        audit_store,
+        "vault_archived",
+        &vault.owner,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "previous_status": format!("{:?}", vault.status),
+            "new_status": format!("{:?}", VaultStatus::Archived),
+        }),
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
