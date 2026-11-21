@@ -2021,3 +2021,37 @@ pub const LOAN_REPAID_TOPIC: Symbol = symbol_short!("loan_rep");
 pub const TWO_FACTOR_ENABLED_TOPIC: Symbol = symbol_short!("2fa_en");
 pub const TWO_FACTOR_DISABLED_TOPIC: Symbol = symbol_short!("2fa_dis");
 pub const TWO_FACTOR_VERIFIED_TOPIC: Symbol = symbol_short!("2fa_vrf");
+
+// ---------------------------------------------------------------------------
+// Issue #2074 — beneficiary_swap on-chain event log
+// ---------------------------------------------------------------------------
+
+/// Topic emitted by `swap_allocations` when two beneficiaries exchange their
+/// BPS allocations atomically.
+///
+/// Downstream services (indexers, cached beneficiary indexes) can subscribe to
+/// this topic to stay consistent without polling `get_vault`.
+///
+/// Event payload: `(old_address: Address, new_address: Address, old_bps: u32,
+/// new_bps: u32, vault_id: u64)`
+pub const BENEFICIARY_SWAPPED_TOPIC: Symbol = symbol_short!("b_swapped");
+
+/// Event data emitted alongside [`BENEFICIARY_SWAPPED_TOPIC`].
+///
+/// `old_address` held `old_bps` before the swap; after the swap it holds
+/// `new_bps`.  Symmetrically, `new_address` moves from `new_bps` to
+/// `old_bps`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeneficiarySwappedEvent {
+    /// Vault in which the swap occurred.
+    pub vault_id: u64,
+    /// First beneficiary in the swap pair.
+    pub old_address: Address,
+    /// Second beneficiary in the swap pair.
+    pub new_address: Address,
+    /// BPS `old_address` held before the swap (= BPS `new_address` holds after).
+    pub old_bps: u32,
+    /// BPS `new_address` held before the swap (= BPS `old_address` holds after).
+    pub new_bps: u32,
+}
