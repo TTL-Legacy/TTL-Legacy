@@ -5,6 +5,7 @@ use libfuzzer_sys::fuzz_target;
 /// Fuzz target for `check_in` entry point
 ///
 /// Tests the contract's ability to safely handle arbitrary check-in operations:
+/// Tests the contract's ability to safely handle arbitrary check-in operations:
 /// - vault_id (u64)
 /// - caller address (32 bytes)
 /// - passkey_hash (32 bytes)

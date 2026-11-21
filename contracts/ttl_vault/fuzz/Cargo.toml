@@ -54,3 +54,15 @@ name = "fuzz_contract_xdr"
 path = "src/fuzz_contract_xdr.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_withdrawal_splitting"
+path = "src/fuzz_withdrawal_splitting.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_passkey_signature"
+path = "src/fuzz_passkey_signature.rs"
+test = false
+doc = false

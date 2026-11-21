@@ -167,8 +167,7 @@ impl NodeCache {
     }
 
     pub fn from_env() -> Arc<Self> {
-        let node_id = std::env::var("NODE_ID")
-            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+        let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         let strategy = match std::env::var("CONSENSUS_STRATEGY")
             .unwrap_or_default()
             .to_ascii_lowercase()
@@ -178,15 +177,14 @@ impl NodeCache {
             _ => ConflictStrategy::LastWriteWins,
         };
 
-        let backend: Arc<dyn CacheBackend> =
-            if let Ok(redis_url) = std::env::var("REDIS_URL") {
-                Arc::new(
-                    RedisBackend::new(&redis_url)
-                        .unwrap_or_else(|e| panic!("failed to connect to Redis: {e}")),
-                )
-            } else {
-                Arc::new(InMemoryBackend::new())
-            };
+        let backend: Arc<dyn CacheBackend> = if let Ok(redis_url) = std::env::var("REDIS_URL") {
+            Arc::new(
+                RedisBackend::new(&redis_url)
+                    .unwrap_or_else(|e| panic!("failed to connect to Redis: {e}")),
+            )
+        } else {
+            Arc::new(InMemoryBackend::new())
+        };
 
         Arc::new(Self::new(node_id, backend, strategy))
     }
@@ -194,7 +192,10 @@ impl NodeCache {
     pub fn put(&self, key: &str, value: &str) -> Result<CacheEntry, String> {
         let entry = self.make_entry(key, value);
         self.backend.set_entry(&entry)?;
-        self.local.lock().unwrap().insert(key.to_string(), entry.clone());
+        self.local
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), entry.clone());
         Ok(entry)
     }
 
@@ -249,10 +250,7 @@ impl NodeCache {
 
             if let Some(resolved) = winner {
                 self.backend.set_entry(&resolved)?;
-                self.local
-                    .lock()
-                    .unwrap()
-                    .insert(key.clone(), resolved);
+                self.local.lock().unwrap().insert(key.clone(), resolved);
                 conflicts_resolved += 1;
             }
         }
@@ -281,10 +279,7 @@ impl NodeCache {
 
     #[cfg(test)]
     pub fn set_local_entry(&self, entry: CacheEntry) {
-        self.local
-            .lock()
-            .unwrap()
-            .insert(entry.key.clone(), entry);
+        self.local.lock().unwrap().insert(entry.key.clone(), entry);
     }
 }
 
@@ -332,6 +327,30 @@ fn pick_by_voting(local: &CacheEntry, remote: &CacheEntry) -> CacheEntry {
     }
 }
 
+/// Minimum vote weight needed for a `numerator / denominator` quorum over
+/// `total_supply`, rounded up. Math is done in u128 so `supply * numerator`
+/// cannot overflow. Returns `None` for a zero denominator or a result that
+/// exceeds u64 (only possible when numerator > denominator).
+#[allow(dead_code)]
+pub fn quorum_threshold(total_supply: u64, numerator: u64, denominator: u64) -> Option<u64> {
+    if denominator == 0 {
+        return None;
+    }
+    let product = u128::from(total_supply) * u128::from(numerator);
+    let denominator = u128::from(denominator);
+    u64::try_from(product.div_ceil(denominator)).ok()
+}
+
+/// Whether `votes` meets a `numerator / denominator` quorum over `total_supply`.
+/// Compares `votes * denominator >= total_supply * numerator` in u128, so no
+/// division or overflow is involved. A zero denominator never reaches quorum.
+#[allow(dead_code)]
+pub fn has_quorum(votes: u64, total_supply: u64, numerator: u64, denominator: u64) -> bool {
+    denominator != 0
+        && u128::from(votes) * u128::from(denominator)
+            >= u128::from(total_supply) * u128::from(numerator)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,12 +374,8 @@ mod tests {
     fn lww_prefers_latest_timestamp() {
         let older = sample_entry("k", "old", "node-a", 1_000);
         let newer = sample_entry("k", "new", "node-b", 2_000);
-        let winner = resolve_conflict(
-            Some(&older),
-            Some(&newer),
-            ConflictStrategy::LastWriteWins,
-        )
-        .unwrap();
+        let winner =
+            resolve_conflict(Some(&older), Some(&newer), ConflictStrategy::LastWriteWins).unwrap();
         assert_eq!(winner.value, "new");
     }
 
@@ -368,16 +383,23 @@ mod tests {
     fn voting_prefers_higher_version() {
         let low = sample_entry("k", "low", "node-a", 1_000);
         let high = sample_entry("k", "high", "node-b", 2_000);
-        let winner =
-            resolve_conflict(Some(&low), Some(&high), ConflictStrategy::Voting).unwrap();
+        let winner = resolve_conflict(Some(&low), Some(&high), ConflictStrategy::Voting).unwrap();
         assert_eq!(winner.value, "high");
     }
 
     #[test]
     fn multi_node_converges_after_consensus_check() {
         let backend: Arc<dyn CacheBackend> = shared_backend();
-        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
-        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
+        let node_a = NodeCache::new(
+            "node-a",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
+        let node_b = NodeCache::new(
+            "node-b",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
 
         node_a.put("vault:1", "prefs-a").unwrap();
         let remote = node_b.get("vault:1").unwrap().expect("remote entry");
@@ -395,8 +417,16 @@ mod tests {
     #[test]
     fn two_nodes_share_backend_state() {
         let backend: Arc<dyn CacheBackend> = shared_backend();
-        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
-        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::LastWriteWins);
+        let node_a = NodeCache::new(
+            "node-a",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
+        let node_b = NodeCache::new(
+            "node-b",
+            Arc::clone(&backend),
+            ConflictStrategy::LastWriteWins,
+        );
 
         node_a.put("vault:2", "shared").unwrap();
         node_b.sync_local_from_remote().unwrap();
@@ -419,9 +449,106 @@ mod tests {
 
         let report = node_b.check_and_resolve().unwrap();
         assert_eq!(report.conflicts_resolved, 1);
+        assert_eq!(node_b.get("vault:3").unwrap().unwrap().value, "winner");
+    }
+
+    #[test]
+    fn test_majority_agreement() {
+        let backend: Arc<dyn CacheBackend> = shared_backend();
+        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::Voting);
+        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::Voting);
+        let node_c = NodeCache::new("node-c", Arc::clone(&backend), ConflictStrategy::Voting);
+
+        let entry = sample_entry("data:shared", "unanimous", "node-a", 3_000);
+        backend.set_entry(&entry).unwrap();
+        node_a.set_local_entry(entry.clone());
+        node_b.set_local_entry(entry.clone());
+        node_c.set_local_entry(entry.clone());
+
+        let report = node_c.check_and_resolve().unwrap();
+        assert!(report.consistent);
+        assert_eq!(report.conflicts_resolved, 0);
+    }
+
+    #[test]
+    fn test_no_quorum() {
+        let backend: Arc<dyn CacheBackend> = shared_backend();
+        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::Voting);
+        let node_b = NodeCache::new("node-b", Arc::clone(&backend), ConflictStrategy::Voting);
+
+        let entry_a = sample_entry("data:conflict", "version-a", "node-a", 1_000);
+        let entry_b = sample_entry("data:conflict", "version-b", "node-b", 2_000);
+
+        backend.set_entry(&entry_b).unwrap();
+        node_a.set_local_entry(entry_a);
+        node_b.set_local_entry(entry_b.clone());
+
+        let report = node_a.check_and_resolve().unwrap();
+        assert!(!report.consistent);
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].key, "data:conflict");
+    }
+
+    #[test]
+    fn test_node_timeout_detection() {
+        let backend: Arc<dyn CacheBackend> = shared_backend();
+        let node_a = NodeCache::new("node-a", Arc::clone(&backend), ConflictStrategy::Voting);
+
+        node_a.put("vault:timeout-test", "data").unwrap();
+
+        let entry = node_a.get("vault:timeout-test").unwrap();
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().value, "data");
+    }
+
+    #[test]
+    fn naive_u64_quorum_math_would_overflow() {
+        assert!(u64::MAX.checked_mul(2).is_none());
+    }
+
+    #[test]
+    fn quorum_threshold_above_u32_max_over_three() {
+        let supply = u64::from(u32::MAX) / 3 + 1;
+        // 1_431_655_766 * 2 / 3 = 954_437_177.33, rounded up.
+        assert_eq!(quorum_threshold(supply, 2, 3), Some(954_437_178));
+    }
+
+    #[test]
+    fn quorum_threshold_at_u64_max() {
         assert_eq!(
-            node_b.get("vault:3").unwrap().unwrap().value,
-            "winner"
+            quorum_threshold(u64::MAX, 2, 3),
+            Some(12_297_829_382_473_034_410)
         );
+        assert_eq!(
+            quorum_threshold(u64::MAX, 51, 100),
+            Some(9_407_839_477_591_871_324)
+        );
+    }
+
+    #[test]
+    fn quorum_threshold_rounds_up_near_u64_max() {
+        // (u64::MAX - 1) * 2 / 3 = ...409.33, rounded up to ...410.
+        assert_eq!(
+            quorum_threshold(u64::MAX - 1, 2, 3),
+            Some(12_297_829_382_473_034_410)
+        );
+        assert_eq!(quorum_threshold(10, 2, 3), Some(7));
+    }
+
+    #[test]
+    fn quorum_threshold_edge_cases() {
+        assert_eq!(quorum_threshold(0, 2, 3), Some(0));
+        assert_eq!(quorum_threshold(100, 2, 0), None);
+        assert_eq!(quorum_threshold(u64::MAX, 3, 3), Some(u64::MAX));
+        assert_eq!(quorum_threshold(u64::MAX, 3, 2), None);
+    }
+
+    #[test]
+    fn has_quorum_at_u64_max_supply() {
+        let threshold = 12_297_829_382_473_034_410;
+        assert!(has_quorum(threshold, u64::MAX, 2, 3));
+        assert!(!has_quorum(threshold - 1, u64::MAX, 2, 3));
+        assert!(has_quorum(u64::MAX, u64::MAX, 3, 3));
+        assert!(!has_quorum(u64::MAX, u64::MAX, 2, 0));
     }
 }

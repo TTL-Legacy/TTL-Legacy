@@ -81,6 +81,19 @@
                 android:resource="@xml/vault_widget_info" />
         </receiver>
 
+        <!-- Glance vault status home screen widget (#1556) -->
+        <receiver
+            android:name=".widget.VaultGlanceWidgetReceiver"
+            android:exported="true"
+            android:label="Vault Status (Glance)">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/vault_glance_widget_info" />
+        </receiver>
+
         <!-- Passkey / Digital Asset Links -->
         <meta-data
             android:name="asset_statements"

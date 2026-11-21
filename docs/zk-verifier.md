@@ -43,6 +43,9 @@ pub fn attest(env: Env, oracle: Address, proof: Bytes, claim: Bytes)
 
 /// Verifies a zero-knowledge proof against a claim using oracle attestation.
 pub fn verify_claim(env: Env, proof: Bytes, claim: Bytes) -> bool
+
+/// Verifies multiple proofs in a single invocation (amortised gas).
+pub fn verify_batch_proofs(env: Env, proofs: Vec<Bytes>) -> Vec<bool>
 ```
 
 ### Current Verification Logic
@@ -65,6 +68,35 @@ The `verify_claim` function:
    ```
    vfy_claim: (result: bool, claim_hash: BytesN<32>)
    ```
+
+### Batch Verification
+
+`verify_batch_proofs(proofs: Vec<Bytes>) -> Vec<bool>` verifies every proof in a
+single contract invocation and returns a result vector aligned by index with the
+input `proofs` vector (i.e. `results[i]` corresponds to `proofs[i]`).
+
+Semantics:
+
+1. **Per-element validation**: Each proof is validated independently using the
+   same rules as `verify_claim` (non-empty, within the 4 KB bound, not the
+   `0x00` sentinel). An invalid element yields `false` at its index rather than
+   aborting the whole batch, so one bad proof does not invalidate the others.
+2. **Empty batch**: An empty `proofs` vector returns an empty result vector.
+3. **Batch size bound**: Batches are capped (see error codes); oversized batches
+   are rejected to keep execution within the transaction resource limits.
+4. **Event emission**: A single `vfy_batch` event is emitted per batch:
+   ```
+   vfy_batch: (count: u32, valid_count: u32)
+   ```
+
+### Gas Amortization
+
+Verifying N proofs one-by-one requires N separate contract invocations, each
+paying the fixed overhead of invocation, ledger entry access, and event
+emission. `verify_batch_proofs` pays that overhead once and reuses it across all
+proofs, so the marginal cost per proof is lower than a standalone
+`verify_claim` call. This matters for vaults with complex conditional release
+logic that gate on several independent proofs.
 
 ### Security Limitations of the Stub
 
@@ -316,11 +348,14 @@ fn test_oracle_attestation_flow() {
 |------|------|-------------|
 | 1 | EmptyProof | Proof bytes are empty |
 | 2 | EmptyClaim | Claim bytes are empty |
-| 3 | ProofTooLarge | Proof exceeds 4 KB |
-| 4 | ClaimTooLarge | Claim exceeds 1 KB |
-| 5 | AlreadyInitialized | Contract already initialized |
-| 6 | OracleNotFound | Oracle address not registered |
-| 7 | Unauthorized | Caller is not authorized |
+| 3 | ProofTooShort | Proof is shorter than the minimum accepted length |
+| 4 | ClaimTooShort | Claim is shorter than the minimum accepted length |
+| 5 | ProofTooLarge | Proof exceeds 4 KB |
+| 6 | ClaimTooLarge | Claim exceeds 1 KB |
+| 7 | BatchTooLarge | Batch exceeds the maximum number of proofs per invocation |
+| 8 | AlreadyInitialized | Contract already initialized |
+| 9 | OracleNotFound | Oracle address not registered |
+| 10 | Unauthorized | Caller is not authorized |
 
 ---
 
@@ -340,9 +375,10 @@ fn test_oracle_attestation_flow() {
 When Soroban adds native ZK support or TTL-Legacy implements a verifier:
 
 1. **Update** `verify_claim` implementation (drop sentinel check)
-2. **Add** verification key management endpoints
-3. **Emit** circuit-specific events
-4. **Maintain** backward compatibility where possible
-5. **Deprecate** oracle attestation flow (if not needed)
+2. **Update** `verify_batch_proofs` to delegate to the real verifier per element
+3. **Add** verification key management endpoints
+4. **Emit** circuit-specific events
+5. **Maintain** backward compatibility where possible
+6. **Deprecate** oracle attestation flow (if not needed)
 
 The stub contract serves as a forward-compatible skeleton for this transition.

@@ -26,7 +26,7 @@
 //! # Instrumentation
 //!
 //! Key handler functions are annotated with `#[tracing::instrument]` in
-//! `handlers.rs`. Each span automatically records:
+//! `handlers/`. Each span automatically records:
 //! - Function arguments (vault_id, amounts, etc.)
 //! - Errors via `tracing::error!` / span `record("error", …)`
 //! - Outbound Stellar RPC call spans (see [`stellar_rpc_span`])
@@ -76,7 +76,9 @@ pub fn init_tracer(service_name: &'static str) -> OtelGuard {
         Ok(guard) => guard,
         Err(e) => {
             // Fall back to plain tracing-subscriber without OTLP export
-            eprintln!("[otel] Failed to initialise OTLP tracer: {e}. Falling back to stdout tracing.");
+            eprintln!(
+                "[otel] Failed to initialise OTLP tracer: {e}. Falling back to stdout tracing."
+            );
             init_stdout_tracer();
             OtelGuard
         }
@@ -84,19 +86,18 @@ pub fn init_tracer(service_name: &'static str) -> OtelGuard {
 }
 
 /// Fallible variant of [`init_tracer`]. Prefer this in library code.
-pub fn try_init_tracer(service_name: &'static str) -> Result<OtelGuard, Box<dyn std::error::Error>> {
+pub fn try_init_tracer(
+    service_name: &'static str,
+) -> Result<OtelGuard, Box<dyn std::error::Error>> {
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_string());
 
-    let service_name_override = std::env::var("OTEL_SERVICE_NAME")
-        .unwrap_or_else(|_| service_name.to_string());
+    let service_name_override =
+        std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| service_name.to_string());
 
     let resource = Resource::new(vec![
         opentelemetry::KeyValue::new(SERVICE_NAME, service_name_override.clone()),
-        opentelemetry::KeyValue::new(
-            SERVICE_VERSION,
-            env!("CARGO_PKG_VERSION"),
-        ),
+        opentelemetry::KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
     ]);
 
     let exporter = opentelemetry_otlp::new_exporter()
@@ -121,12 +122,23 @@ pub fn try_init_tracer(service_name: &'static str) -> Result<OtelGuard, Box<dyn 
 
     let otel_layer = OpenTelemetryLayer::new(tracer);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let use_json = std::env::var("LOG_FORMAT")
+        .map(|v| v.to_lowercase() == "json")
+        .unwrap_or(false);
 
-    Registry::default()
-        .with(env_filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(otel_layer)
-        .try_init()?;
+    if use_json {
+        Registry::default()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .with(otel_layer)
+            .try_init()?;
+    } else {
+        Registry::default()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(otel_layer)
+            .try_init()?;
+    }
 
     tracing::info!(
         service = service_name,
@@ -139,9 +151,19 @@ pub fn try_init_tracer(service_name: &'static str) -> Result<OtelGuard, Box<dyn 
 
 /// Initialise plain stdout tracing without OTLP export (fallback path).
 fn init_stdout_tracer() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .try_init();
+    let use_json = std::env::var("LOG_FORMAT")
+        .map(|v| v.to_lowercase() == "json")
+        .unwrap_or(false);
+    if use_json {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init();
+    }
 }
 
 // ---------------------------------------------------------------------------

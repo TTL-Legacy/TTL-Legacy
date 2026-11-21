@@ -14,8 +14,7 @@ extern crate alloc;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::StellarAssetClient,
-    vec, Address, Env,
+    token::StellarAssetClient, vec, Address, Env, IntoVal, TryIntoVal,
 };
 
 fn setup() -> (Env, Address, TtlVaultContractClient<'static>) {
@@ -65,6 +64,49 @@ fn test_batch_check_in_extended_default_extension() {
     let expected = 2 * interval;
     assert_eq!(ttls.get(0).unwrap(), expected);
     assert_eq!(ttls.get(1).unwrap(), expected);
+}
+
+#[test]
+fn test_batch_check_in_extended_emits_check_in_event_for_each_vault() {
+    let (env, owner, client) = setup();
+    let beneficiary = Address::generate(&env);
+    let interval = 3_600u64;
+    let vault_id_1 = client.create_vault(&owner, &beneficiary, &interval, &None);
+    let vault_id_2 = client.create_vault(&owner, &beneficiary, &interval, &None);
+    let vault_ids = vec![&env, vault_id_1, vault_id_2];
+    let extension_amounts: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+
+    env.ledger().with_mut(|ledger| ledger.timestamp = 100);
+    let ttls = client
+        .batch_check_in_extended(&vault_ids, &extension_amounts, &owner)
+        .unwrap();
+
+    let check_in_events: alloc::vec::Vec<CheckInEvent> = env
+        .events()
+        .all()
+        .iter()
+        .filter_map(|event| {
+            let topics: soroban_sdk::Vec<soroban_sdk::Val> = event.1.clone().into_val(&env);
+            let topic = topics
+                .get(0)
+                .and_then(|value| value.try_into_val(&env).ok());
+            if topic == Some(CHECK_IN_RECORDED_TOPIC) {
+                event.2.try_into_val(&env).ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(check_in_events.len(), vault_ids.len());
+    for (index, vault_id) in vault_ids.iter().enumerate() {
+        let event = check_in_events
+            .iter()
+            .find(|event| event.vault_id == vault_id)
+            .expect("CheckInEvent missing for batch vault");
+        assert_eq!(event.caller, owner);
+        assert_eq!(event.new_ttl, ttls.get(index as u32).unwrap());
+    }
 }
 
 /// Custom extension amounts produce the correct per-vault TTL deadlines.

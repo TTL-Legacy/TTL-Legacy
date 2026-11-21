@@ -10,7 +10,7 @@ TTL-Legacy now supports advanced token management capabilities that allow vault 
 2. **Validate token whitelisting** in batch operations (Issue #582)
 3. **Stake tokens** for yield while locked (Issue #583)
 4. **Distribute or reinvest yield** (Issue #584)
-5. **Lend vault tokens** for interest income (Issue #585)
+5. **Receive loans against locked vaults** from a lender, repayable with a late penalty (Issue #585)
 6. **Use tokens as collateral** for loans (Issue #586)
 7. **Hedge token price risk** using derivatives (Issue #587)
 8. **Rebalance multi-token portfolios** based on target weights (Issue #588)
@@ -18,6 +18,10 @@ TTL-Legacy now supports advanced token management capabilities that allow vault 
 ## Fee Calculation
 
 This section explains how various fees are calculated in TTL-Legacy token management operations, enabling users to predict transaction costs and understand fee distribution.
+
+### Network Transaction Fees
+
+Stellar network fees (the XLM fee attached to every transaction) are paid by the transaction's source account, not out of the vault. Vault balances are only debited by the withdrawn or released amount, so a SEP-41 vault holding exactly the withdrawal amount can be withdrawn in full. The source account must still hold enough XLM to pay the network fee; the vault balance does not need to cover it.
 
 ### Swap Fees
 
@@ -454,7 +458,7 @@ pub fn enable_token_staking(
 
 **Requirements:**
 - Caller must be the vault owner
-- Annual yield must be between 0 and 10000 basis points
+- `annual_yield_bps` is stored as given; the contract does not currently validate its range
 
 **Events:**
 - `TOKEN_STAKING_TOPIC`: Emitted when staking is enabled
@@ -477,6 +481,31 @@ pub fn get_token_staking(env: Env, vault_id: u64) -> Option<TokenStaking>
 ```
 
 Returns the staking configuration for a vault.
+
+### Data Model and Lifecycle
+
+The `TokenStaking` record is stored per vault under `StorageKey::TokenStaking(vault_id)`.
+
+| Field | Meaning |
+|-------|---------|
+| `vault_id` | Vault the record belongs to |
+| `staking_pool` | Staking pool contract address supplied at enable time |
+| `staked_amount` | Principal staked. Set to `0` on enable; no current contract function increments it |
+| `staking_start` | Ledger timestamp used as the start of yield accrual |
+| `annual_yield_bps` | Annual yield in basis points |
+| `is_active` | Whether yield distribution is allowed |
+
+Lifecycle:
+
+1. **Not configured.** `get_token_staking` returns `None`. `distribute_yield` panics because it requires a staking record.
+2. **Enabled.** `enable_token_staking` writes a new record with `staked_amount = 0`, `staking_start = now` and `is_active = true`.
+3. **Yield accrues.** `distribute_yield` computes `staked_amount × annual_yield_bps × seconds_elapsed / (10000 × 365 × 86400)`, measured from `staking_start`. It returns without transferring anything when the result is `0`. It panics if `is_active` is `false`.
+4. **Disabled.** `disable_token_staking` sets `is_active = false` and keeps the record, so `get_token_staking` still returns it. It emits `TOKEN_UNSTAKING_TOPIC` even when no record exists.
+
+Notes:
+
+- Calling `enable_token_staking` again on a vault overwrites the existing record. This resets `staked_amount` to `0` and `staking_start` to the current time, with no guard.
+- `staked_amount` is never increased by the current contract. Until a stake-deposit path exists, every `distribute_yield` call computes zero yield.
 
 ### Example Usage
 
@@ -645,7 +674,7 @@ println!("Reinvested: {}", config.total_reinvested);
 
 ### Purpose
 
-Allow vault owners to lend vault tokens to a borrower and earn interest income.
+Allow a lender to advance tokens into a locked vault as a loan. The vault owner repays the principal, plus a late penalty if repayment is past the deadline.
 
 ### API
 
@@ -655,41 +684,73 @@ Allow vault owners to lend vault tokens to a borrower and earn interest income.
 pub fn enable_token_lending(
     env: Env,
     vault_id: u64,
-    caller: Address,
-    borrower: Address,
+    lender: Address,
     amount: i128,
-    interest_rate_bps: u32,
-    duration_seconds: u64,
+    repayment_deadline: u64,
+    late_penalty_bps: u32,
 ) -> Result<(), ContractError>
 ```
 
 **Parameters:**
 - `vault_id`: The vault ID
-- `caller`: Must be the vault owner
-- `borrower`: Address of the borrower
-- `amount`: Amount to lend (must be ≤ vault balance)
-- `interest_rate_bps`: Annual interest rate in basis points (e.g., 500 = 5%)
-- `duration_seconds`: Loan duration in seconds
+- `lender`: Address advancing the tokens. Must authorize the call
+- `amount`: Principal to advance. Must be positive
+- `repayment_deadline`: Ledger timestamp by which the loan should be repaid. Must be in the future
+- `late_penalty_bps`: Penalty in basis points of the principal, applied if repaid after the deadline. Must be ≤ 10000
+
+**Errors:**
+- `ContractError::Paused`: Contract is paused
+- `ContractError::InvalidAmount`: `amount` is not positive
+- `ContractError::InvalidBps`: `late_penalty_bps` exceeds 10000
+- `ContractError::InvalidDeadline`: `repayment_deadline` is not in the future
+- `ContractError::AlreadyReleased`: Vault is not in `Locked` status
+- `ContractError::LoanAlreadyExists`: The vault has an unrepaid loan
 
 **Events:**
-- `TOKEN_LENDING_TOPIC`: Emitted when lending is enabled
+- `LOAN_ENABLED_TOPIC`: Emitted when lending is enabled
 
 #### Repay Token Loan
 
 ```rust
-pub fn repay_token_loan(env: Env, vault_id: u64, caller: Address) -> Result<i128, ContractError>
+pub fn repay_token_loan(env: Env, vault_id: u64, caller: Address) -> Result<(), ContractError>
 ```
 
-Returns the accrued interest earned.
+Repays the outstanding loan. `caller` must be the vault owner. Repayment is `amount`, plus `amount × late_penalty_bps / 10000` if the ledger timestamp is after `repayment_deadline`.
 
 **Events:**
-- `TOKEN_LEND_REPAY_TOPIC`: Emitted on repayment
+- `LOAN_REPAID_TOPIC`: Emitted on repayment, with `(amount, penalty, now)`
 
 #### Get Token Lending
 
 ```rust
 pub fn get_token_lending(env: Env, vault_id: u64) -> Option<TokenLending>
 ```
+
+Returns the loan record for a vault, if one has been written.
+
+### Data Model and Lifecycle
+
+The `TokenLending` record is stored per vault under `StorageKey::Lending(vault_id)`.
+
+| Field | Meaning |
+|-------|---------|
+| `lender` | Address that advanced the principal |
+| `amount` | Principal advanced |
+| `repayment_deadline` | Ledger timestamp after which the late penalty applies |
+| `late_penalty_bps` | Late penalty in basis points of `amount` |
+| `repaid` | Whether the loan has been settled |
+
+Lifecycle:
+
+1. **No loan.** `get_token_lending` returns `None`, and `repay_token_loan` fails with `LoanNotFound`.
+2. **Open.** `enable_token_lending` transfers `amount` from the lender into the contract, adds it to `vault.balance`, and writes a record with `repaid = false`.
+3. **Repaid.** `repay_token_loan` transfers `amount` plus any penalty from the vault balance to the lender and sets `repaid = true`. The record is kept.
+
+Notes:
+
+- A new loan can be enabled only when no unrepaid loan exists. The repaid record is then overwritten.
+- Nothing changes the loan state when the deadline passes. The penalty is applied only when the owner repays. These functions do not liquidate or default a vault.
+- Repayment requires `vault.balance ≥ amount + penalty`, otherwise it fails with `InsufficientBalance`.
 
 ## Issue #586: Token Collateral
 
@@ -778,6 +839,59 @@ pub fn get_token_hedge(env: Env, vault_id: u64) -> Option<TokenHedge>
 ### Purpose
 
 Automatically rebalance a multi-token vault portfolio based on configured target weights.
+This feature allows vault owners to maintain a diversified portfolio that matches their intended asset allocation strategy.
+
+### Target Weights and Rebalancing Thresholds
+
+#### Target Weights
+
+Target weights define the desired allocation percentage for each token in the portfolio.
+
+**Definition:**
+- Each token has a `target_bps` (basis points) value representing its desired allocation
+- All `target_bps` values must sum to exactly 10000 (100%)
+- Valid range per token: 0 to 10000 basis points
+
+**Example Portfolio:**
+```
+Portfolio with 3 tokens:
+- XLM: 5000 bps = 50%
+- USDC: 3000 bps = 30%
+- ETH: 2000 bps = 20%
+Total: 10000 bps = 100% ✓
+
+Portfolio value: $10,000
+- XLM holdings: $5,000 (50%)
+- USDC holdings: $3,000 (30%)
+- ETH holdings: $2,000 (20%)
+```
+
+#### Rebalancing Threshold
+
+The rebalance threshold defines when a portfolio is considered "out of balance" and needs rebalancing.
+
+**Definition:**
+- `rebalance_threshold_bps`: Drift tolerance in basis points
+- Rebalancing is triggered when any token's actual allocation drifts beyond the threshold from its target
+- Example: threshold of 500 bps (5%) means rebalance if actual allocation differs from target by 5% or more
+
+**When to Rebalance:**
+```
+Portfolio with target allocations:
+- XLM target: 50% ± 5%
+- USDC target: 30% ± 5%
+- ETH target: 20% ± 5%
+
+Rebalance triggered when:
+- XLM drops below 45% or rises above 55%
+- USDC drops below 25% or rises above 35%
+- ETH drops below 15% or rises above 25%
+```
+
+**Typical Thresholds:**
+- Conservative (1-3%): Frequent rebalancing, lower drift, higher fees
+- Moderate (3-5%): Balanced approach, suitable for most portfolios
+- Aggressive (5-10%): Infrequent rebalancing, higher drift tolerance, lower fees
 
 ### API
 
@@ -794,11 +908,32 @@ pub fn set_token_rebalance(
 ```
 
 **Parameters:**
-- `target_weights`: Per-token allocations; `target_bps` values must sum to 10000
-- `rebalance_threshold_bps`: Drift tolerance before triggering a rebalance (e.g., 500 = 5%)
+- `vault_id`: The vault ID to rebalance
+- `caller`: Must be the vault owner
+- `target_weights`: Vector of token weights with target allocations
+  ```rust
+  pub struct TokenWeight {
+      pub token_address: Address,
+      pub target_bps: u32,  // 0 to 10000 (basis points)
+  }
+  ```
+- `rebalance_threshold_bps`: Drift tolerance in basis points (e.g., 500 = 5%)
+
+**Validation Rules:**
+- Sum of all `target_bps` must equal exactly 10000
+- All `target_bps` values must be non-negative
+- `rebalance_threshold_bps` must be between 0 and 10000
+- Caller must be the vault owner
+- Vault must support multi-token holdings
 
 **Events:**
 - `TOKEN_REBALANCE_TOPIC`: Emitted when rebalance config is set
+
+**Errors:**
+- `InvalidTargetWeights`: Weights don't sum to 10000
+- `InvalidThreshold`: Threshold is out of range
+- `Unauthorized`: Caller is not the vault owner
+- `VaultNotFound`: Vault does not exist
 
 #### Trigger Rebalance
 
@@ -806,14 +941,171 @@ pub fn set_token_rebalance(
 pub fn trigger_rebalance(env: Env, vault_id: u64) -> Result<(), ContractError>
 ```
 
+Manually triggers a rebalance of the vault portfolio to match target weights.
+
+**When to Use:**
+- After significant market movements
+- When portfolio has drifted beyond threshold
+- Periodically (e.g., quarterly or annually)
+- When vault owner wants to manually align allocations
+
+**Rebalancing Process:**
+1. Calculate current allocation for each token (actual_bps)
+2. Compare with target allocation
+3. Swap tokens to bring allocations within threshold
+4. Deduct rebalancing fees (typically 40 bps)
+5. Emit `TOKEN_REBALANCED_TOPIC` event
+
 **Events:**
-- `TOKEN_REBALANCED_TOPIC`: Emitted on each rebalance
+- `TOKEN_REBALANCED_TOPIC`: Emitted after rebalance completes
+
+**Fees:**
+- Standard rebalancing fee: 40 bps (0.4%) of portfolio value
 
 #### Get Token Rebalance
 
 ```rust
 pub fn get_token_rebalance(env: Env, vault_id: u64) -> Option<TokenRebalanceConfig>
 ```
+
+Retrieves the current rebalancing configuration and status.
+
+**Returns:**
+```rust
+pub struct TokenRebalanceConfig {
+    pub vault_id: u64,
+    pub target_weights: Vec<TokenWeight>,
+    pub rebalance_threshold_bps: u32,
+    pub last_rebalanced_at: u64,  // Ledger sequence number
+    pub total_rebalances: u32,     // Historical count
+}
+```
+
+### Example Invocations
+
+#### Example 1: Set Up a Balanced 60/40 Portfolio
+
+```rust
+// Create a 60/40 XLM/USDC portfolio with 3% rebalance threshold
+let target_weights = vec![
+    TokenWeight {
+        token_address: xlm_token.clone(),
+        target_bps: 6000,  // 60%
+    },
+    TokenWeight {
+        token_address: usdc_token.clone(),
+        target_bps: 4000,  // 40%
+    },
+];
+
+client.set_token_rebalance(
+    &vault_id,
+    &owner,
+    &target_weights,
+    &300u32,  // 3% threshold
+)?;
+
+println!("Portfolio set up: 60% XLM, 40% USDC");
+println!("Rebalance threshold: 3%");
+```
+
+#### Example 2: Diversified Multi-Asset Portfolio
+
+```rust
+// Create a diversified portfolio
+let target_weights = vec![
+    TokenWeight {
+        token_address: xlm_token.clone(),
+        target_bps: 5000,  // 50%
+    },
+    TokenWeight {
+        token_address: usdc_token.clone(),
+        target_bps: 2500,  // 25%
+    },
+    TokenWeight {
+        token_address: eth_token.clone(),
+        target_bps: 1500,  // 15%
+    },
+    TokenWeight {
+        token_address: btc_token.clone(),
+        target_bps: 1000,  // 10%
+    },
+];
+
+client.set_token_rebalance(
+    &vault_id,
+    &owner,
+    &target_weights,
+    &500u32,  // 5% threshold
+)?;
+
+// Later, trigger a rebalance if markets have shifted
+let rebalanced = client.trigger_rebalance(&vault_id)?;
+println!("Portfolio rebalanced to target weights");
+
+// Check current rebalance config
+if let Some(config) = client.get_token_rebalance(&vault_id) {
+    println!("Total rebalances performed: {}", config.total_rebalances);
+    println!("Last rebalanced at ledger: {}", config.last_rebalanced_at);
+}
+```
+
+#### Example 3: Conservative Portfolio with Low Drift Tolerance
+
+```rust
+// Conservative 80/20 portfolio with 1% rebalance threshold
+// This maintains tight allocation control
+let target_weights = vec![
+    TokenWeight {
+        token_address: usdc_token.clone(),
+        target_bps: 8000,  // 80% stablecoins
+    },
+    TokenWeight {
+        token_address: xlm_token.clone(),
+        target_bps: 2000,  // 20% native asset
+    },
+];
+
+client.set_token_rebalance(
+    &vault_id,
+    &owner,
+    &target_weights,
+    &100u32,  // 1% tight threshold
+)?;
+
+println!("Conservative portfolio: 80% USDC, 20% XLM");
+println!("Rebalance threshold: 1% (tight control)");
+```
+
+### Cost Analysis
+
+**Rebalancing Costs:**
+
+```
+Portfolio value: $10,000
+Rebalance threshold: 5%
+Rebalancing fee rate: 40 bps
+
+Cost per rebalance: ($10,000 × 40) / 10000 = $4.00
+Annual cost (monthly rebalance): $4.00 × 12 = $48.00
+Annual cost (quarterly rebalance): $4.00 × 4 = $16.00
+```
+
+**Break-even Analysis:**
+```
+If portfolio rebalance saves 2% in value drift per year:
+Value saved: $10,000 × 0.02 = $200/year
+Cost for quarterly rebalance: $16/year
+Net benefit: $200 - $16 = $184/year (92% ROI)
+```
+
+### Best Practices
+
+1. **Set Realistic Thresholds**: Balance between maintaining allocations and minimizing fees
+2. **Monitor Periodically**: Check drift and rebalance when approaching threshold
+3. **Coordinate with Market Conditions**: Avoid rebalancing during high volatility
+4. **Start Conservative**: Use higher thresholds (5-10%) to learn the feature
+5. **Review Annually**: Adjust target weights and thresholds based on market changes
 
 ## Security Considerations
 

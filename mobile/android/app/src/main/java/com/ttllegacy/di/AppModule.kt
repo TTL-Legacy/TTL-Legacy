@@ -8,6 +8,8 @@ import com.ttllegacy.api.NetworkMonitor
 import com.ttllegacy.api.OfflineCache
 import com.ttllegacy.api.TokenProvider
 import com.ttllegacy.services.CheckInDatabase
+import com.ttllegacy.services.CheckInSyncWorker
+import com.ttllegacy.services.NotificationHelper
 import com.ttllegacy.services.PendingCheckInDao
 import dagger.Module
 import dagger.Provides
@@ -38,4 +40,16 @@ object AppModule {
     @Provides @Singleton
     fun provideWorkManager(@ApplicationContext context: Context): WorkManager =
         WorkManager.getInstance(context)
+
+    @Provides @Singleton
+    fun provideNotificationHelper(@ApplicationContext context: Context): NotificationHelper =
+        NotificationHelper(context)
+
+    @Provides
+    fun provideCheckInSyncWorkerFactory(
+        apiClient: ApiClient,
+        pendingCheckInDao: PendingCheckInDao,
+        notificationHelper: NotificationHelper
+    ): CheckInSyncWorker.Factory =
+        CheckInSyncWorker.Factory(apiClient, pendingCheckInDao, notificationHelper)
 }

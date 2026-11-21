@@ -48,6 +48,31 @@ stellar keys show test-account
 
 ## Running Integration Tests
 
+### Oracle-triggered Release on Testnet
+
+This flow deploys both the vault and verifier contracts, attests a fixed-shape
+proof using the verifier's current test stub, and verifies that the vault
+releases to its beneficiary. It spends testnet XLM for fees and transfers one
+unit of the configured token; use funded test accounts only.
+
+Prerequisites:
+- Stellar CLI configured for testnet with funded admin and owner identities
+- `wasm32-unknown-unknown` Rust target installed
+- A testnet SEP-41 token contract ID in `TESTNET_TOKEN_ID`
+- A beneficiary Stellar account address
+
+```bash
+export TESTNET_ADMIN_IDENTITY=admin
+export TESTNET_OWNER_IDENTITY=owner
+export TESTNET_BENEFICIARY_ADDRESS=<beneficiary-address>
+export TESTNET_TOKEN_ID=<testnet-token-contract-id>
+bash scripts/oracle_release_testnet.sh
+```
+
+The proof used here exercises only the verifier's fixed-shape attestation flow;
+it is not a cryptographic proof. The verifier implementation must be replaced
+with the production proof system before treating this flow as a security test.
+
 ### Run All Integration Tests
 
 ```bash
@@ -430,3 +455,135 @@ Property tests run as part of the existing `./scripts/test.sh` and the CI workfl
 
 The `proptest` dev-dependency is already declared in
 `contracts/ttl_vault/Cargo.toml` under `[dev-dependencies]`.
+
+---
+
+## Full Vault Lifecycle Test (Issue #1178)
+
+The `lifecycle_full_flow` test in `contracts/ttl_vault/tests/integration_tests.rs`
+is a **non-ignored, in-process Soroban test** that exercises the complete vault
+lifecycle without requiring a live Stellar node.
+
+### What it tests
+
+The test covers the following sequence end-to-end:
+
+1. **`create_vault`** — Creates a new vault with a designated owner and beneficiary.
+2. **`deposit`** — Transfers XLM from the owner to the vault contract.
+3. **`check_in`** — Owner checks in to reset the countdown timer.
+4. **Ledger advance** — Simulates the passage of time past the TTL using
+   `env.ledger().with_mut(|l| l.timestamp += interval + 1)`.
+5. **`trigger_release`** — Anyone calls trigger after expiry; funds flow to
+   the beneficiary.
+
+### Assertions
+
+| Assertion | Verifies |
+|---|---|
+| `balance_after - balance_before == deposit_amount` | Beneficiary receives exactly the deposited amount |
+| `vault.status == ReleaseStatus::Released` | Vault is in the `Released` state post-trigger |
+| `vault.balance == 0` | Contract holds no residual funds after full release |
+
+### Running the test
+
+```bash
+# Run only the lifecycle integration test
+cargo test --package ttl-vault --test integration_tests lifecycle_full_flow
+
+# Run all non-ignored tests in the integration test file
+cargo test --package ttl-vault --test integration_tests
+```
+
+### Live testnet stubs
+
+The `#[ignore]`-annotated stubs in the same file (e.g., `integration_full_vault_lifecycle`)
+are placeholders for future live-network tests that require a funded account and
+a deployed contract. Run them with:
+
+```bash
+cargo test --package ttl-vault --test integration_tests -- --ignored --test-threads=1
+```
+
+---
+
+## Mutation Testing Workflow (Issue #1180)
+
+### What is mutation testing and why it matters
+
+Mutation testing automatically introduces small syntactic changes (_mutants_)
+into the source code — such as flipping `>=` to `>`, negating a boolean, or
+removing a function call — and then runs the full test suite against each
+mutant. If the tests **pass** with the mutated code, that mutant **survives**,
+indicating that no test is sensitive enough to detect the change.
+
+For a financial smart contract like TTL-Legacy, surviving mutants are
+particularly dangerous:
+
+- A mutant in `trigger_release` could allow funds to be released prematurely
+  or withheld indefinitely.
+- A mutant in `check_in` could bypass the liveness countdown.
+- A mutant in `withdraw` could allow over-withdrawal or bypass auth checks.
+
+### Installation and usage
+
+```bash
+# Install cargo-mutants
+cargo install cargo-mutants
+
+# Run against the entire contract source
+cargo mutants --package ttl-vault -- contracts/ttl_vault/src/
+
+# Run against a specific file to speed up iteration
+cargo mutants --package ttl-vault -- contracts/ttl_vault/src/lib.rs
+```
+
+Output summary example:
+
+```
+42 mutants tested in 8m 02s. 39 killed, 3 survived, 0 unviable.
+```
+
+Open `mutants.out/outcomes.json` for the full machine-readable results.
+
+### Critical paths to focus on
+
+| Function | Mutation risk | Recommended test approach |
+|---|---|---|
+| `trigger_release` | Funds sent to wrong address or wrong amount | Assert exact beneficiary delta + vault balance 0 |
+| `check_in` | TTL not extended, or extended by wrong amount | Assert `last_check_in` updated; assert not expired after check-in |
+| `withdraw` | Balance not debited, or auth not enforced | Assert balance decreases; assert non-owner fails |
+| `is_expired` | Wrong boundary condition (`>=` vs `>`) | Test at exact expiry timestamp boundary |
+| `deposit` | Amount not added, or wrong vault credited | Assert vault.balance == previous + amount |
+
+### Suggested CI step (GitHub Actions)
+
+Add the following job to your workflow to report mutant survival rate per PR
+as a downloadable artifact. Results are **informational** and non-blocking
+(`continue-on-error: true`).
+
+```yaml
+mutation-testing:
+  name: Mutation Testing (informational)
+  runs-on: ubuntu-latest
+  continue-on-error: true   # Results are informational — do not block merges.
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-mutants
+      run: cargo install cargo-mutants
+
+    - name: Run mutation tests
+      run: cargo mutants --package ttl-vault 2>&1 | tee mutants-report.txt
+
+    - name: Upload mutant survival report
+      uses: actions/upload-artifact@v4
+      with:
+        name: mutant-survival-report
+        path: mutants-report.txt
+        retention-days: 14
+```
+
+See also `.github/workflows/mutation-testing.yml` for the full standalone workflow file.

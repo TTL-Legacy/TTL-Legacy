@@ -23,6 +23,7 @@ Create or update reminder preferences for a vault.
 | `channels`             | array of string | Yes      | One or more of: `"email"`, `"sms"`, `"push"`            |
 | `hours_before_expiry`  | integer (> 0)   | Yes      | Hours before TTL expiry to send the first reminder       |
 | `frequency`            | string          | Yes      | How often to repeat: `"once"`, `"daily"`, `"hourly"`    |
+| `timezone`             | string          | No       | IANA zone for the 09:00 local reminder time (default `"UTC"`) |
 
 **Example Request**
 
@@ -30,7 +31,8 @@ Create or update reminder preferences for a vault.
 {
   "channels": ["email", "sms"],
   "hours_before_expiry": 48,
-  "frequency": "daily"
+  "frequency": "daily",
+  "timezone": "America/New_York"
 }
 ```
 
@@ -81,6 +83,164 @@ Retrieve current reminder preferences for a vault.
   "channels": ["email", "sms"],
   "hours_before_expiry": 48,
   "frequency": "daily"
+}
+```
+
+---
+
+## Two-Factor Authentication
+
+2FA endpoints live under `/api/vaults/{vault_id}/2fa`. All endpoints require the vault to exist and return `404` with `{"error": "vault not found"}` otherwise.
+
+TOTP secrets are encrypted at rest using the server's `TOTP_ENCRYPTION_KEY` environment variable. If that variable is not set, any endpoint that needs to read or write a secret returns `500` with `{"error": "TOTP_ENCRYPTION_KEY not configured"}`.
+
+### POST `/api/vaults/{vault_id}/2fa/setup`
+
+Enable 2FA for a vault. For `totp`, generates a new secret and returns it together with a provisioning URI for authenticator apps. For `sms` / `email`, stores the destination contact and sends a verification code.
+
+**Path Parameters**
+
+| Name       | Type   | Description       |
+|------------|--------|-------------------|
+| `vault_id` | uint64 | On-chain vault ID |
+
+**Request Body** (`application/json`)
+
+| Field    | Type   | Required | Description                                          |
+|----------|--------|----------|------------------------------------------------------|
+| `method` | string | Yes      | One of: `"totp"`, `"sms"`, `"email"`                 |
+| `phone`  | string | For `sms`| Destination phone number                             |
+| `email`  | string | For `email` | Destination email address                         |
+
+**Example Request**
+
+```json
+{
+  "method": "totp"
+}
+```
+
+**Responses**
+
+| Status | Description                                                        |
+|--------|--------------------------------------------------------------------|
+| 200    | 2FA enabled; returns `Enable2FAResponse`                           |
+| 400    | Invalid method, or missing `phone` / `email` for the chosen method |
+| 404    | Vault not found                                                    |
+| 500    | Internal server error, or `TOTP_ENCRYPTION_KEY` not configured     |
+
+**Example Response (200)**
+
+```json
+{
+  "method": "totp",
+  "secret": "JBSWY3DPEHPK3PXP",
+  "provisioning_uri": "otpauth://totp/TTL-Legacy:42?secret=JBSWY3DPEHPK3PXP&issuer=TTL-Legacy"
+}
+```
+
+For `sms` / `email` the response omits `secret` and `provisioning_uri`.
+
+---
+
+### POST `/api/vaults/{vault_id}/2fa/verify`
+
+Verify a 2FA code. On success the vault is marked as verified for the current session/window.
+
+**Path Parameters**
+
+| Name       | Type   | Description       |
+|------------|--------|-------------------|
+| `vault_id` | uint64 | On-chain vault ID |
+
+**Request Body** (`application/json`)
+
+| Field  | Type   | Required | Description                                  |
+|--------|--------|----------|----------------------------------------------|
+| `code` | string | Yes      | TOTP code or SMS/email verification code     |
+
+**Example Request**
+
+```json
+{
+  "code": "123456"
+}
+```
+
+**Responses**
+
+| Status | Description                                                  |
+|--------|--------------------------------------------------------------|
+| 200    | Code accepted; returns `{"verified": true}`                  |
+| 401    | Invalid or expired code                                      |
+| 404    | Vault not found, or 2FA not configured for this vault        |
+| 500    | Internal server error, or `TOTP_ENCRYPTION_KEY` not configured |
+
+**Example Response (200)**
+
+```json
+{
+  "verified": true
+}
+```
+
+---
+
+### POST `/api/vaults/{vault_id}/2fa/rotate-key`
+
+Rotate the stored TOTP secret. Generates a fresh secret, re-encrypts it with `TOTP_ENCRYPTION_KEY`, and returns a new provisioning URI. Previously issued codes stop working immediately.
+
+**Path Parameters**
+
+| Name       | Type   | Description       |
+|------------|--------|-------------------|
+| `vault_id` | uint64 | On-chain vault ID |
+
+**Request Body:** none.
+
+**Responses**
+
+| Status | Description                                                  |
+|--------|--------------------------------------------------------------|
+| 200    | Secret rotated; returns `Enable2FAResponse`                  |
+| 404    | Vault not found, or 2FA not configured for this vault        |
+| 500    | Internal server error, or `TOTP_ENCRYPTION_KEY` not configured |
+
+**Example Response (200)**
+
+```json
+{
+  "method": "totp",
+  "secret": "KRSXG5CTMVRXEZLU",
+  "provisioning_uri": "otpauth://totp/TTL-Legacy:42?secret=KRSXG5CTMVRXEZLU&issuer=TTL-Legacy"
+}
+```
+
+---
+
+### DELETE `/api/vaults/{vault_id}/2fa`
+
+Disable 2FA for a vault and delete the stored secret / contact.
+
+**Path Parameters**
+
+| Name       | Type   | Description       |
+|------------|--------|-------------------|
+| `vault_id` | uint64 | On-chain vault ID |
+
+**Responses**
+
+| Status | Description                                            |
+|--------|--------------------------------------------------------|
+| 200    | 2FA disabled; returns `{"disabled": true}`             |
+| 404    | Vault not found, or 2FA not configured for this vault  |
+| 500    | Internal server error                                  |
+
+**Example Response (200)**
+
+```json
+{
+  "disabled": true
 }
 ```
 
