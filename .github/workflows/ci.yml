@@ -19,6 +19,14 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Enforce commitlint on PRs
+        if: github.event_name == 'pull_request'
+        run: |
+          npm install --no-save @commitlint/cli@19 @commitlint/config-conventional@19
+          npx commitlint --config commitlint.config.js --from HEAD~1 --to HEAD --verbose
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
