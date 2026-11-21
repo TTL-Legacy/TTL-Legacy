@@ -433,3 +433,99 @@ pub async fn submit_proof_of_life(
         "beneficiary": body.beneficiary,
     })))
 }
+
+
+// ── Issue #2066: Token price oracle config and vault estimated value ──────────
+
+use crate::token_price_oracle::{
+    apply_oracle_config, estimate_vault_value, get_oracle_config, SharedOracleState,
+};
+use crate::models::SetOracleConfigRequest;
+use std::sync::Arc;
+
+/// PUT /admin/oracle/config
+///
+/// Admin-only endpoint: set or update the global token price oracle
+/// configuration. The scheduler uses this config to know when and where to
+/// fetch prices from (Redstone / Pyth).
+#[instrument(skip(oracle_state))]
+pub async fn put_oracle_config(
+    oracle_state: Data<SharedOracleState>,
+    body: Json<SetOracleConfigRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let config = apply_oracle_config(&oracle_state, body.into_inner())
+        .map_err(AppError::InvalidInput)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "updated",
+        "provider": format!("{:?}", config.provider),
+        "refresh_interval_seconds": config.refresh_interval_seconds,
+        "enabled": config.enabled,
+        "updated_at": config.updated_at.to_rfc3339(),
+    })))
+}
+
+/// GET /admin/oracle/config
+///
+/// Return the current oracle configuration, or 404 if none has been set.
+#[instrument(skip(oracle_state))]
+pub async fn get_oracle_config_route(
+    oracle_state: Data<SharedOracleState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let config = get_oracle_config(&oracle_state).ok_or(AppError::NotFound)?;
+
+    Ok(Json(serde_json::json!({
+        "provider": format!("{:?}", config.provider),
+        "endpoint_url": config.endpoint_url,
+        "refresh_interval_seconds": config.refresh_interval_seconds,
+        "xlm_feed_id": config.xlm_feed_id,
+        "enabled": config.enabled,
+        "updated_at": config.updated_at.to_rfc3339(),
+    })))
+}
+
+/// GET /vaults/{id}/estimated-value
+///
+/// Returns the estimated USD value of the vault's current balance using the
+/// latest price from the configured oracle.
+///
+/// Returns HTTP 503 when the oracle is not configured or the price cache is
+/// empty, with an `is_stale` flag when cached data is older than
+/// `2 × refresh_interval_seconds`.
+#[instrument(skip(state, oracle_state), fields(vault_id = %vault_id))]
+pub async fn get_vault_estimated_value(
+    state: Data<Arc<AppState>>,
+    oracle_state: Data<SharedOracleState>,
+    vault_id: Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let vault_id_str = vault_id.into_inner();
+    let vault_id_u64: u64 = vault_id_str
+        .parse()
+        .map_err(|_| AppError::InvalidInput("vault_id must be a u64".into()))?;
+
+    let vault = state.db.get(vault_id_u64)?;
+
+    // Use "XLM" as default token symbol; SEP-41 tokens use their contract address.
+    let token_id = "XLM";
+
+    let estimate = estimate_vault_value(
+        &oracle_state,
+        &vault_id_str,
+        vault.balance,
+        token_id,
+    )
+    .ok_or_else(|| {
+        AppError::InvalidInput("Oracle not configured — no price data available".into())
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "vault_id": estimate.vault_id,
+        "balance_stroops": estimate.balance_stroops,
+        "estimated_value_usd": estimate.estimated_value_usd,
+        "token_symbol": estimate.token_symbol,
+        "price_per_token_usd": estimate.price_per_token_usd,
+        "price_fetched_at": estimate.price_fetched_at.map(|t| t.to_rfc3339()),
+        "is_stale": estimate.is_stale,
+        "estimated_at": estimate.estimated_at.to_rfc3339(),
+    })))
+}

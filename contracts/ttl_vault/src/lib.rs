@@ -4753,6 +4753,7 @@ impl TtlVaultContract {
             claimed_installments: 0,
             total_amount: amount,
             cliff_period,
+            cliff_grace_period_seconds: 0,
         };
         let key = StorageKey::VestingSchedule(vault_id, schedule_index);
         let ttl = vault_ttl_ledgers(vault.check_in_interval);
@@ -4927,7 +4928,24 @@ impl TtlVaultContract {
         }
 
         // Issue #1756: apply late-claim penalty if VestingPenaltyConfig is set.
-        let amount = if let Some(penalty_cfg) = env
+        // Issue #2065: skip penalty for installments claimed within cliff_grace_period_seconds.
+        let cliff_date = schedule.start_time.saturating_add(schedule.cliff_period);
+        let within_cliff_grace = schedule.cliff_grace_period_seconds > 0
+            && now < cliff_date.saturating_add(schedule.cliff_grace_period_seconds);
+
+        // Emit grace-period event when the claim lands in the cliff grace window.
+        if within_cliff_grace {
+            env.events().publish(
+                (CLIFF_GRACE_CLAIM_TOPIC, vault_id),
+                (schedule_id, now),
+            );
+        }
+
+        let amount = if within_cliff_grace {
+            // Cliff grace window: treat the claim as on-time regardless of
+            // whether a VestingPenaltyConfig exists.
+            base_amount
+        } else if let Some(penalty_cfg) = env
             .storage()
             .persistent()
             .get::<StorageKey, VestingPenaltyConfig>(&StorageKey::VestingPenalty(vault_id))
@@ -5104,6 +5122,53 @@ impl TtlVaultContract {
         env.storage()
             .persistent()
             .get(&StorageKey::VestingPenalty(vault_id))
+    }
+
+    /// Set or update the cliff grace period for a specific vesting schedule.
+    ///
+    /// A claim submitted within `[cliff_date, cliff_date + grace_seconds)` will
+    /// be treated as on-time — no late-claim penalty is applied even if a
+    /// `VestingPenaltyConfig` is configured for the vault.
+    ///
+    /// Pass `grace_seconds = 0` to disable the grace window.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`      - caller is not the vault owner
+    /// * `ContractError::VestingNotFound` - no schedule at `schedule_id`
+    ///
+    /// Issue #2065.
+    pub fn set_cliff_grace_period(
+        env: Env,
+        vault_id: u64,
+        schedule_id: u32,
+        caller: Address,
+        grace_seconds: u64,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let sched_key = StorageKey::VestingSchedule(vault_id, schedule_id);
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&sched_key)
+            .ok_or(ContractError::VestingNotFound)?;
+        schedule.cliff_grace_period_seconds = grace_seconds;
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage()
+            .persistent()
+            .extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (CLIFF_GRACE_CLAIM_TOPIC, vault_id),
+            (schedule_id, grace_seconds),
+        );
+        Ok(())
     }
 
     // --- Issue #548: Vesting Reversal ---
