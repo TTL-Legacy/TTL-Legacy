@@ -9,7 +9,10 @@ pub mod oracle;
 pub mod ranking;
 mod constants;
 mod types;
+// Issue #2110: centralised vault lifecycle state-transition guards.
+mod vault_state_machine;
 pub use oracle::{OracleClient, OracleInterface};
+pub use vault_state_machine::{state_of, transition, TransitionContext, VaultState};
 // The contract's `#[contracttype]` types are re-exported publicly so that
 // client crates (integration tests, fuzz targets) can reference them.
 pub use types::*;
@@ -3310,23 +3313,19 @@ impl TtlVaultContract {
         // Attempt to restore archived vault state before proceeding - Issue #443
         Self::try_restore_archived_vault(&env, vault_id);
         let mut vault = Self::load_vault(&env, vault_id);
-        if vault.is_paused {
-            panic_with_error!(&env, ContractError::VaultPaused);
-        }
-        if Self::check_vault_frozen(&env, vault_id) {
-            panic_with_error!(&env, ContractError::VaultFrozen);
-        }
-        // Issue #1853: Owner lock must block beneficiary-triggered release
-        if Self::is_owner_vault_locked(env.clone(), vault_id) {
-            panic_with_error!(&env, ContractError::VaultOwnerLocked);
-        }
-        if env
-            .storage()
-            .persistent()
-            .has(&StorageKey::ReleaseAttempted(vault_id))
-            || vault.status != ReleaseStatus::Locked
-        {
-            panic_with_error!(&env, ContractError::AlreadyReleased);
+        let from = state_of(&vault.status, vault.is_paused);
+        let context = TransitionContext {
+            is_paused: vault.is_paused,
+            is_admin_frozen: Self::check_vault_frozen(&env, vault_id),
+            // Issue #1853: Owner lock must block beneficiary-triggered release
+            is_owner_locked: Self::is_owner_vault_locked(env.clone(), vault_id),
+            release_attempted: env
+                .storage()
+                .persistent()
+                .has(&StorageKey::ReleaseAttempted(vault_id)),
+        };
+        if let Err(err) = transition(from, VaultState::Released, context) {
+            panic_with_error!(&env, err);
         }
         let total = vault.balance;
         if total == 0 {
@@ -8121,12 +8120,8 @@ impl TtlVaultContract {
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        if vault.status == ReleaseStatus::EmergencyFrozen {
-            return Err(ContractError::VaultFrozen);
-        }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
+        let from = state_of(&vault.status, vault.is_paused);
+        transition(from, VaultState::Cancelled, TransitionContext::default())?;
         // If multi-sig is configured, require proposal instead
         if env
             .storage()
@@ -8587,9 +8582,8 @@ impl TtlVaultContract {
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
+        let from = state_of(&vault.status, vault.is_paused);
+        transition(from, VaultState::Paused, TransitionContext::default())?;
         vault.is_paused = true;
         Self::save_vault(&env, vault_id, &vault);
         env.storage()
@@ -8618,9 +8612,8 @@ impl TtlVaultContract {
         if caller != vault.owner {
             return Err(ContractError::NotOwner);
         }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
+        let from = state_of(&vault.status, vault.is_paused);
+        transition(from, VaultState::Active, TransitionContext::default())?;
         vault.is_paused = false;
         Self::save_vault(&env, vault_id, &vault);
         env.storage()
@@ -14880,9 +14873,8 @@ impl TtlVaultContract {
         if caller != vault.owner && caller != admin {
             return Err(ContractError::NotOwner);
         }
-        if vault.status == ReleaseStatus::Locked {
-            return Err(ContractError::NotExpired);
-        }
+        let from = state_of(&vault.status, vault.is_paused);
+        transition(from, VaultState::Archived, TransitionContext::default())?;
 
         let key = StorageKey::ArchivedVault(vault_id);
         env.storage()
@@ -14918,9 +14910,8 @@ impl TtlVaultContract {
     pub fn prune_vault(env: Env, vault_id: u64) -> Result<(), ContractError> {
         Self::require_admin(&env);
         let vault = Self::load_vault(&env, vault_id);
-        if vault.status == ReleaseStatus::Locked {
-            return Err(ContractError::NotExpired);
-        }
+        let from = state_of(&vault.status, vault.is_paused);
+        transition(from, VaultState::Pruned, TransitionContext::default())?;
         env.storage()
             .persistent()
             .remove(&StorageKey::Vault(vault_id));
