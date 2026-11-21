@@ -591,6 +591,64 @@ impl Db {
                 CREATE INDEX IF NOT EXISTS idx_state_transitions_triggered_by ON state_transitions(triggered_by);
                 "#,
             ),
+            // Issue #2056: withdrawal rate-limit config and accounting ledger.
+            (
+                "10",
+                r#"
+                CREATE TABLE IF NOT EXISTS withdrawal_rate_limit_configs (
+                    vault_id              TEXT    PRIMARY KEY,
+                    max_amount_per_window INTEGER NOT NULL,
+                    window_seconds        INTEGER NOT NULL,
+                    created_at            TEXT    NOT NULL,
+                    updated_at            TEXT    NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS withdrawal_rate_limit_records (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id    TEXT    NOT NULL,
+                    amount      INTEGER NOT NULL,
+                    recorded_at TEXT    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_wrl_records_vault_id_recorded_at
+                    ON withdrawal_rate_limit_records (vault_id, recorded_at);
+                "#,
+            ),
+            // Issue #2058: low-TTL mobile push opt-in preferences and sent-record log.
+            (
+                "11",
+                r#"
+                CREATE TABLE IF NOT EXISTS low_ttl_push_preferences (
+                    vault_id        TEXT    NOT NULL,
+                    owner           TEXT    NOT NULL,
+                    android_enabled INTEGER NOT NULL DEFAULT 0,
+                    ios_enabled     INTEGER NOT NULL DEFAULT 0,
+                    updated_at      TEXT    NOT NULL,
+                    PRIMARY KEY (vault_id, owner)
+                );
+                CREATE TABLE IF NOT EXISTS low_ttl_push_sent_records (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id    TEXT    NOT NULL,
+                    owner       TEXT    NOT NULL,
+                    sent_at     TEXT    NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_low_ttl_push_sent_vault_id
+                    ON low_ttl_push_sent_records (vault_id);
+                "#,
+            ),
+            // Issue #2059: vault config export audit log.
+            (
+                "12",
+                r#"
+                CREATE TABLE IF NOT EXISTS vault_config_exports (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id    TEXT NOT NULL,
+                    owner       TEXT NOT NULL,
+                    exported_at TEXT NOT NULL,
+                    signature   TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_vault_config_exports_vault_id
+                    ON vault_config_exports (vault_id);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -1572,5 +1630,287 @@ mod tests {
         let result3 = search_vaults(&store, &query3);
         assert_eq!(result3.vaults.len(), 5);
         assert!(result3.next_cursor.is_none());
+    }
+}
+
+// ── Issue #2056: Withdrawal rate-limit config DB methods ─────────────────────
+
+impl Db {
+    /// Upsert the withdrawal rate-limit config for a vault.
+    pub fn upsert_withdrawal_rate_limit_config(
+        &self,
+        config: &crate::models::WithdrawalRateLimitConfig,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO withdrawal_rate_limit_configs
+                (vault_id, max_amount_per_window, window_seconds, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(vault_id) DO UPDATE SET
+                max_amount_per_window = excluded.max_amount_per_window,
+                window_seconds        = excluded.window_seconds,
+                updated_at            = excluded.updated_at
+            "#,
+            params![
+                config.vault_id,
+                config.max_amount_per_window as i64,
+                config.window_seconds as i64,
+                config.created_at.to_rfc3339(),
+                config.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve the withdrawal rate-limit config for a vault, if set.
+    pub fn get_withdrawal_rate_limit_config(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<crate::models::WithdrawalRateLimitConfig>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT vault_id, max_amount_per_window, window_seconds, created_at, updated_at
+               FROM withdrawal_rate_limit_configs
+               WHERE vault_id = ?1"#,
+        )?;
+        let row = stmt.query_row(params![vault_id], |r| {
+            let created_at_str: String = r.get(3)?;
+            let updated_at_str: String = r.get(4)?;
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e)))?;
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
+            Ok(crate::models::WithdrawalRateLimitConfig {
+                vault_id: r.get(0)?,
+                max_amount_per_window: r.get::<_, i64>(1)? as i128,
+                window_seconds: r.get::<_, i64>(2)? as u64,
+                created_at,
+                updated_at,
+            })
+        });
+        match row {
+            Ok(c) => Ok(Some(c)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete the withdrawal rate-limit config for a vault.
+    pub fn delete_withdrawal_rate_limit_config(
+        &self,
+        vault_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM withdrawal_rate_limit_configs WHERE vault_id = ?1",
+            params![vault_id],
+        )?;
+        Ok(())
+    }
+
+    /// Record a successful withdrawal amount for rate-limit accounting.
+    pub fn record_withdrawal_for_rate_limit(
+        &self,
+        vault_id: &str,
+        amount: i128,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO withdrawal_rate_limit_records (vault_id, amount, recorded_at)
+               VALUES (?1, ?2, ?3)"#,
+            params![vault_id, amount as i64, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Sum all withdrawals recorded for `vault_id` within the last
+    /// `window_seconds` seconds, and prune expired records.
+    ///
+    /// This is the core read used by the rate-limit enforcement path.
+    pub fn sum_withdrawals_in_window(
+        &self,
+        vault_id: &str,
+        window_seconds: u64,
+    ) -> Result<i128, rusqlite::Error> {
+        let cutoff = (chrono::Utc::now()
+            - chrono::Duration::seconds(window_seconds as i64))
+        .to_rfc3339();
+
+        // Prune stale records first to keep the table small.
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM withdrawal_rate_limit_records WHERE vault_id = ?1 AND recorded_at < ?2",
+            params![vault_id, &cutoff],
+        )?;
+
+        let total: i64 = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0) FROM withdrawal_rate_limit_records WHERE vault_id = ?1",
+                params![vault_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        Ok(total as i128)
+    }
+
+    // ── Issue #2057: Vault summary with health score ──────────────────────────
+
+    /// Build a `VaultSummaryResponse` for the given vault, computing the
+    /// health score from available data.
+    ///
+    /// `check_in_streak` and `backup_code_age_secs` are caller-supplied
+    /// because they may come from separate stores; pass `0` / `None` when
+    /// unavailable and the score degrades gracefully.
+    pub fn get_vault_summary_response(
+        &self,
+        vault_id: &str,
+        check_in_streak: u32,
+        beneficiary_confirmed: bool,
+        backup_code_age_secs: Option<u64>,
+    ) -> Result<Option<crate::models::VaultSummaryResponse>, rusqlite::Error> {
+        let vault = self.get_vault(vault_id);
+        let vault = match vault {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let inputs = crate::models::VaultSummaryHealthInputs {
+            ttl_remaining: vault.ttl_remaining,
+            check_in_interval: vault.check_in_interval,
+            check_in_streak,
+            beneficiary_confirmed,
+            backup_code_age_secs,
+        };
+        let health_score = crate::models::compute_vault_summary_health_score(&inputs);
+
+        Ok(Some(crate::models::VaultSummaryResponse {
+            vault_id: vault.id,
+            owner: vault.owner,
+            status: vault.status,
+            ttl_remaining: vault.ttl_remaining,
+            balance: vault.balance,
+            health_score,
+        }))
+    }
+
+    // ── Issue #2058: Low-TTL mobile push preferences ─────────────────────────
+
+    /// Upsert per-vault low-TTL mobile push opt-in preferences.
+    pub fn upsert_low_ttl_push_preferences(
+        &self,
+        prefs: &crate::models::LowTtlPushPreferences,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO low_ttl_push_preferences
+                (vault_id, owner, android_enabled, ios_enabled, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(vault_id, owner) DO UPDATE SET
+                android_enabled = excluded.android_enabled,
+                ios_enabled     = excluded.ios_enabled,
+                updated_at      = excluded.updated_at
+            "#,
+            params![
+                prefs.vault_id,
+                prefs.owner,
+                prefs.android_enabled as i64,
+                prefs.ios_enabled as i64,
+                prefs.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve low-TTL mobile push preferences for a vault + owner pair.
+    pub fn get_low_ttl_push_preferences(
+        &self,
+        vault_id: &str,
+        owner: &str,
+    ) -> Result<Option<crate::models::LowTtlPushPreferences>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT vault_id, owner, android_enabled, ios_enabled, updated_at
+               FROM low_ttl_push_preferences
+               WHERE vault_id = ?1 AND owner = ?2"#,
+        )?;
+        let row = stmt.query_row(params![vault_id, owner], |r| {
+            let updated_at_str: String = r.get(4)?;
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e)))?;
+            Ok(crate::models::LowTtlPushPreferences {
+                vault_id: r.get(0)?,
+                owner: r.get(1)?,
+                android_enabled: r.get::<_, i64>(2)? != 0,
+                ios_enabled: r.get::<_, i64>(3)? != 0,
+                updated_at,
+            })
+        });
+        match row {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Record that a low-TTL push was sent for a vault, used to suppress
+    /// duplicates within the cooldown window.
+    pub fn record_low_ttl_push_sent(
+        &self,
+        vault_id: &str,
+        owner: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO low_ttl_push_sent_records (vault_id, owner, sent_at)
+               VALUES (?1, ?2, ?3)"#,
+            params![vault_id, owner, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Return the most recent low-TTL push timestamp for a vault + owner, if any.
+    pub fn last_low_ttl_push_sent_at(
+        &self,
+        vault_id: &str,
+        owner: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, rusqlite::Error> {
+        let binding = self.conn.lock().unwrap();
+        let mut stmt = binding.prepare(
+            r#"SELECT sent_at FROM low_ttl_push_sent_records
+               WHERE vault_id = ?1 AND owner = ?2
+               ORDER BY sent_at DESC LIMIT 1"#,
+        )?;
+        let row: Result<String, rusqlite::Error> =
+            stmt.query_row(params![vault_id, owner], |r| r.get(0));
+        match row {
+            Ok(s) => {
+                let dt = chrono::DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?;
+                Ok(Some(dt))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    // ── Issue #2059: Vault config export/import ───────────────────────────────
+
+    /// Record an export event for auditing purposes.
+    pub fn record_vault_config_export(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        signature: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO vault_config_exports (vault_id, owner, exported_at, signature)
+               VALUES (?1, ?2, ?3, ?4)"#,
+            params![vault_id, owner, chrono::Utc::now().to_rfc3339(), signature],
+        )?;
+        Ok(())
     }
 }

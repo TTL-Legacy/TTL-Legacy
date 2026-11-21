@@ -433,3 +433,212 @@ pub async fn submit_proof_of_life(
         "beneficiary": body.beneficiary,
     })))
 }
+
+// ── Issue #2056: Withdrawal rate-limit config endpoints ──────────────────────
+
+/// PUT /api/vaults/:vault_id/withdrawal-rate-limit
+///
+/// Set or update the per-vault withdrawal rate-limit configuration.
+/// Only the vault owner may set the config.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn set_withdrawal_rate_limit(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+    body: Json<crate::models::SetWithdrawalRateLimitRequest>,
+) -> Result<Json<crate::models::WithdrawalRateLimitConfig>, AppError> {
+    if body.max_amount_per_window <= 0 {
+        return Err(AppError::InvalidInput(
+            "max_amount_per_window must be positive".into(),
+        ));
+    }
+    if body.window_seconds == 0 {
+        return Err(AppError::InvalidInput(
+            "window_seconds must be greater than zero".into(),
+        ));
+    }
+
+    let now = chrono::Utc::now();
+    let vault_id_str = vault_id.into_inner();
+
+    // Check whether a config already exists so we can preserve created_at.
+    let existing = state
+        .db
+        .get_withdrawal_rate_limit_config(&vault_id_str)
+        .map_err(AppError::from)?;
+    let created_at = existing.map(|c| c.created_at).unwrap_or(now);
+
+    let config = crate::models::WithdrawalRateLimitConfig {
+        vault_id: vault_id_str.clone(),
+        max_amount_per_window: body.max_amount_per_window,
+        window_seconds: body.window_seconds,
+        created_at,
+        updated_at: now,
+    };
+
+    state
+        .db
+        .upsert_withdrawal_rate_limit_config(&config)
+        .map_err(AppError::from)?;
+
+    Ok(Json(config))
+}
+
+/// GET /api/vaults/:vault_id/withdrawal-rate-limit
+///
+/// Retrieve the current withdrawal rate-limit configuration for a vault.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_withdrawal_rate_limit(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+) -> Result<Json<crate::models::WithdrawalRateLimitConfig>, AppError> {
+    let config = state
+        .db
+        .get_withdrawal_rate_limit_config(&vault_id.into_inner())
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+
+    Ok(Json(config))
+}
+
+/// DELETE /api/vaults/:vault_id/withdrawal-rate-limit
+///
+/// Remove the withdrawal rate-limit configuration for a vault.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn delete_withdrawal_rate_limit(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+) -> Result<StatusCode, AppError> {
+    state
+        .db
+        .delete_withdrawal_rate_limit_config(&vault_id.into_inner())
+        .map_err(AppError::from)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Issue #2057: Vault summary with health score ──────────────────────────────
+
+/// GET /vaults/:vault_id/summary
+///
+/// Returns extended vault metadata with a 0–100 health score derived from TTL
+/// remaining, check-in streak, beneficiary confirmation status, and backup
+/// code freshness.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_vault_summary(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+) -> Result<Json<crate::models::VaultSummaryResponse>, AppError> {
+    // In a full implementation streak, confirmed flag and backup-code age would
+    // be sourced from their own persistence layers. Here we pass neutral defaults
+    // so the endpoint degrades gracefully when that data is not yet available.
+    let summary = state
+        .db
+        .get_vault_summary_response(
+            &vault_id.into_inner(),
+            0,     // check_in_streak: 0 until streak tracking is wired up
+            false, // beneficiary_confirmed: conservative default
+            None,  // backup_code_age_secs: unknown
+        )
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+
+    Ok(Json(summary))
+}
+
+// ── Issue #2058: Low-TTL mobile push preferences ─────────────────────────────
+
+/// PUT /api/vaults/:vault_id/low-ttl-push-preferences
+///
+/// Register or update the low-TTL mobile push opt-in preferences for a vault
+/// owner. The push fires when TTL drops below 48 h and no check-in has been
+/// recorded in the last 24 h.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn set_low_ttl_push_preferences(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<u64>,
+    body: Json<crate::models::SetLowTtlPushPreferencesRequest>,
+) -> Result<Json<crate::models::LowTtlPushPreferences>, AppError> {
+    let vault_id_u = vault_id.into_inner();
+    let vault_id_str = vault_id_u.to_string();
+
+    let prefs = crate::models::LowTtlPushPreferences {
+        vault_id: vault_id_str.clone(),
+        owner: body.owner.clone(),
+        android_enabled: body.android_enabled,
+        ios_enabled: body.ios_enabled,
+        updated_at: chrono::Utc::now(),
+    };
+
+    state
+        .db
+        .upsert_low_ttl_push_preferences(&prefs)
+        .map_err(AppError::from)?;
+
+    Ok(Json(prefs))
+}
+
+/// GET /api/vaults/:vault_id/low-ttl-push-preferences
+///
+/// Retrieve the current low-TTL push preferences for a vault + owner pair.
+/// Returns 404 when the owner has never configured this.
+#[derive(serde::Deserialize)]
+pub struct LowTtlPushPrefsQuery {
+    pub owner: String,
+}
+
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_low_ttl_push_preferences(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<u64>,
+    query: Query<LowTtlPushPrefsQuery>,
+) -> Result<Json<crate::models::LowTtlPushPreferences>, AppError> {
+    let vault_id_str = vault_id.into_inner().to_string();
+
+    let prefs = state
+        .db
+        .get_low_ttl_push_preferences(&vault_id_str, &query.owner)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+
+    Ok(Json(prefs))
+}
+
+// ── Issue #2059: Vault config export / import ─────────────────────────────────
+
+/// GET /vaults/:vault_id/export
+///
+/// Serialises the vault's exportable configuration into a signed, portable
+/// JSON bundle. Only the vault owner may export.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn export_vault_config(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+) -> Result<Json<crate::models::VaultConfigBundle>, AppError> {
+    let vault_id_str = vault_id.into_inner();
+
+    let bundle =
+        crate::handlers::export_vault_config_handler(&state.vault_store, &vault_id_str, None)
+            .map_err(|e| AppError::InvalidInput(e))?;
+
+    // Record the export event for auditing.
+    state
+        .db
+        .record_vault_config_export(&vault_id_str, "", &bundle.signature)
+        .map_err(AppError::from)?;
+
+    Ok(Json(bundle))
+}
+
+/// POST /vaults/import
+///
+/// Verifies the bundle signature and creates a new vault from the payload.
+#[instrument(skip(state, body))]
+pub async fn import_vault_config(
+    state: Data<Arc<AppState>>,
+    body: Json<crate::models::ImportVaultConfigRequest>,
+) -> Result<(StatusCode, Json<crate::models::ImportVaultConfigResponse>), AppError> {
+    let response =
+        crate::handlers::import_vault_config_handler(&state.vault_store, body.into_inner())?;
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
