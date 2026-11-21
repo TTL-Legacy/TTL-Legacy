@@ -4113,14 +4113,26 @@ impl TtlVaultContract {
             return shares;
         }
 
-        // Floor-divide every share; the last beneficiary absorbs the rounding remainder.
-        let mut last_share = amount;
-        for i in 0..weights.len() - 1 {
+        // Issue #2046: compute every share via floor-division first, then
+        // assign the integer remainder to the FIRST beneficiary so that no
+        // stroops are silently dropped.
+        let mut computed: Vec<i128> = Vec::new(env);
+        let mut total_allocated: i128 = 0;
+        for i in 0..weights.len() {
             let share = Self::weighted_share(amount, weights.get(i).unwrap(), total_weight);
-            last_share -= share;
-            shares.push_back(share);
+            total_allocated += share;
+            computed.push_back(share);
         }
-        shares.push_back(last_share);
+        let remainder = amount - total_allocated;
+        // Assign the remainder (from integer division) to the first beneficiary.
+        for i in 0..computed.len() {
+            let adjusted = if i == 0 {
+                computed.get(i).unwrap() + remainder
+            } else {
+                computed.get(i).unwrap()
+            };
+            shares.push_back(adjusted);
+        }
         shares
     }
 
@@ -8543,6 +8555,71 @@ impl TtlVaultContract {
     /// Returns the owner-supplied release memo for a vault, if any.
     pub fn get_release_memo(env: Env, vault_id: u64) -> Bytes {
         Self::load_release_memo(&env, vault_id)
+    }
+
+    // ── Issue #2045: single-use check-in email tokens (delete-on-use) ────────
+
+    /// Stores a hashed check-in email token so it can be verified once.
+    ///
+    /// The caller must be the vault owner. On successful use the token is
+    /// **deleted** (not flagged) so that a mid-transaction failure cannot
+    /// leave the token in a reusable state.
+    ///
+    /// # Arguments
+    /// * `vault_id`     - The vault this token is associated with.
+    /// * `caller`       - Must be the vault owner.
+    /// * `token_hash`   - 32-byte hash of the plaintext OTP sent to the owner.
+    pub fn store_checkin_email_token(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        token_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let key = StorageKey::CheckinEmailToken(vault_id, token_hash);
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Verifies and **deletes** a check-in email token in one atomic step.
+    ///
+    /// Because the record is removed rather than flagged, a failure anywhere
+    /// in the calling transaction (e.g. a subsequent token-transfer trap) will
+    /// roll back the deletion and prevent the token from being silently consumed
+    /// without completing the check-in. This satisfies the delete-on-use
+    /// requirement from issue #2045.
+    ///
+    /// Returns `true` if the token existed and was consumed, `false` otherwise.
+    pub fn consume_checkin_email_token(
+        env: Env,
+        vault_id: u64,
+        token_hash: BytesN<32>,
+    ) -> bool {
+        let key = StorageKey::CheckinEmailToken(vault_id, token_hash);
+        let exists: bool = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(false);
+        if exists {
+            // Delete-on-use: remove the entry so it cannot be replayed even
+            // if a flag-update would have failed mid-transaction.
+            env.storage().persistent().remove(&key);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        exists
     }
 
     /// Returns the custom metadata history (bytes + timestamp) for a vault.

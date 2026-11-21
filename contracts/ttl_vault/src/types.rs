@@ -612,6 +612,17 @@ pub enum StorageKey {
     MaxHibernationDuration(u64),
     // Issue #1836: vault-scoped bridge configuration for cross-chain deposits
     VaultBridgeConfig(u64),
+    // Issue #2044: vault tags — distinct prefix prevents collision with VaultNote
+    // Key: (vault_id, tag_id) → tag value
+    VaultTag(u64, u64),
+    // Issue #2044: vault notes — distinct prefix prevents collision with VaultTag
+    // Key: (vault_id, note_id) → note value
+    VaultNote(u64, u64),
+    // Issue #2045: single-use check-in email tokens.
+    // The key is removed (delete-on-use) rather than flagged so that a failed
+    // flag-update cannot leave the token reusable.
+    // Key: (vault_id, token_hash) → ()
+    CheckinEmailToken(u64, BytesN<32>),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
