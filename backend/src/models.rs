@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Issue #560: seconds before passkey expiry at which a warning notification is triggered (24 h).
+pub const PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS: u64 = 86_400;
+
 // ── WebSocket authentication ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +94,10 @@ pub enum NotificationType {
     VaultPaused,
     /// Fired whenever a withdrawal attempt is made (successful or failed).
     WithdrawalAlert,
+    /// Issue #560: fired when a passkey is approaching its expiry timestamp.
+    PasskeyExpiringSoon,
+    /// Issue #560: fired when a passkey has already expired.
+    PasskeyExpired,
 }
 
 /// Delivery status of a single notification attempt.
@@ -146,7 +153,12 @@ pub struct NotificationPreferences {
     pub preferred_channel: Option<NotificationChannel>,
     pub fallback_channel: Option<NotificationChannel>,
     pub unsubscribed: bool,
+    /// Issue #560: whether passkey expiry warnings are enabled (default true).
+    #[serde(default = "default_true")]
+    pub passkey_expiry_warning_enabled: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl Default for NotificationPreferences {
     fn default() -> Self {
@@ -160,6 +172,7 @@ impl Default for NotificationPreferences {
             preferred_channel: None,
             fallback_channel: None,
             unsubscribed: false,
+            passkey_expiry_warning_enabled: true,
         }
     }
 }
