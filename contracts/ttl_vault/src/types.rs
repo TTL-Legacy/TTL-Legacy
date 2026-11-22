@@ -612,6 +612,12 @@ pub enum StorageKey {
     MaxHibernationDuration(u64),
     // Issue #1836: vault-scoped bridge configuration for cross-chain deposits
     VaultBridgeConfig(u64),
+    // Issue #557: passkey delegation record
+    PasskeyDelegation(u64, BytesN<32>),
+    // Issue #558: append-only passkey audit log
+    PasskeyAuditLog(u64),
+    // Issue #559: passkey escrow record
+    PasskeyEscrow(u64, BytesN<32>),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -2021,3 +2027,50 @@ pub const LOAN_REPAID_TOPIC: Symbol = symbol_short!("loan_rep");
 pub const TWO_FACTOR_ENABLED_TOPIC: Symbol = symbol_short!("2fa_en");
 pub const TWO_FACTOR_DISABLED_TOPIC: Symbol = symbol_short!("2fa_dis");
 pub const TWO_FACTOR_VERIFIED_TOPIC: Symbol = symbol_short!("2fa_vrf");
+
+// ── Issue #557: Passkey Delegation ──────────────────────────────────────────
+pub const PK_DELEGATION_TOPIC: Symbol = symbol_short!("pk_del");
+pub const PK_DELEGATION_REVOKE_TOPIC: Symbol = symbol_short!("pk_del_rev");
+
+// ── Issue #558: Passkey Audit Trail ─────────────────────────────────────────
+pub const PK_AUDIT_TOPIC: Symbol = symbol_short!("pk_audit");
+
+// ── Issue #559: Passkey Escrow ───────────────────────────────────────────────
+pub const PK_ESCROW_TOPIC: Symbol = symbol_short!("pk_esc");
+pub const PK_ESCROW_RELEASE_TOPIC: Symbol = symbol_short!("pk_esc_rel");
+pub const PK_ESCROW_CANCEL_TOPIC: Symbol = symbol_short!("pk_esc_can");
+
+// ── Issue #560: Passkey Expiry Notifications ────────────────────────────────
+pub const PK_EXPIRY_WARN_TOPIC: Symbol = symbol_short!("pk_exp_warn");
+
+/// Delegation record for a specific passkey — Issue #557.
+/// Stored under `StorageKey::PasskeyDelegation(vault_id, passkey_hash)`.
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyDelegation {
+    pub delegate: Address,
+    pub expires_at: u64,
+}
+
+/// A single entry in the passkey audit log — Issue #558.
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyAuditEntry {
+    /// Operation name: "add", "remove", "rotate_remove", "rotate_add", or "use".
+    pub operation: String,
+    /// The address that performed the operation.
+    pub actor: Address,
+    /// The passkey hash involved.
+    pub passkey_hash: BytesN<32>,
+    /// Ledger timestamp when the operation occurred.
+    pub timestamp: u64,
+}
+
+/// Escrow record for a passkey held in escrow — Issue #559.
+/// Stored under `StorageKey::PasskeyEscrow(vault_id, passkey_hash)`.
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyEscrowRecord {
+    pub recovery_contact: Address,
+    pub escrowed_at: u64,
+}

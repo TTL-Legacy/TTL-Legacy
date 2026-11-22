@@ -91,6 +91,10 @@ pub enum NotificationType {
     VaultPaused,
     /// Fired whenever a withdrawal attempt is made (successful or failed).
     WithdrawalAlert,
+    /// Fired when a passkey is approaching its expiry timestamp — Issue #560.
+    PasskeyExpiringSoon,
+    /// Fired when a passkey has already expired at the time of the expiry check — Issue #560.
+    PasskeyExpired,
 }
 
 /// Delivery status of a single notification attempt.
@@ -146,6 +150,8 @@ pub struct NotificationPreferences {
     pub preferred_channel: Option<NotificationChannel>,
     pub fallback_channel: Option<NotificationChannel>,
     pub unsubscribed: bool,
+    /// Whether to send passkey-expiry notifications — Issue #560 (default true).
+    pub passkey_expiry_warnings_enabled: bool,
 }
 
 impl Default for NotificationPreferences {
@@ -160,6 +166,7 @@ impl Default for NotificationPreferences {
             preferred_channel: None,
             fallback_channel: None,
             unsubscribed: false,
+            passkey_expiry_warnings_enabled: true,
         }
     }
 }
@@ -293,6 +300,8 @@ pub struct UpdatePreferencesRequest {
     pub vault_released_enabled: Option<bool>,
     pub warning_hours_before: Option<u64>,
     pub locale: Option<Locale>,
+    /// Opt out of passkey-expiry notifications — Issue #560.
+    pub passkey_expiry_warnings_enabled: Option<bool>,
 }
 
 // ── Existing models (unchanged) ──────────────────────────────────────────────
@@ -417,6 +426,12 @@ pub struct AuditEntry {
     pub timestamp: DateTime<Utc>,
     pub action: String,
     pub actor: String,
+    /// IP address of the actor, if available from the request context.
+    ///
+    /// Populated from the `X-Forwarded-For` or `X-Real-IP` request header by
+    /// axum-based handlers. `None` for background tasks and internal operations
+    /// that have no associated HTTP request.
+    pub actor_ip: Option<String>,
     pub details: serde_json::Value,
 }
 
