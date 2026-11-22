@@ -57,6 +57,10 @@ pub const SET_BURN_PERCENTAGE_TOPIC: Symbol = symbol_short!("set_burn");
 pub const BURN_EVENT_TOPIC: Symbol = symbol_short!("burn_evt");
 pub const SYNC_TTL_TOPIC: Symbol = symbol_short!("sync_ttl");
 pub const PASSKEY_EXPIRY_EXTENDED_TOPIC: Symbol = symbol_short!("pk_exp");
+// Issue #557/#558/#559: passkey lifecycle event topics (≤9 chars use symbol_short).
+pub const PASSKEY_DELEGATION_TOPIC: Symbol = symbol_short!("pk_del");
+pub const PASSKEY_AUDIT_TOPIC: Symbol = symbol_short!("pk_audit");
+pub const PASSKEY_ESCROW_TOPIC: Symbol = symbol_short!("pk_esc");
 pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acc");
 pub const BENEFICIARY_DECLINED_TOPIC: Symbol = symbol_short!("ben_dec");
 pub const BENEFICIARY_CONDITION_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_cond");
@@ -425,6 +429,12 @@ pub enum StorageKey {
     PasskeyUsage(u64),
     BeneficiaryStatus(u64),
     PasskeyExpiry(u64, BytesN<32>),
+    // Issue #557: per-passkey check-in delegation grant.
+    PasskeyDelegation(u64, BytesN<32>),
+    // Issue #558: append-only passkey lifecycle audit log.
+    PasskeyAuditLog(u64),
+    // Issue #559: passkey escrow record (recovery contact holds release).
+    PasskeyEscrow(u64, BytesN<32>),
     PendingOwnership(u64),
     PendingBeneficiaryUpdate(u64),
     VaultAuditLog(u64),
@@ -867,6 +877,43 @@ pub struct PasskeyHash {
     pub last_used_timestamp: u64,
     /// Whether this passkey is eligible for WebAuthn credential backup — Issue #1848
     pub webauthn_backup_eligible: bool,
+}
+
+/// Passkey delegation grant — Issue #557.
+///
+/// Temporarily authorises `delegate` to perform check-ins using the bound
+/// passkey hash until `expires_at`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PasskeyDelegation {
+    pub delegate: Address,
+    pub expires_at: u64,
+    pub created_at: u64,
+}
+
+/// Append-only audit trail entry for a passkey lifecycle event — Issue #558.
+#[contracttype]
+#[derive(Clone)]
+pub struct PasskeyAuditEntry {
+    /// Lifecycle operation: `"add"`, `"remove"`, or `"use"`.
+    pub operation: String,
+    /// Address that performed the operation.
+    pub actor: Address,
+    /// Passkey hash the operation affected.
+    pub passkey_hash: BytesN<32>,
+    /// Ledger timestamp of the event.
+    pub timestamp: u64,
+}
+
+/// Escrow record holding a passkey for emergency release — Issue #559.
+///
+/// While present, the bound passkey cannot be used for check-in. Only the
+/// `recovery_contact` may release it; the owner may cancel at any time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PasskeyEscrowRecord {
+    pub recovery_contact: Address,
+    pub created_at: u64,
 }
 
 /// Backup code entry - Issue #393

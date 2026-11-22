@@ -7,8 +7,8 @@
 use crate::models::{
     ChannelDeliveryLog, DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken,
     IdempotencyRecord, NotificationChannel, NotificationPreferences, NotificationType,
-    RegisterTokenRequest, ReminderDeliveryLog, ReminderToken, ScheduledNotification,
-    UnsubscribeToken, UpdatePreferencesRequest, Vault,
+    PasskeyExpiryInput, RegisterTokenRequest, ReminderDeliveryLog, ReminderToken,
+    ScheduledNotification, UnsubscribeToken, UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -144,10 +144,16 @@ impl FcmClient {
 
 // ── Notification content helpers ─────────────────────────────────────────────
 
+/// Truncates a passkey hash/credential id to its first 8 characters for display — Issue #560.
+fn short_passkey_id(passkey_hash: Option<&str>) -> String {
+    passkey_hash.unwrap_or("").chars().take(8).collect()
+}
+
 fn notification_content(
     notification_type: &NotificationType,
     vault_id: &str,
     ttl_hours: Option<u64>,
+    passkey_hash: Option<&str>,
 ) -> (&'static str, String, Value) {
     match notification_type {
         NotificationType::ExpiryWarning => {
@@ -178,6 +184,36 @@ fn notification_content(
             format!("A withdrawal attempt was detected on your vault {vault_id}. Review immediately if you did not authorise this."),
             json!({ "type": "withdrawal_alert", "vault_id": vault_id }),
         ),
+        NotificationType::PasskeyExpiringSoon => {
+            let hours = ttl_hours.unwrap_or(24);
+            let pk = short_passkey_id(passkey_hash);
+            (
+                "🔑 Passkey Expiring Soon",
+                format!(
+                    "Vault {vault_id}: passkey {pk} expires in ~{hours}h. Rotate it before it expires to keep check-in access."
+                ),
+                json!({
+                    "type": "passkey_expiring_soon",
+                    "vault_id": vault_id,
+                    "passkey_hash": pk,
+                    "hours_remaining": hours
+                }),
+            )
+        }
+        NotificationType::PasskeyExpired => {
+            let pk = short_passkey_id(passkey_hash);
+            (
+                "🔑 Passkey Expired",
+                format!(
+                    "Vault {vault_id}: passkey {pk} has expired. Rotate it to restore check-in access."
+                ),
+                json!({
+                    "type": "passkey_expired",
+                    "vault_id": vault_id,
+                    "passkey_hash": pk
+                }),
+            )
+        }
     }
 }
 
@@ -188,6 +224,11 @@ const FALLBACK_DELAY_SECS: u64 = 300;
 
 /// Idempotency key TTL in seconds (24 hours) (#825).
 pub const IDEMPOTENCY_TTL_SECS: i64 = 86_400;
+
+/// Default window before a passkey's expiry at which an "expiring soon"
+/// notification is scheduled — Issue #560 (24 hours, matching the contract's
+/// `EXPIRY_WARNING_THRESHOLD`).
+pub const PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS: i64 = 86_400;
 
 pub struct NotificationService {
     pub fcm: Arc<FcmClient>,
@@ -340,6 +381,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
     }
 
@@ -382,6 +424,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
         true
     }
@@ -412,6 +455,7 @@ impl NotificationService {
                 max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
                 sent_at: None,
                 ttl_hours: Some(ttl_secs / 3_600),
+                passkey_hash: None,
             });
         true
     }
@@ -430,6 +474,8 @@ impl NotificationService {
         let enabled = match (prefs, &notification_type) {
             (Some(p), NotificationType::VaultReleased) => p.vault_released_enabled,
             (Some(p), NotificationType::CheckInReminder) => p.check_in_reminder_enabled,
+            (Some(p), NotificationType::PasskeyExpiringSoon)
+            | (Some(p), NotificationType::PasskeyExpired) => p.expiry_warning_enabled,
             (Some(_), NotificationType::ExpiryWarning) => true,
             (None, _) => false,
             _ => true,
@@ -449,7 +495,116 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
+    }
+
+    // ── Issue #560: Passkey expiry notifications ─────────────────────────────────
+
+    /// Schedule the appropriate passkey-expiry notification for a single
+    /// passkey — Issue #560.
+    ///
+    /// Given a passkey's expiry timestamp (Unix seconds), schedules a
+    /// [`NotificationType::PasskeyExpired`] notification if the passkey has
+    /// already expired, or a [`NotificationType::PasskeyExpiringSoon`]
+    /// notification if the remaining time until expiry is within
+    /// [`PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS`].
+    ///
+    /// Respects the owner's `expiry_warning_enabled` preference and global
+    /// unsubscribe. Does not stack a duplicate `PasskeyExpiringSoon` on an
+    /// already-pending one for the same `(vault_id, passkey_hash)` pair.
+    ///
+    /// Returns `true` if a notification was scheduled (or already pending),
+    /// `false` if the owner opted out or the passkey is outside the warning
+    /// window.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner))]
+    pub fn schedule_passkey_expiry_check(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkey_hash: &str,
+        expiry_timestamp: i64,
+    ) -> bool {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.expiry_warning_enabled {
+            return false;
+        }
+
+        let now = Utc::now().timestamp();
+        let remaining = expiry_timestamp.saturating_sub(now);
+
+        let notification_type = if remaining <= 0 {
+            NotificationType::PasskeyExpired
+        } else if remaining <= PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS {
+            NotificationType::PasskeyExpiringSoon
+        } else {
+            // Still well within its lifetime — nothing to schedule.
+            return false;
+        };
+
+        // Deduplicate per (vault_id, passkey_hash): never stack a second
+        // notification of the same type while one is already pending, being
+        // retried, or has already been sent this expiry cycle — Issue #560
+        // (at most one `PasskeyExpiringSoon` per passkey per cycle).
+        let mut store = self.schedule.lock().unwrap();
+        let already = store.iter().any(|s| {
+            s.vault_id == vault_id
+                && s.passkey_hash.as_deref() == Some(passkey_hash)
+                && s.notification_type == notification_type
+                && matches!(
+                    s.status,
+                    DeliveryStatus::Pending | DeliveryStatus::Sent | DeliveryStatus::Retrying
+                )
+        });
+        if already {
+            return true;
+        }
+
+        let hours_remaining = if remaining > 0 {
+            (remaining / 3600) as u64
+        } else {
+            0
+        };
+
+        store.push(ScheduledNotification {
+            id: Uuid::new_v4().to_string(),
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: Some(hours_remaining),
+            passkey_hash: Some(passkey_hash.to_string()),
+        });
+        true
+    }
+
+    /// Check every passkey on a vault and schedule expiry notifications for
+    /// those approaching or past their expiry — Issue #560.
+    ///
+    /// `passkeys` carries each passkey's hash/credential id and optional expiry
+    /// timestamp (Unix seconds). Passkeys without a configured expiry are
+    /// skipped. Returns the number of notifications scheduled (or already
+    /// pending).
+    #[instrument(skip(self, passkeys), fields(vault_id = %vault_id, owner = %owner))]
+    pub fn check_passkey_expiry(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkeys: &[PasskeyExpiryInput],
+    ) -> usize {
+        let mut scheduled = 0usize;
+        for pk in passkeys {
+            let Some(expiry) = pk.expiry else {
+                continue;
+            };
+            if self.schedule_passkey_expiry_check(vault_id, owner, &pk.passkey_hash, expiry) {
+                scheduled += 1;
+            }
+        }
+        scheduled
     }
 
     pub fn get_pending_notifications(&self) -> Vec<ScheduledNotification> {
@@ -512,6 +667,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
 
         tracing::info!(
@@ -608,8 +764,12 @@ impl NotificationService {
             return;
         }
 
-        let (title, body, data) =
-            notification_content(&notif.notification_type, &notif.vault_id, notif.ttl_hours);
+        let (title, body, data) = notification_content(
+            &notif.notification_type,
+            &notif.vault_id,
+            notif.ttl_hours,
+            notif.passkey_hash.as_deref(),
+        );
 
         let mut last_err = String::new();
         let mut any_ok = false;

@@ -107,6 +107,9 @@ pub fn email_subject(
         (Locale::De, NotificationType::WithdrawalAlert) => {
             "Abhebungsversuch auf Ihrem Tresor erkannt"
         }
+        // Fallback for notification types without a localized email template
+        // (e.g. passkey expiry push notifications — Issue #560).
+        _ => "TTL-Legacy notification",
     }
 }
 
@@ -169,6 +172,9 @@ pub fn email_body(
             "Ihr Tresor wurde an den designierten Begünstigten freigegeben.".to_string()
         }
         (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert.".to_string(),
+        // Fallback for notification types without a localized email template
+        // (e.g. passkey expiry push notifications — Issue #560).
+        _ => "You have a new notification regarding your TTL-Legacy vault.".to_string(),
     }
 }
 

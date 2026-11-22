@@ -91,6 +91,10 @@ pub enum NotificationType {
     VaultPaused,
     /// Fired whenever a withdrawal attempt is made (successful or failed).
     WithdrawalAlert,
+    /// A passkey is approaching its configured expiry timestamp — Issue #560.
+    PasskeyExpiringSoon,
+    /// A passkey has already expired — Issue #560.
+    PasskeyExpired,
 }
 
 /// Delivery status of a single notification attempt.
@@ -261,6 +265,10 @@ pub struct ScheduledNotification {
     /// `None` falls back to a generic 24h figure.
     #[serde(default)]
     pub ttl_hours: Option<u64>,
+    /// Hex passkey hash (or credential id) for passkey-expiry notifications.
+    /// `None` for non-passkey notification types — Issue #560.
+    #[serde(default)]
+    pub passkey_hash: Option<String>,
 }
 
 /// Delivery record written after each send attempt.
@@ -772,6 +780,18 @@ pub struct Passkey {
     pub registered_at: DateTime<Utc>,
     pub last_used: Option<DateTime<Utc>>,
     pub is_backup: bool,
+}
+
+/// Input used to schedule passkey-expiry notifications — Issue #560.
+///
+/// `expiry` is the passkey's configured expiry as a Unix timestamp in seconds,
+/// or `None` if the passkey has no expiry configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasskeyExpiryInput {
+    /// Passkey hash (hex) or credential id; truncated to 8 chars in the body.
+    pub passkey_hash: String,
+    /// Unix-seconds expiry timestamp, or `None` if no expiry is configured.
+    pub expiry: Option<i64>,
 }
 
 /// A single recovery code for account recovery.
