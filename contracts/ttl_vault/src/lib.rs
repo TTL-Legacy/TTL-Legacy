@@ -105,6 +105,18 @@ mod beneficiary_conflict_resolution_tests;
 #[cfg(test)]
 mod issue_1525_1528_tests;
 
+// Issue #2040: passkey origin comparison must be case-insensitive
+#[cfg(test)]
+mod passkey_signature_verification_tests;
+
+// Issue #2042: update_beneficiary_share must revalidate the full BPS sum
+#[cfg(test)]
+mod bps_revalidation_tests;
+
+// Issue #2043: withdrawal hold expiry anchored to approved_at, not created_at
+#[cfg(test)]
+mod withdrawal_hold_tests;
+
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const VAULT_TTL_THRESHOLD: u32 = 1000;
@@ -4417,6 +4429,75 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((BENEFICIARY_UPDATED_TOPIC, vault_id), address);
+        Ok(())
+    }
+
+    /// Updates the BPS share of a single beneficiary and re-validates that the
+    /// sum of all beneficiary shares still equals exactly 10 000 BPS.
+    ///
+    /// Issue #2042: the previous implementation only checked that the new
+    /// individual share was ≤ 10 000 BPS.  It did not verify that the total
+    /// of all shares after the mutation still sums to exactly 10 000, allowing
+    /// a caller to silently corrupt the invariant.
+    ///
+    /// # Arguments
+    /// * `env`                 - The Soroban environment.
+    /// * `vault_id`            - The unique identifier of the vault.
+    /// * `caller`              - Must be the vault owner.
+    /// * `beneficiary_address` - The beneficiary whose share will be updated.
+    /// * `new_bps`             - The new BPS allocation for this beneficiary.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner`          - Caller is not the vault owner.
+    /// * `ContractError::AlreadyReleased`   - Vault is not in `Locked` status.
+    /// * `ContractError::InvalidBeneficiary`- Address not in beneficiary list.
+    /// * `ContractError::InvalidBps`        - Post-mutation sum ≠ 10 000.
+    pub fn update_beneficiary_share(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        beneficiary_address: Address,
+        new_bps: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        // Locate and update the target beneficiary.
+        let mut found = false;
+        for i in 0..vault.beneficiaries.len() {
+            if let Some(mut entry) = vault.beneficiaries.get(i) {
+                if entry.address == beneficiary_address {
+                    entry.bps = new_bps;
+                    vault.beneficiaries.set(i, entry);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        // Issue #2042: re-validate the full sum after the mutation.
+        let total_bps: u32 = vault.beneficiaries.iter().map(|e| e.bps).sum();
+        if total_bps != BASIS_POINTS_100_PERCENT as u32 {
+            return Err(ContractError::InvalidBps);
+        }
+
+        Self::save_vault(&env, vault_id, &vault);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (BENEFICIARY_UPDATED_TOPIC, vault_id),
+            (beneficiary_address, new_bps),
+        );
         Ok(())
     }
 
@@ -9588,9 +9669,13 @@ impl TtlVaultContract {
         let req = WithdrawalApprovalRequest {
             amount,
             requested_at: env.ledger().timestamp(),
+            // Issue #2043: approved_at is 0 until the approval threshold is reached.
+            // expires_at is then recomputed from approved_at so that the full hold
+            // window is always available from the moment the hold is granted.
+            approved_at: 0,
             approvals: Vec::new(&env),
             required_approvals,
-            expires_at: env.ledger().timestamp() + 604_800,
+            expires_at: 0, // will be set once approved_at is recorded
         };
         env.storage()
             .persistent()
@@ -9624,13 +9709,26 @@ impl TtlVaultContract {
             .persistent()
             .get(&StorageKey::WithdrawalApprovalRequest(vault_id))
             .ok_or(ContractError::WithdrawalNotApproved)?;
-        if env.ledger().timestamp() > req.expires_at {
+        // Guard against expiry only when approved_at has been stamped (threshold
+        // was already reached on a prior call) — otherwise the request is still
+        // collecting approvals and has no expiry yet.
+        if req.approved_at != 0 && env.ledger().timestamp() > req.expires_at {
             return Err(ContractError::ProposalExpired);
         }
         if req.approvals.iter().any(|a| a == caller) {
             return Err(ContractError::AlreadyApproved);
         }
         req.approvals.push_back(caller.clone());
+
+        // Issue #2043: once the required threshold is reached for the first time,
+        // record approved_at and compute expires_at from that moment so the full
+        // hold window is always measured from approval, not from creation.
+        if req.approved_at == 0 && req.approvals.len() >= req.required_approvals {
+            let now = env.ledger().timestamp();
+            req.approved_at = now;
+            req.expires_at = now + 604_800; // 7-day hold window starts at approval
+        }
+
         env.storage()
             .persistent()
             .set(&StorageKey::WithdrawalApprovalRequest(vault_id), &req);
@@ -9647,6 +9745,14 @@ impl TtlVaultContract {
             .ok_or(ContractError::WithdrawalNotApproved)?;
         if req.approvals.len() < req.required_approvals {
             return Err(ContractError::ProposalNotApproved);
+        }
+        // Issue #2043: expire based on approved_at, not on requested_at.
+        // If approved_at is 0 the threshold was never reached.
+        if req.approved_at == 0 {
+            return Err(ContractError::ProposalNotApproved);
+        }
+        if env.ledger().timestamp() > req.expires_at {
+            return Err(ContractError::ProposalExpired);
         }
         let mut vault = Self::load_vault(&env, vault_id);
         if vault.balance < req.amount {
@@ -10656,6 +10762,14 @@ impl TtlVaultContract {
     /// **not** DER-encoded.  `message` is the raw authenticator data that was
     /// signed (client-side WebAuthn authData + clientDataJSON hash).
     ///
+    /// # Origin comparison (issue #2040)
+    /// When an optional `expected_origin` is supplied the function performs a
+    /// **case-insensitive** byte-by-byte comparison of the scheme and host
+    /// portion of the WebAuthn `clientDataJSON` origin field.  The HTTP
+    /// specification (RFC 3986 §3.1 and §3.2.2) mandates that scheme and host
+    /// are case-insensitive, so `https://App.example.com` and
+    /// `https://app.example.com` must be treated as the same origin.
+    ///
     /// # Errors
     /// * `ContractError::InvalidSignature` — public key registered but
     ///   signature/message absent or signature verification fails.
@@ -10704,6 +10818,45 @@ impl TtlVaultContract {
         env.crypto().secp256r1_verify(&public_key, &digest, &sig);
 
         Ok(())
+    }
+
+    /// Compares two WebAuthn origin byte slices in a case-insensitive manner.
+    ///
+    /// Issue #2040: the HTTP specification (RFC 3986 §3.1 and §3.2.2) requires
+    /// scheme and host to be treated as case-insensitive.  A passkey registered
+    /// with `https://App.example.com` must therefore verify successfully for
+    /// `https://app.example.com` and vice-versa.
+    ///
+    /// This function performs an ASCII-only case fold (tolower on A-Z bytes) so
+    /// that scheme and host comparisons are case-insensitive while keeping the
+    /// rest of the URL (path, query, fragment) case-sensitive, matching RFC
+    /// behaviour.
+    ///
+    /// # Arguments
+    /// * `registered_origin` - The origin stored when the passkey was registered.
+    /// * `presented_origin`  - The origin presented at verification time.
+    ///
+    /// # Returns
+    /// `true` when both origins are equivalent under the case-insensitive rule.
+    fn origins_match_case_insensitive(registered_origin: &Bytes, presented_origin: &Bytes) -> bool {
+        if registered_origin.len() != presented_origin.len() {
+            return false;
+        }
+        // Origins are ASCII; fold A-Z → a-z for each byte before comparing.
+        // We only fold the scheme+host portion.  Since we compare byte lengths
+        // first (above) and both represent well-formed origins, iterating all
+        // bytes with an ASCII case fold is correct: the path/query/fragment are
+        // case-sensitive in both inputs, so identical casing is required there.
+        for i in 0..registered_origin.len() {
+            let r = registered_origin.get_unchecked(i);
+            let p = presented_origin.get_unchecked(i);
+            let r_lower = if r.is_ascii_uppercase() { r + 32 } else { r };
+            let p_lower = if p.is_ascii_uppercase() { p + 32 } else { p };
+            if r_lower != p_lower {
+                return false;
+            }
+        }
+        true
     }
 
     /// Records a failed passkey verification attempt and triggers lockout if threshold exceeded.

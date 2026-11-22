@@ -1994,11 +1994,21 @@ pub struct VestingStaggerEntry {
 }
 
 /// A withdrawal requiring approval from multiple parties before execution.
+///
+/// Issue #2043: `expires_at` is now computed from `approved_at` (the timestamp at
+/// which the final required approval is granted) rather than from `requested_at`.
+/// When a hold is queued and not approved for several hours the effective hold
+/// window would otherwise be shorter than intended.
 #[contracttype]
 #[derive(Clone)]
 pub struct WithdrawalApprovalRequest {
     pub amount: i128,
     pub requested_at: u64,
+    /// Set to 0 until the required approval threshold is reached; then set to
+    /// the ledger timestamp at the moment the last required approval arrives.
+    /// `expires_at` is computed as `approved_at + hold_duration` only after
+    /// this field is non-zero.
+    pub approved_at: u64,
     pub approvals: Vec<Address>,
     pub required_approvals: u32,
     pub expires_at: u64,
