@@ -10949,7 +10949,7 @@ impl TtlVaultContract {
             beneficiaries: original.beneficiaries.clone(),
             metadata: original.metadata.clone(),
             token_address: original.token_address.clone(),
-            custom_metadata: original.custom_metadata.clone(),
+            custom_metadata: Bytes::new(&env),
             is_paused: false,
             release_condition: original.release_condition.clone(),
             parent_vault_id: Some(source_vault_id),
@@ -11097,7 +11097,7 @@ impl TtlVaultContract {
             beneficiaries,
             metadata,
             token_address: original.token_address.clone(),
-            custom_metadata: original.custom_metadata.clone(),
+            custom_metadata: Bytes::new(&env),
             is_paused: false,
             release_condition: original.release_condition.clone(),
             parent_vault_id: Some(source_vault_id),
@@ -15957,7 +15957,7 @@ impl TtlVaultContract {
         let deadline = streak
             .last_timestamp
             .saturating_add(vault.check_in_interval);
-        if streak.last_timestamp == 0 || now <= deadline {
+        if streak.last_timestamp == 0 || now < deadline {
             streak.current = streak.current.saturating_add(1);
         } else {
             streak.current = 1;
