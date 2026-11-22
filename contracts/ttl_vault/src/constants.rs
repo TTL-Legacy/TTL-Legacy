@@ -87,3 +87,10 @@ pub const MAX_CHECK_IN_INTERVAL: u64 = 315_360_000;
 
 /// Oracle attestation freshness window in seconds (5 minutes) - Issue #1832.
 pub const ORACLE_FRESHNESS_WINDOW: u64 = 300;
+
+/// Maximum absolute release grace period in seconds (7 days) — Issue #2029.
+///
+/// `extend_grace_period` rejects any extension whose resulting deadline would
+/// exceed `ledger.timestamp() + MAX_GRACE_PERIOD_SECONDS`, preventing a series
+/// of small incremental extensions from accumulating past this ceiling.
+pub const MAX_GRACE_PERIOD_SECONDS: u64 = 604_800; // 7 days

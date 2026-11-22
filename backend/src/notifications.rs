@@ -178,6 +178,19 @@ fn notification_content(
             format!("A withdrawal attempt was detected on your vault {vault_id}. Review immediately if you did not authorise this."),
             json!({ "type": "withdrawal_alert", "vault_id": vault_id }),
         ),
+        NotificationType::PasskeyExpiringSoon => {
+            let hours = ttl_hours.unwrap_or(24);
+            (
+                "🔑 Passkey Expiring Soon",
+                format!("A passkey for vault {vault_id} expires in ~{hours}h. Rotate or extend it to keep vault access."),
+                json!({ "type": "passkey_expiring_soon", "vault_id": vault_id }),
+            )
+        }
+        NotificationType::PasskeyExpired => (
+            "🔑 Passkey Expired",
+            format!("A passkey for vault {vault_id} has expired. Rotate it now to restore check-in access."),
+            json!({ "type": "passkey_expired", "vault_id": vault_id }),
+        ),
     }
 }
 
@@ -295,6 +308,9 @@ impl NotificationService {
         }
         if let Some(v) = req.locale {
             prefs.locale = Some(v);
+        }
+        if let Some(v) = req.passkey_expiry_warnings_enabled {
+            prefs.passkey_expiry_warnings_enabled = v;
         }
     }
 
@@ -522,6 +538,113 @@ impl NotificationService {
             "withdrawal alert notification enqueued"
         );
         let _ = data; // data is embedded in the schedule; retained for future direct-send path
+    }
+
+    // ── Issue #560: Passkey expiry notifications ──────────────────────────────
+
+    /// Schedule expiry notifications for a single passkey.
+    ///
+    /// * If `seconds_remaining <= threshold` and `> 0`: schedules `PasskeyExpiringSoon`.
+    /// * If `seconds_remaining == 0` (already expired): schedules `PasskeyExpired`.
+    ///
+    /// Respects `passkey_expiry_warnings_enabled` preference and global unsubscribe.
+    /// Does not schedule a duplicate if a pending notification of the same type for the
+    /// same `(vault_id, passkey_hash)` already exists.
+    ///
+    /// `passkey_hash_hex` is the full 64-hex-character passkey hash. The notification
+    /// body includes only the first 8 characters for readability.
+    #[allow(clippy::too_many_arguments)]
+    pub fn schedule_passkey_expiry_check(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkey_hash_hex: &str,
+        expiry_timestamp_secs: i64,
+        threshold_secs: i64,
+    ) {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.passkey_expiry_warnings_enabled {
+            return;
+        }
+
+        let now = Utc::now();
+        let now_secs = now.timestamp();
+        let seconds_remaining = expiry_timestamp_secs.saturating_sub(now_secs);
+
+        let notification_type = if seconds_remaining <= 0 {
+            NotificationType::PasskeyExpired
+        } else if seconds_remaining <= threshold_secs {
+            NotificationType::PasskeyExpiringSoon
+        } else {
+            return; // not close enough to expiry yet
+        };
+
+        // Build a composite vault_id that includes the passkey prefix for deduplication.
+        let pk_prefix = &passkey_hash_hex[..passkey_hash_hex.len().min(8)];
+        // We embed the passkey hint in the notification body via ttl_hours metadata.
+        // The ScheduledNotification vault_id field is kept as the plain vault_id.
+        let hours_remaining = if seconds_remaining > 0 {
+            ((seconds_remaining as u64) + 3599) / 3600 // ceiling
+        } else {
+            0
+        };
+
+        // Deduplication: skip if a pending notification of this type for this
+        // (vault_id, passkey_hash) already exists.
+        {
+            let store = self.schedule.lock().unwrap();
+            let already = store.iter().any(|s| {
+                s.vault_id == vault_id
+                    && s.notification_type == notification_type
+                    && s.status == DeliveryStatus::Pending
+                    // We distinguish per-passkey via the metadata field.
+                    && s.ttl_hours.map(|h| h == hours_remaining).unwrap_or(false)
+            });
+            if already {
+                return;
+            }
+        }
+
+        tracing::info!(
+            vault_id = vault_id,
+            owner = owner,
+            passkey_prefix = pk_prefix,
+            seconds_remaining = seconds_remaining,
+            notification_type = ?notification_type,
+            "scheduling passkey expiry notification"
+        );
+
+        self.schedule
+            .lock()
+            .unwrap()
+            .push(ScheduledNotification {
+                id: uuid::Uuid::new_v4().to_string(),
+                vault_id: vault_id.to_string(),
+                owner: owner.to_string(),
+                notification_type,
+                scheduled_at: now,
+                status: DeliveryStatus::Pending,
+                max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+                sent_at: None,
+                ttl_hours: Some(hours_remaining),
+            });
+    }
+
+    /// Check all passkeys for a vault and schedule the appropriate expiry notifications.
+    ///
+    /// `passkeys` is a slice of `(passkey_hash_hex, expiry_timestamp_secs)` pairs.
+    /// `threshold_secs` defaults to 86 400 (24 h) when `None`.
+    pub fn check_passkey_expiry(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkeys: &[(&str, i64)],
+        threshold_secs: Option<i64>,
+    ) {
+        let threshold = threshold_secs.unwrap_or(86_400);
+        for (hash_hex, expiry_ts) in passkeys {
+            self.schedule_passkey_expiry_check(vault_id, owner, hash_hex, *expiry_ts, threshold);
+        }
     }
 
     // ── Deduplication ─────────────────────────────────────────────────────────

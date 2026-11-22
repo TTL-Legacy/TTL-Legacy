@@ -612,6 +612,12 @@ pub enum StorageKey {
     MaxHibernationDuration(u64),
     // Issue #1836: vault-scoped bridge configuration for cross-chain deposits
     VaultBridgeConfig(u64),
+    // Issue #557: passkey delegation record per (vault_id, passkey_hash)
+    PasskeyDelegation(u64, BytesN<32>),
+    // Issue #558: append-only audit log for passkey lifecycle events
+    PasskeyAuditLog(u64),
+    // Issue #559: escrow record per (vault_id, passkey_hash)
+    PasskeyEscrow(u64, BytesN<32>),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -1780,6 +1786,10 @@ pub struct ProtocolConfig {
     pub require_utf8_metadata: bool,
     /// Maximum number of vaults a single owner may create — Issue #767.
     pub max_vaults_per_owner: u32,
+    /// Seconds after TTL expiry during which `trigger_release` is blocked.
+    /// Defaults to 0 (no grace period). Must not exceed MAX_GRACE_PERIOD_SECONDS.
+    /// Issue #2029: stored and validated so the absolute deadline can be checked.
+    pub release_grace_period_seconds: u64,
 }
 
 /// Vault state snapshot at a specific point in time.
@@ -2021,3 +2031,55 @@ pub const LOAN_REPAID_TOPIC: Symbol = symbol_short!("loan_rep");
 pub const TWO_FACTOR_ENABLED_TOPIC: Symbol = symbol_short!("2fa_en");
 pub const TWO_FACTOR_DISABLED_TOPIC: Symbol = symbol_short!("2fa_dis");
 pub const TWO_FACTOR_VERIFIED_TOPIC: Symbol = symbol_short!("2fa_vrf");
+
+// Issue #557: passkey delegation events
+pub const PASSKEY_DELEGATION_TOPIC: Symbol = symbol_short!("pk_del");
+pub const PASSKEY_DELEGATION_REVOKED_TOPIC: Symbol = symbol_short!("pk_del_rv");
+
+// Issue #558: passkey audit trail event
+pub const PASSKEY_AUDIT_TOPIC: Symbol = symbol_short!("pk_audit");
+
+// Issue #559: passkey escrow events
+pub const PASSKEY_ESCROW_TOPIC: Symbol = symbol_short!("pk_esc");
+pub const PASSKEY_ESCROW_RELEASED_TOPIC: Symbol = symbol_short!("pk_esc_rl");
+pub const PASSKEY_ESCROW_CANCELLED_TOPIC: Symbol = symbol_short!("pk_esc_cn");
+
+// Issue #560: passkey expiry warning event (emitted by ping_expiry / check_passkey_expiry)
+pub const PASSKEY_EXPIRY_WARNING_TOPIC: Symbol = symbol_short!("pk_exp_w");
+
+/// Delegation record associating a passkey with a temporary delegate.
+/// Stored under `StorageKey::PasskeyDelegation(vault_id, passkey_hash)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasskeyDelegationRecord {
+    /// Address authorised to perform check-ins using this passkey.
+    pub delegate: Address,
+    /// Unix timestamp after which this delegation is no longer valid.
+    pub expires_at: u64,
+}
+
+/// A single entry in the passkey audit trail.
+/// Stored (appended) in `StorageKey::PasskeyAuditLog(vault_id)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasskeyAuditEntry {
+    /// Operation name: "add" | "remove" | "rotate_remove" | "rotate_add" | "use"
+    pub operation: String,
+    /// Address that performed the operation.
+    pub actor: Address,
+    /// The passkey hash the operation relates to.
+    pub passkey_hash: BytesN<32>,
+    /// Ledger timestamp when the operation occurred.
+    pub timestamp: u64,
+}
+
+/// Escrow record holding a passkey in escrow for emergency recovery.
+/// Stored under `StorageKey::PasskeyEscrow(vault_id, passkey_hash)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PasskeyEscrowRecord {
+    /// Address designated by the owner to release the escrowed passkey.
+    pub recovery_contact: Address,
+    /// Ledger timestamp when the escrow was created.
+    pub escrowed_at: u64,
+}
