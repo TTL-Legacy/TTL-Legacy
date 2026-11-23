@@ -21,6 +21,9 @@ pub async fn claim_vesting_bonus_handler(
     req: crate::models::ClaimBonusRequest,
     rpc_url: Option<&str>,
 ) -> Result<crate::models::ClaimBonusResponse, AppError> {
+    // Issue #2133: enforce MFA for high-value vaults
+    crate::two_factor::check_vault_mfa_enforcement(vault_id, &db)?;
+
     let vault = db.get_vault(vault_id).ok_or(AppError::NotFound)?;
 
     if vault.beneficiary != req.beneficiary {

@@ -1292,3 +1292,19 @@ pub struct SponsoredReleaseResponse {
 pub struct SponsoredReleaseListResponse {
     pub releases: Vec<serde_json::Value>,
 }
+
+// ── Vault MFA enforcement policy ──────────────────────────────────────
+
+/// Per-vault MFA enforcement policy.
+///
+/// When enabled, any state-changing API call on a vault whose estimated
+/// value exceeds `mfa_threshold_usd` requires a fresh TOTP code, even
+/// if the session already carries a 2FA claim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultMfaPolicy {
+    pub vault_id: String,
+    pub enabled: bool,
+    /// Threshold in USD cents.  Vaults whose estimated value exceeds this
+    /// require a fresh TOTP verification for state-changing operations.
+    pub mfa_threshold_usd: u64,
+}

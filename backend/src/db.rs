@@ -2,7 +2,7 @@ use crate::models::{
     AuditEntry, AuditLogEntry, AuditLogQuery, Channel, Frequency, Passkey, RecoveryCode,
     RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult, Subscription,
     SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
-    VaultNotificationPreferences, VaultShare, VaultStatus, WebhookSubscription,
+    VaultMfaPolicy, VaultNotificationPreferences, VaultShare, VaultStatus, WebhookSubscription,
 };
 
 use chrono::Utc;
@@ -25,9 +25,14 @@ pub type ShareTokenStore = Arc<Mutex<HashMap<String, ShareToken>>>;
 pub type NotificationStore = Arc<Mutex<HashMap<String, VaultNotificationPreferences>>>;
 pub type PasskeyStore = Arc<Mutex<Vec<Passkey>>>;
 pub type RecoveryCodeStore = Arc<Mutex<Vec<RecoveryCode>>>;
+pub type VaultMfaPolicyStore = Arc<Mutex<HashMap<String, VaultMfaPolicy>>>;
 pub type RecoveryCodeSetStore = Arc<Mutex<Vec<RecoveryCodeSet>>>;
 
 pub fn create_vault_store() -> VaultStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn create_vault_mfa_policy_store() -> VaultMfaPolicyStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
@@ -366,6 +371,8 @@ pub struct Db {
     pool_config: PoolConfig,
     /// In-memory vault store shared across the application.
     pub vault_store: VaultStore,
+    /// Per-vault MFA enforcement policies.
+    pub vault_mfa_policy_store: VaultMfaPolicyStore,
 }
 
 impl Db {
@@ -384,6 +391,7 @@ impl Db {
                 timeout_secs: config.timeout_secs,
             },
             vault_store: create_vault_store(),
+            vault_mfa_policy_store: create_vault_mfa_policy_store(),
         })
     }
 
@@ -1470,6 +1478,25 @@ impl Db {
             "DELETE FROM escalation_states WHERE vault_id = ?1",
             params![vault_id as i64],
         )?;
+        Ok(())
+    }
+
+    // ── Vault MFA enforcement policy ──────────────────────────────
+
+    pub fn get_vault_mfa_policy(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<VaultMfaPolicy>, rusqlite::Error> {
+        let store = self.vault_mfa_policy_store.lock().unwrap();
+        Ok(store.get(vault_id).cloned())
+    }
+
+    pub fn set_vault_mfa_policy(
+        &self,
+        policy: &VaultMfaPolicy,
+    ) -> Result<(), rusqlite::Error> {
+        let mut store = self.vault_mfa_policy_store.lock().unwrap();
+        store.insert(policy.vault_id.clone(), policy.clone());
         Ok(())
     }
 }

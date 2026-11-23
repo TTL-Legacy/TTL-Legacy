@@ -20,7 +20,7 @@ use crate::{
     models::{
         AuditLogEntry, ClaimBonusRequest, ReminderPreferences, SetPreferencesRequest,
         SetSubscriptionRequest, SimulateReleaseQuery, SimulateReleaseResponse, Subscription,
-        VaultReleaseHistory,
+        VaultMfaPolicy, VaultReleaseHistory,
     },
 };
 
@@ -432,4 +432,34 @@ pub async fn submit_proof_of_life(
         "vault_id": vault_id,
         "beneficiary": body.beneficiary,
     })))
+}
+
+// ── Vault MFA enforcement policy ─────────────────────────────────────────
+
+/// GET /api/vaults/{vault_id}/mfa-policy
+///
+/// Returns the MFA enforcement policy for a vault, if any.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn get_vault_mfa_policy(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+) -> Result<Json<Option<VaultMfaPolicy>>, AppError> {
+    let policy = state.db.get_vault_mfa_policy(&vault_id)?;
+    Ok(Json(policy))
+}
+
+/// PUT /api/vaults/{vault_id}/mfa-policy
+///
+/// Creates or updates the MFA enforcement policy for a vault.
+/// Only the vault owner may set the policy.
+#[instrument(skip(state), fields(vault_id = %vault_id))]
+pub async fn set_vault_mfa_policy(
+    state: Data<Arc<AppState>>,
+    vault_id: Path<String>,
+    body: Json<VaultMfaPolicy>,
+) -> Result<Json<VaultMfaPolicy>, AppError> {
+    let mut policy = body.into_inner();
+    policy.vault_id = vault_id.into_inner();
+    state.db.set_vault_mfa_policy(&policy)?;
+    Ok(Json(policy))
 }
