@@ -1,4 +1,5 @@
 use crate::models::{AuthClaims, VaultEvent, WebSocketMessage};
+use crate::session_binding::verify_session_binding;
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
@@ -77,13 +78,37 @@ impl VaultBroadcaster {
 // ── Authentication ──────────────────────────────────────────────────────────
 
 pub fn validate_ws_token(token: &str, secret: &[u8]) -> Result<AuthClaims, String> {
+    validate_ws_token_with_binding(token, secret, None)
+}
+
+/// Session verification guard (Issue #2135): decodes and validates the
+/// token, then verifies the device binding for passkey-bound sessions.
+///
+/// `presented_binding` is the device binding presented with the request —
+/// the SHA-256 fingerprint of the caller's device public key (see
+/// `session_binding::compute_session_binding`), normally sent via the
+/// `X-Session-Binding` header.
+///
+/// Fails closed: a token carrying a `session_binding` claim is rejected
+/// unless the request presents the same binding, compared with a
+/// constant-time equality check (`session_binding::verify_session_binding`).
+/// Password sessions (no binding) behave exactly as before.
+pub fn validate_ws_token_with_binding(
+    token: &str,
+    secret: &[u8],
+    presented_binding: Option<&str>,
+) -> Result<AuthClaims, String> {
     let key = DecodingKey::from_secret(secret);
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_required_spec_claims(&["exp", "sub"]);
 
-    decode::<AuthClaims>(token, &key, &validation)
+    let claims = decode::<AuthClaims>(token, &key, &validation)
         .map(|data| data.claims)
-        .map_err(|e| format!("Invalid token: {e}"))
+        .map_err(|e| format!("Invalid token: {e}"))?;
+
+    verify_session_binding(&claims, presented_binding).map_err(|e| e.to_string())?;
+
+    Ok(claims)
 }
 
 pub fn extract_token_from_header(header_value: &str) -> Option<&str> {
@@ -302,6 +327,7 @@ mod tests {
             sub: "user123".to_string(),
             vault_ids: vec!["v1".to_string(), "v2".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            session_binding: None,
         };
         let token = make_test_token(&claims, &secret);
         let result = validate_ws_token(&token, &secret);
@@ -318,6 +344,7 @@ mod tests {
             sub: "user123".to_string(),
             vault_ids: vec!["v1".to_string()],
             exp: 1000, // long expired
+            session_binding: None,
         };
         let token = make_test_token(&claims, &secret);
         let result = validate_ws_token(&token, &secret);
@@ -332,6 +359,7 @@ mod tests {
             sub: "user123".to_string(),
             vault_ids: vec!["v1".to_string()],
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            session_binding: None,
         };
         let token = make_test_token(&claims, &secret);
         let result = validate_ws_token(&token, b"wrong-secret");
@@ -342,6 +370,104 @@ mod tests {
     fn test_validate_malformed_token() {
         let result = validate_ws_token("not-a-jwt", &make_test_secret());
         assert!(result.is_err());
+    }
+
+    // ── Passkey session binding tests (Issue #2135) ─────────────────────────
+
+    fn passkey(credential_id: &str) -> crate::models::Passkey {
+        crate::models::Passkey {
+            passkey_id: format!("pk-{credential_id}"),
+            owner: "user123".to_string(),
+            vault_id: "v1".to_string(),
+            credential_id: credential_id.to_string(),
+            device_name: "Test Device".to_string(),
+            registered_at: chrono::Utc::now(),
+            last_used: None,
+            is_backup: false,
+        }
+    }
+
+    fn make_bound_token(binding: &str, secret: &[u8]) -> String {
+        let claims = AuthClaims {
+            sub: "user123".to_string(),
+            vault_ids: vec!["v1".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            session_binding: Some(binding.to_string()),
+        };
+        make_test_token(&claims, secret)
+    }
+
+    #[test]
+    fn test_validate_bound_token_accepts_bound_device() {
+        let secret = make_test_secret();
+        let binding = crate::session_binding::compute_session_binding(&passkey("cred-a"));
+        let token = make_bound_token(&binding, &secret);
+
+        let result = validate_ws_token_with_binding(&token, &secret, Some(binding.as_str()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().session_binding.as_deref(), Some(binding.as_str()));
+    }
+
+    #[test]
+    fn test_validate_bound_token_rejects_different_device() {
+        let secret = make_test_secret();
+        let bound = crate::session_binding::compute_session_binding(&passkey("cred-a"));
+        let other_device = crate::session_binding::compute_session_binding(&passkey("cred-b"));
+        let token = make_bound_token(&bound, &secret);
+
+        // Token replayed from a different device's binding → rejected.
+        let result = validate_ws_token_with_binding(&token, &secret, Some(other_device.as_str()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_bound_token_fails_closed_on_missing_binding() {
+        let secret = make_test_secret();
+        let binding = crate::session_binding::compute_session_binding(&passkey("cred-a"));
+        let token = make_bound_token(&binding, &secret);
+
+        // No proof presented → rejected (never fall back to accepting the token).
+        assert!(validate_ws_token_with_binding(&token, &secret, None).is_err());
+        assert!(validate_ws_token_with_binding(&token, &secret, Some("")).is_err());
+        // The legacy entry point passes no binding, so bound tokens are rejected there too.
+        assert!(validate_ws_token(&token, &secret).is_err());
+    }
+
+    #[test]
+    fn test_validate_tampered_binding_rejected() {
+        let secret = make_test_secret();
+        let original = crate::session_binding::compute_session_binding(&passkey("cred-a"));
+        let tampered = crate::session_binding::compute_session_binding(&passkey("cred-b"));
+
+        // A validly-signed token claiming the *other* device's binding,
+        // replayed while presenting the original device's binding, is a
+        // mismatch and must be rejected.
+        let token = make_bound_token(&tampered, &secret);
+        let result = validate_ws_token_with_binding(&token, &secret, Some(original.as_str()));
+        assert!(result.is_err());
+
+        // Corrupting the token itself (any segment) is rejected as well.
+        let token = make_bound_token(&original, &secret);
+        let corrupted = format!("{token}x");
+        let result = validate_ws_token_with_binding(&corrupted, &secret, Some(original.as_str()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_unbound_token_accepts_any_presented_binding() {
+        // Backward compatibility: password sessions carry no binding and are
+        // unaffected by whatever binding the client presents.
+        let secret = make_test_secret();
+        let claims = AuthClaims {
+            sub: "user123".to_string(),
+            vault_ids: vec!["v1".to_string()],
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            session_binding: None,
+        };
+        let token = make_test_token(&claims, &secret);
+
+        assert!(validate_ws_token_with_binding(&token, &secret, Some("whatever")).is_ok());
+        assert!(validate_ws_token_with_binding(&token, &secret, None).is_ok());
     }
 
     #[test]

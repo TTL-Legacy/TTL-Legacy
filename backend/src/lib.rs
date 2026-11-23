@@ -22,6 +22,9 @@ pub mod routes;
 pub mod sanitization;
 pub mod scheduler;
 pub mod security_headers;
+/// Issue #2135: passkey session binding — bind passkey sessions to the
+/// device public key.
+pub mod session_binding;
 pub mod sms;
 pub mod templates;
 /// Issue #1596: owner warning when storage TTL nears archival
