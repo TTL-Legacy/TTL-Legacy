@@ -7,7 +7,6 @@
 ///   - Rejection / cancellation: owner or proposed new owner can cancel
 ///
 /// These tests exercise the complete flow described in docs/ownership-transfer.md.
-#![cfg(test)]
 
 use super::*;
 use soroban_sdk::{

@@ -15,6 +15,8 @@ pub use oracle::{OracleClient, OracleInterface};
 pub use types::*;
 pub use constants::*;
 #[cfg(test)]
+mod tests;
+#[cfg(test)]
 mod beneficiary_auction_tests;
 // Issues #1323, #1324, #1325, #1326: structured event emission tests
 #[cfg(test)]
@@ -3619,6 +3621,7 @@ impl TtlVaultContract {
                     // Amount is 0 here — funds are held for graduated release
                     amount: 0,
                     memo: release_memo.clone(),
+                    beneficiary_memo: release_memo.clone(),
                 },
             );
         } else if has_vesting || has_milestone_vesting {
@@ -3642,6 +3645,7 @@ impl TtlVaultContract {
                     beneficiary: vault.beneficiary.clone(),
                     amount: 0,
                     memo: release_memo.clone(),
+                    beneficiary_memo: release_memo.clone(),
                 },
             );
         } else {
@@ -3707,6 +3711,7 @@ impl TtlVaultContract {
                         beneficiary: vault.beneficiary.clone(),
                         amount: release_amount,
                         memo: release_memo.clone(),
+                        beneficiary_memo: release_memo.clone(),
                     },
                 );
             } else {
@@ -11698,63 +11703,6 @@ impl TtlVaultContract {
         Ok(())
     }
 
-    /// Updates the backup eligibility flag for a registered passkey.
-    ///
-    /// Only the vault owner can call this. This flag indicates whether the
-    /// WebAuthn credential is eligible for cloud backup/sync (e.g., iCloud Keychain,
-    /// Google Password Manager). Setting to false means the credential is device-bound
-    /// and cannot be synced across devices.
-    pub fn set_passkey_backup_eligible(
-        env: Env,
-        vault_id: u64,
-        caller: Address,
-        passkey_hash: BytesN<32>,
-        backup_eligible: bool,
-    ) -> Result<(), ContractError> {
-        caller.require_auth();
-        let vault = Self::load_vault(&env, vault_id);
-        if caller != vault.owner {
-            return Err(ContractError::NotOwner);
-        }
-        if vault.status != ReleaseStatus::Locked {
-            return Err(ContractError::AlreadyReleased);
-        }
-
-        let key = StorageKey::VaultPasskeys(vault_id);
-        let mut passkeys: Vec<PasskeyHash> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-        let mut found = false;
-        for i in 0..passkeys.len() {
-            if let Some(mut pk) = passkeys.get(i) {
-                if pk.hash == passkey_hash {
-                    pk.backup_eligible = backup_eligible;
-                    passkeys.set(i, pk);
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        if !found {
-            return Err(ContractError::PasskeyNotFound);
-        }
-
-        env.storage().persistent().set(&key, &passkeys);
-        let ttl = vault_ttl_ledgers(vault.check_in_interval);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, VAULT_TTL_THRESHOLD, ttl);
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
-        env.events()
-            .publish((SET_PASSKEY_BACKUP_ELIGIBLE_TOPIC, vault_id), (passkey_hash, backup_eligible));
-        Ok(())
-    }
-
     /// Performs a biometric-enabled check-in using a passkey and a biometric credential hash.
     ///
     /// Validates passkey registration & expiry, then asserts the provided biometric
@@ -16552,6 +16500,7 @@ impl TtlVaultContract {
                     beneficiary: vault.owner.clone(),
                     amount: release_amount,
                     memo: release_memo.clone(),
+                    beneficiary_memo: release_memo.clone(),
                 },
             );
             return;
@@ -16584,6 +16533,7 @@ impl TtlVaultContract {
                         beneficiary: entry.address.clone(),
                         amount: share,
                         memo: release_memo.clone(),
+                        beneficiary_memo: release_memo.clone(),
                     },
                 );
             }
