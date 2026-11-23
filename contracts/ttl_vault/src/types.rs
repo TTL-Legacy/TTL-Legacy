@@ -182,6 +182,11 @@ pub const VESTING_SCHEDULE_ADDED_TOPIC: Symbol = symbol_short!("vs_add");
 pub const VESTING_SCHEDULE_REMOVED_TOPIC: Symbol = symbol_short!("vs_rem");
 // Clawback of unvested funds
 pub const CLAWBACK_UNVESTED_TOPIC: Symbol = symbol_short!("clawback");
+// Issue #526: beneficiary post-release clawback
+pub const FUNDS_CLAWEDBACK_TOPIC: Symbol = symbol_short!("clawback");
+pub const BEN_RELEASED_TOPIC: Symbol = symbol_short!("ben_rls");
+/// 7-day grace window (in seconds) after a beneficiary release during which the owner may clawback.
+pub const GRACE_PERIOD_SECONDS: u64 = 7 * 24 * 60 * 60;
 // Issue #549: passkey expired during check-in
 pub const PASSKEY_EXPIRED_TOPIC: Symbol = symbol_short!("pk_expd");
 // Issue #550: passkey compromise detected or reported
@@ -402,6 +407,7 @@ pub enum StorageKey {
     VestingPenalty(u64),
     VestingPendingClaim(u64),
     VestingScheduleCount(u64),
+    ClawbackReleaseTs(u64, Address),
     MilestoneVestingSchedule(u64),
     CountdownFired(u64),
     TokenWhitelist(Address),
