@@ -59,6 +59,12 @@ redis = "0.27"
 rand = "0.8"
 sha2 = "0.10"
 
+# URL encoding/decoding for form field values
+urlencoding = "2"
+
+# Multipart form parsing for CSRF validation of file-upload requests
+multer = "3"
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockito = "1.4"
