@@ -44,7 +44,7 @@ once_cell = "1"
 # SQLite access is unified on sqlx (Issue #1487). The DB contract
 # (Db::open/migrate/upsert/get/all) and the versioned schema migrations
 # (Issue #1176) both run through sqlx-sqlite, so rusqlite is no longer needed.
-sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 
 # Push notifications (FCM via HTTP v1 API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
