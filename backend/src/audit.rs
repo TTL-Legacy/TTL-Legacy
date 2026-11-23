@@ -151,6 +151,17 @@ pub async fn log_state_transition(
     }
 }
 
+/// Append a generic audit entry for an action taken by `actor` (Issue #2147
+/// passkey rename endpoint helper). Mirrors [`crate::db::append_audit_entry`].
+pub fn log_action(
+    audit_store: &crate::db::AuditStore,
+    action: &str,
+    actor: &str,
+    details: serde_json::Value,
+) {
+    crate::db::append_audit_entry(audit_store, action, actor, details);
+}
+
 /// Check that the request carries a valid admin API key.
 pub fn authorize_admin(headers: &HeaderMap) -> Result<(), ApiError> {
     let api_key = std::env::var("ADMIN_API_KEY").unwrap_or_default();

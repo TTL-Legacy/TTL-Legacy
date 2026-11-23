@@ -1,3 +1,4 @@
+use crate::audit;
 use crate::db::*;
 use crate::error::AppError;
 use crate::models::*;
@@ -54,6 +55,7 @@ pub async fn register_passkey_handler(
         vault_id: body.vault_id.clone(),
         credential_id: body.credential_id,
         device_name: body.device_name.clone(),
+        friendly_name: None,
         registered_at: Utc::now(),
         last_used: None,
         is_backup: body.is_backup.unwrap_or(false),
@@ -229,6 +231,115 @@ pub async fn list_passkeys_handler(
     Ok(Json(passkeys))
 }
 
+// ── Passkey friendly_name editing (Issue #2147) ─────────────────────────────
+
+/// Maximum length of a user-provided `friendly_name` (Issue #2147).
+pub const MAX_PASSKEY_FRIENDLY_NAME_LEN: usize = 64;
+
+/// Extracts the authenticated user id from the request's `Bearer` access
+/// token — the same JWTs issued by `POST /api/auth/token` (see `crate::auth`).
+///
+/// Returns `AppError::Unauthorized` when the token is missing or invalid.
+fn authenticated_user(headers: &axum::http::HeaderMap) -> Result<String, AppError> {
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .ok_or_else(|| AppError::Unauthorized("authentication required".into()))?;
+
+    let secret = crate::auth::jwt_secret();
+    let claims = decode::<AuthClaims>(
+        token,
+        &DecodingKey::from_secret(&secret),
+        &Validation::default(),
+    )
+    .map_err(|e| AppError::Unauthorized(format!("invalid access token: {e}")))?
+    .claims;
+
+    let sub = claims.sub.trim().to_string();
+    if sub.is_empty() {
+        return Err(AppError::Unauthorized("authentication required".into()));
+    }
+    Ok(sub)
+}
+
+/// Validates/normalizes a `friendly_name` payload (Issue #2147): trims
+/// surrounding whitespace, treats an empty value as `None` (clearing the
+/// custom name), and rejects names longer than
+/// [`MAX_PASSKEY_FRIENDLY_NAME_LEN`] characters with `AppError::InvalidInput`.
+pub fn normalize_friendly_name(raw: Option<&str>) -> Result<Option<String>, AppError> {
+    match raw {
+        None => Ok(None),
+        Some(name) => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else if trimmed.chars().count() > MAX_PASSKEY_FRIENDLY_NAME_LEN {
+                Err(AppError::InvalidInput(format!(
+                    "friendly_name must be between 1 and {MAX_PASSKEY_FRIENDLY_NAME_LEN} characters"
+                )))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+    }
+}
+
+/// `PUT /auth/passkeys/{id}/name` — sets or clears a passkey's
+/// `friendly_name` (Issue #2147).
+///
+/// Requires an authenticated session and verifies the passkey belongs to the
+/// authenticated user; other users' passkeys (or nonexistent ids) return
+/// `AppError::NotFound` so ownership cannot be probed.
+pub async fn update_friendly_name_handler(
+    State(state): State<Arc<AppState>>,
+    Path(passkey_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<UpdatePasskeyFriendlyNameRequest>,
+) -> Result<Json<Passkey>, AppError> {
+    let owner = authenticated_user(&headers)?;
+    let friendly_name = normalize_friendly_name(body.friendly_name.as_deref())?;
+
+    let mut store = state.passkey_store.lock().unwrap();
+    let passkey = store
+        .iter_mut()
+        .find(|pk| pk.passkey_id == passkey_id && pk.owner == owner)
+        .ok_or(AppError::NotFound)?;
+    passkey.friendly_name = friendly_name;
+    let updated = passkey.clone();
+    drop(store);
+
+    audit::log_action(
+        &state.audit_store,
+        "update_passkey_friendly_name",
+        &owner,
+        serde_json::json!({
+            "passkey_id": passkey_id,
+            "friendly_name": updated.friendly_name,
+        }),
+    );
+
+    Ok(Json(updated))
+}
+
+/// Axum router for the passkey management API (Issue #2147).
+///
+/// * `GET /auth/passkeys/:vault_id/:owner` — list the owner's passkeys.
+/// * `PUT /auth/passkeys/:id/name` — set or clear a passkey's `friendly_name`.
+pub fn passkey_routes() -> axum::Router<Arc<AppState>> {
+    axum::Router::new()
+        .route(
+            "/auth/passkeys/:vault_id/:owner",
+            axum::routing::get(list_passkeys_handler),
+        )
+        .route(
+            "/auth/passkeys/:id/name",
+            axum::routing::put(update_friendly_name_handler),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +375,7 @@ mod tests {
             vault_id: "vault-1".to_string(),
             credential_id: "cred-abc".to_string(),
             device_name: "iPhone 15".to_string(),
+            friendly_name: None,
             registered_at: Utc::now(),
             last_used: None,
             is_backup: true,
@@ -304,6 +416,7 @@ mod tests {
             vault_id: vault_id.to_string(),
             credential_id: "cred-1".to_string(),
             device_name: "Primary Phone".to_string(),
+            friendly_name: None,
             registered_at: Utc::now(),
             last_used: Some(Utc::now()),
             is_backup: false,
@@ -315,6 +428,7 @@ mod tests {
             vault_id: vault_id.to_string(),
             credential_id: "cred-2".to_string(),
             device_name: "Security Key".to_string(),
+            friendly_name: None,
             registered_at: Utc::now(),
             last_used: None,
             is_backup: true,
@@ -368,6 +482,7 @@ mod tests {
             vault_id: vault_id.to_string(),
             credential_id: "lost-device".to_string(),
             device_name: "Lost iPhone".to_string(),
+            friendly_name: None,
             registered_at: Utc::now(),
             last_used: None,
             is_backup: false,
@@ -380,6 +495,7 @@ mod tests {
             vault_id: vault_id.to_string(),
             credential_id: "security-key-123".to_string(),
             device_name: "YubiKey 5".to_string(),
+            friendly_name: None,
             registered_at: Utc::now(),
             last_used: None,
             is_backup: true,
@@ -455,5 +571,195 @@ mod tests {
         // Second use
         code_entry2.used_at = Some(Utc::now());
         assert!(code_entry2.used_at.is_some());
+    }
+
+    // ── Passkey friendly_name editing tests (Issue #2147) ───────────────────
+
+    use crate::auth::jwt_secret;
+    use axum::http::{HeaderMap, HeaderValue};
+    use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+    use std::sync::Mutex;
+
+    fn passkey_test_state(owner: &str, passkey_id: &str) -> Arc<AppState> {
+        let passkey = Passkey {
+            passkey_id: passkey_id.to_string(),
+            owner: owner.to_string(),
+            vault_id: "vault-1".to_string(),
+            credential_id: "cred-1".to_string(),
+            device_name: "YubiKey 5".to_string(),
+            friendly_name: None,
+            registered_at: Utc::now(),
+            last_used: None,
+            is_backup: false,
+        };
+        Arc::new(AppState {
+            db: Arc::new(Db::open(":memory:").unwrap()),
+            vault_store: create_vault_store(),
+            event_store: create_event_store(),
+            audit_store: create_audit_store(),
+            share_store: create_share_store(),
+            share_token_store: create_share_token_store(),
+            passkey_store: Arc::new(Mutex::new(vec![passkey])),
+            recovery_code_store: Arc::new(Mutex::new(Vec::new())),
+            recovery_code_set_store: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    fn access_token_headers(sub: &str) -> HeaderMap {
+        let claims = AuthClaims {
+            sub: sub.to_string(),
+            vault_ids: Vec::new(),
+            exp: (Utc::now() + chrono::Duration::seconds(3600)).timestamp() as usize,
+        };
+        let token = encode(
+            &JwtHeader::default(),
+            &claims,
+            &EncodingKey::from_secret(&jwt_secret()),
+        )
+        .expect("encode access token");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("valid header value"),
+        );
+        headers
+    }
+
+    #[test]
+    fn test_friendly_name_defaults_to_none_for_existing_records() {
+        // Passkeys serialized before `friendly_name` existed (Issue #2147)
+        // must deserialize with `None` and serialize back with a null value.
+        let legacy_json = r#"{
+            "passkey_id": "pk-legacy",
+            "owner": "owner1",
+            "vault_id": "vault-1",
+            "credential_id": "cred-1",
+            "device_name": "YubiKey 5",
+            "registered_at": "2026-01-01T00:00:00Z",
+            "last_used": null,
+            "is_backup": false
+        }"#;
+        let passkey: Passkey =
+            serde_json::from_str(legacy_json).expect("legacy passkey should deserialize");
+        assert_eq!(passkey.friendly_name, None);
+        let serialized = serde_json::to_value(&passkey).expect("passkey should serialize");
+        assert!(serialized["friendly_name"].is_null());
+    }
+
+    #[test]
+    fn test_normalize_friendly_name() {
+        assert_eq!(normalize_friendly_name(None).unwrap(), None);
+        assert_eq!(normalize_friendly_name(Some("")).unwrap(), None);
+        assert_eq!(normalize_friendly_name(Some("   ")).unwrap(), None);
+        assert_eq!(
+            normalize_friendly_name(Some("  My Key  ")).unwrap(),
+            Some("My Key".to_string())
+        );
+        let max = "x".repeat(MAX_PASSKEY_FRIENDLY_NAME_LEN);
+        assert_eq!(normalize_friendly_name(Some(&max)).unwrap(), Some(max));
+        let too_long = "x".repeat(MAX_PASSKEY_FRIENDLY_NAME_LEN + 1);
+        assert!(normalize_friendly_name(Some(&too_long)).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_update_friendly_name_persists_and_appears_in_list() {
+        let state = passkey_test_state("owner1", "pk-1");
+        let headers = access_token_headers("owner1");
+
+        let result = update_friendly_name_handler(
+            State(Arc::clone(&state)),
+            Path("pk-1".to_string()),
+            headers,
+            Json(UpdatePasskeyFriendlyNameRequest {
+                friendly_name: Some("My Key".to_string()),
+            }),
+        )
+        .await;
+        let passkey = result.expect("rename succeeds").0;
+        assert_eq!(passkey.friendly_name.as_deref(), Some("My Key"));
+
+        let listed = list_passkeys_handler(
+            State(Arc::clone(&state)),
+            Path(("vault-1".to_string(), "owner1".to_string())),
+        )
+        .await
+        .expect("list succeeds");
+        assert!(listed
+            .0
+            .iter()
+            .any(|pk| pk.passkey_id == "pk-1" && pk.friendly_name.as_deref() == Some("My Key")));
+    }
+
+    #[tokio::test]
+    async fn test_update_friendly_name_clears_with_empty_value() {
+        let state = passkey_test_state("owner1", "pk-1");
+        let headers = access_token_headers("owner1");
+
+        update_friendly_name_handler(
+            State(Arc::clone(&state)),
+            Path("pk-1".to_string()),
+            headers,
+            Json(UpdatePasskeyFriendlyNameRequest {
+                friendly_name: Some("  ".to_string()),
+            }),
+        )
+        .await
+        .expect("clearing the name succeeds");
+
+        let store = state.passkey_store.lock().unwrap();
+        assert_eq!(store[0].friendly_name, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_friendly_name_requires_authentication() {
+        let state = passkey_test_state("owner1", "pk-1");
+
+        let result = update_friendly_name_handler(
+            State(Arc::clone(&state)),
+            Path("pk-1".to_string()),
+            HeaderMap::new(),
+            Json(UpdatePasskeyFriendlyNameRequest {
+                friendly_name: Some("My Key".to_string()),
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn test_update_friendly_name_rejects_cross_user_access() {
+        let state = passkey_test_state("owner1", "pk-1");
+        let headers = access_token_headers("owner2");
+
+        let result = update_friendly_name_handler(
+            State(Arc::clone(&state)),
+            Path("pk-1".to_string()),
+            headers,
+            Json(UpdatePasskeyFriendlyNameRequest {
+                friendly_name: Some("Hijacked".to_string()),
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::NotFound)));
+
+        let store = state.passkey_store.lock().unwrap();
+        assert_eq!(store[0].friendly_name, None);
+    }
+
+    #[tokio::test]
+    async fn test_update_friendly_name_rejects_oversized_name() {
+        let state = passkey_test_state("owner1", "pk-1");
+        let headers = access_token_headers("owner1");
+
+        let result = update_friendly_name_handler(
+            State(Arc::clone(&state)),
+            Path("pk-1".to_string()),
+            headers,
+            Json(UpdatePasskeyFriendlyNameRequest {
+                friendly_name: Some("x".repeat(MAX_PASSKEY_FRIENDLY_NAME_LEN + 1)),
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
     }
 }

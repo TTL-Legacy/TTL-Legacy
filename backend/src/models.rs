@@ -767,8 +767,15 @@ pub struct Passkey {
     pub owner: String,
     pub vault_id: String,
     pub credential_id: String,
-    /// Device name (e.g., "iPhone", "YubiKey 5", "Chrome")
+    /// Device name (e.g., "iPhone", "YubiKey 5", "Chrome") — the AAGUID-derived
+    /// display name used as a fallback when `friendly_name` is unset.
     pub device_name: String,
+    /// Optional user-editable display name (Issue #2147).
+    /// When `None` or empty, clients fall back to the AAGUID-derived
+    /// `device_name`. `#[serde(default)]` keeps passkeys serialized before this
+    /// field existed deserializable.
+    #[serde(default)]
+    pub friendly_name: Option<String>,
     pub registered_at: DateTime<Utc>,
     pub last_used: Option<DateTime<Utc>>,
     pub is_backup: bool,
@@ -816,6 +823,16 @@ pub struct RegisterPasskeyResponse {
     pub vault_id: String,
     pub device_name: String,
     pub registered_at: DateTime<Utc>,
+}
+
+/// Request body for `PUT /auth/passkeys/{id}/name` (Issue #2147).
+#[derive(Debug, Deserialize)]
+pub struct UpdatePasskeyFriendlyNameRequest {
+    /// New user-facing display name for the passkey. `None` or an
+    /// empty/whitespace-only string clears the custom name, restoring the
+    /// AAGUID-derived `device_name` display.
+    #[serde(default)]
+    pub friendly_name: Option<String>,
 }
 
 /// Request to initiate recovery using a backup passkey or recovery code.

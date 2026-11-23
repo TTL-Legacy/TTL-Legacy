@@ -9,6 +9,10 @@ workspace = true
 [dependencies]
 actix-web = "4"
 actix-rt = "2"
+# The backend routes/handlers are axum-based (`axum` re-exported via `Router`
+# in `main.rs` and used throughout `src/handlers`); declare it so the crate
+# actually builds.
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 
