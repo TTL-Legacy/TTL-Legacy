@@ -93,12 +93,22 @@ impl MemoryStore {
 }
 
 /// Redis-backed counter store so limits are shared across replicas and survive
-/// restarts. Uses a fixed-window counter keyed by `key` with a TTL equal to the
-/// configured window.
+/// restarts. Uses a fixed-window counter keyed by `key`.
 #[derive(Clone)]
 pub struct RedisStore {
     client: redis::Client,
 }
+
+/// Increments the counter and sets its expiry in one atomic step, so a key can
+/// never be left behind without a TTL.
+const RATE_LIMIT_SCRIPT: &str = r#"
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('TTL', KEYS[1])
+return {count, ttl}
+"#;
 
 impl RedisStore {
     pub fn new(url: &str) -> Result<Self, redis::RedisError> {
@@ -107,44 +117,30 @@ impl RedisStore {
         })
     }
 
-    /// Increment `key` and return `Ok(())` when the request is allowed, or
-    /// `Err(retry_after_secs)` when the window quota is exhausted.
-    ///
-    /// On any Redis error we fail open (allow the request) so a transient
-    /// outage does not take down the API.
+    /// Returns `None` when Redis cannot be reached, so the caller can fall back
+    /// to the local counter. Otherwise returns `Some(Ok(()))` when the request
+    /// is allowed, or `Some(Err(retry_after_secs))` when the quota is exhausted.
     pub async fn check(
         &self,
         key: &str,
         max_requests: u32,
         window_secs: u64,
-    ) -> Result<(), u64> {
-        let mut conn = match self.client.get_async_connection().await {
-            Ok(conn) => conn,
-            Err(_) => return Ok(()),
-        };
-
+    ) -> Option<Result<(), u64>> {
+        let mut conn = self.client.get_async_connection().await.ok()?;
         let redis_key = format!("rate_limit:{key}");
-        let count: u32 = match redis::cmd("INCR")
-            .arg(&redis_key)
-            .query_async(&mut conn)
-            .await
-        {
-            Ok(count) => count,
-            Err(_) => return Ok(()),
-        };
 
-        if count == 1 {
-            let _: Result<(), _> = redis::cmd("EXPIRE")
-                .arg(&redis_key)
-                .arg(window_secs)
-                .query_async(&mut conn)
-                .await;
-        }
+        let (count, ttl): (u32, i64) = redis::Script::new(RATE_LIMIT_SCRIPT)
+            .key(&redis_key)
+            .arg(window_secs)
+            .invoke_async(&mut conn)
+            .await
+            .ok()?;
 
         if count > max_requests {
-            Err(window_secs)
+            let retry_after = if ttl > 0 { ttl as u64 } else { window_secs };
+            Some(Err(retry_after))
         } else {
-            Ok(())
+            Some(Ok(()))
         }
     }
 }
@@ -285,19 +281,21 @@ impl RateLimiter {
     }
 
     /// Check a single key against the configured quota.
+    ///
+    /// When Redis is selected but unreachable, falls back to the local
+    /// in-memory counter so rate limiting is never fully disabled.
     pub async fn check(&self, key: &str) -> Result<(), u64> {
-        match (&self.store, &self.redis) {
-            (RateLimitStore::Redis { .. }, Some(redis)) => {
-                redis
-                    .check(key, self.config.max_requests, self.config.window_secs)
-                    .await
-            }
-            _ => {
-                self.memory
-                    .check(key, self.config.max_requests, self.config.window_secs)
-                    .await
+        if let (RateLimitStore::Redis { .. }, Some(redis)) = (&self.store, &self.redis) {
+            if let Some(result) = redis
+                .check(key, self.config.max_requests, self.config.window_secs)
+                .await
+            {
+                return result;
             }
         }
+        self.memory
+            .check(key, self.config.max_requests, self.config.window_secs)
+            .await
     }
 }
 
@@ -459,11 +457,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redis_store_fails_open_when_unreachable() {
-        // Point at an unreachable Redis; the store must fail open so a Redis
-        // outage does not take down the API.
+    async fn redis_store_returns_none_when_unreachable() {
+        // Point at an unreachable Redis; the store reports "unavailable" so the
+        // limiter can fall back to the local counter.
         let store = RedisStore::new("redis://127.0.0.1:1").expect("client builds");
-        assert!(store.check("k", 1, 60).await.is_ok());
+        assert!(store.check("k", 1, 60).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn limiter_falls_back_to_memory_when_redis_unreachable() {
+        let limiter = RateLimiter::with_store(
+            RateLimitConfig::new(1, 60),
+            RateLimitStore::Redis {
+                url: "redis://127.0.0.1:1".to_string(),
+            },
+        );
+        assert!(limiter.check("ip").await.is_ok());
+        assert_eq!(limiter.check("ip").await, Err(60));
     }
 
     #[test]
