@@ -15,6 +15,8 @@ pub use oracle::{OracleClient, OracleInterface};
 pub use types::*;
 pub use constants::*;
 #[cfg(test)]
+pub mod tests;
+#[cfg(test)]
 mod beneficiary_auction_tests;
 // Issues #1323, #1324, #1325, #1326: structured event emission tests
 #[cfg(test)]
