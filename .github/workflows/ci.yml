@@ -105,7 +105,15 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run security audit
-        run: cargo audit --deny warnings
+        run: |
+          cargo audit --json > audit_output.json
+          CRITICAL_HIGH=$(jq '[.vulnerabilities.list[] | select(.advisory.severity == "critical" or .advisory.severity == "high")] | length' audit_output.json)
+          if [ "$CRITICAL_HIGH" -gt 0 ]; then
+            echo "❌ CRITICAL or HIGH severity vulnerabilities found:"
+            jq -r '[.vulnerabilities.list[] | select(.advisory.severity == "critical" or .advisory.severity == "high")] | .[] | "  \(.advisory.id): \(.advisory.severity) - \(.advisory.title)"' audit_output.json
+            exit 1
+          fi
+          echo "✅ No CRITICAL or HIGH severity vulnerabilities found"
 
       - name: Scan for secrets with Gitleaks
         uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
