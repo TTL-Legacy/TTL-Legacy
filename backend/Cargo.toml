@@ -58,6 +58,7 @@ redis = "0.27"
 # Recovery code generation and hashing
 rand = "0.8"
 sha2 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio-test = "0.4"
