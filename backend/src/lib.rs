@@ -4,6 +4,7 @@ pub mod cache;
 pub mod consensus;
 pub mod contract_version_check;
 pub mod db;
+pub mod dr_status;
 pub mod error;
 pub mod escalation;
 pub mod fee_sponsorship;
