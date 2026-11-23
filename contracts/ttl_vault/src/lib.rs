@@ -105,6 +105,16 @@ mod beneficiary_conflict_resolution_tests;
 #[cfg(test)]
 mod issue_1525_1528_tests;
 
+// Issue #2089: proptest property tests for set_vesting_schedule invariants
+// (cliff < end, total > 0, overflow safety, boundary conditions)
+#[cfg(test)]
+mod vesting_schedule_proptests;
+
+// Issue #2091: benchmark CPU instruction cost of get_vault_batch at
+// batch sizes 10, 50, 100; asserts sub-linear scaling
+#[cfg(test)]
+mod get_vault_batch_bench_tests;
+
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const VAULT_TTL_THRESHOLD: u32 = 1000;
