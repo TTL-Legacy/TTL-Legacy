@@ -2,6 +2,7 @@
 
 use super::*;
 use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Bytes, Env};
+use soroban_sdk::testutils::Events as _;
 
 fn setup_release_memo_test() -> (Env, Address, Address, TtlVaultContractClient<'static>) {
     let env = Env::default();
@@ -86,4 +87,59 @@ fn test_set_release_memo_rejects_oversized_memo() {
 
     let too_long = Bytes::from_slice(&env, &[0u8; 257]);
     client.set_release_memo(&vault_id, &owner, &too_long);
+}
+
+/// Issue #2047 — the ReleaseMemo must appear in the RELEASE_TOPIC event
+/// payload emitted by trigger_release, not just be retrievable via
+/// get_release_memo.  Downstream notification services read the event; if the
+/// memo field is absent or empty they cannot populate notifications.
+#[test]
+fn test_release_memo_included_in_release_event() {
+    let (env, owner, beneficiary, client) = setup_release_memo_test();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit so the vault has a non-zero balance.
+    client.deposit(&owner, &vault_id, &1_000_000i128);
+
+    // Set a distinctive memo before releasing.
+    let memo = Bytes::from_slice(&env, b"Estate memo for downstream listeners");
+    client.set_release_memo(&vault_id, &owner, &memo);
+
+    // Advance ledger time past the check-in interval so the vault is expired.
+    env.ledger().set_timestamp(env.ledger().timestamp() + 200u64);
+
+    // Trigger the release.
+    client.trigger_release(&vault_id);
+
+    // Scan emitted events for a RELEASE_TOPIC event that carries the memo.
+    let events = env.events().all();
+    let mut found_memo = false;
+    for (_contract, topics, data) in events.iter() {
+        // The first topic element is the RELEASE_TOPIC symbol.
+        if topics.len() == 0 {
+            continue;
+        }
+        // Deserialize the payload as a ReleaseEvent and check the memo field.
+        if let Ok(evt) = soroban_sdk::xdr::ScVal::try_from(data.clone()) {
+            let _ = evt; // just confirm deserialization doesn't panic
+        }
+        // We check the event data directly by comparing the serialized bytes.
+        let release_event = ReleaseEvent {
+            vault_id,
+            beneficiary: beneficiary.clone(),
+            amount: 1_000_000i128,
+            memo: memo.clone(),
+        };
+        let expected_data = soroban_sdk::IntoVal::<Env, soroban_sdk::Val>::into_val(
+            &release_event,
+            &env,
+        );
+        if data == expected_data {
+            found_memo = true;
+        }
+    }
+    assert!(
+        found_memo,
+        "RELEASE_TOPIC event must carry the ReleaseMemo in its payload"
+    );
 }
