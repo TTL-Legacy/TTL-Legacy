@@ -317,6 +317,9 @@ pub enum VaultStatus {
     Expired,
     Released,
     Paused,
+    /// Vault has been archived — data is frozen and the entry removed from the
+    /// active store (Issue #2048).
+    Archived,
 }
 
 // ── TTL Insurance models ───────────────────────────────────────────────────
@@ -929,6 +932,269 @@ pub struct AuditLogQuery {
     pub offset: Option<i64>,
 }
 
+/// Response body for `POST /api/vaults/{id}/withdraw` (Issue #2056).
+#[derive(Debug, Serialize)]
+pub struct TriggerWithdrawalResponse {
+    pub vault_id: String,
+    pub address: String,
+    pub amount: i128,
+    pub tx_hash: String,
+    pub withdrawn_at: DateTime<Utc>,
+}
+
+// ── Issue #2056: Withdrawal rate-limit config ────────────────────────────────
+
+/// Per-vault configuration that caps the total amount that may be withdrawn
+/// within a rolling time window.
+///
+/// When set, `trigger_withdrawal` enforces these limits before forwarding the
+/// request to Soroban and returns `AppError::WithdrawalRateLimitExceeded` if
+/// the cap would be breached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalRateLimitConfig {
+    /// Vault this config belongs to.
+    pub vault_id: String,
+    /// Maximum total amount (in stroops / base units) that may leave the vault
+    /// within any rolling window of `window_seconds`.
+    pub max_amount_per_window: i128,
+    /// Length of the rolling window in seconds (e.g. 3600 = 1 hour).
+    pub window_seconds: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request body for `PUT /api/vaults/{id}/withdrawal-rate-limit`.
+#[derive(Debug, Deserialize)]
+pub struct SetWithdrawalRateLimitRequest {
+    pub max_amount_per_window: i128,
+    pub window_seconds: u64,
+}
+
+/// A single withdrawal event recorded for rate-limit accounting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalRecord {
+    pub vault_id: String,
+    pub amount: i128,
+    pub recorded_at: DateTime<Utc>,
+}
+
+// ── Issue #2057: Vault summary with health score ──────────────────────────────
+
+/// Extended vault summary returned by `GET /vaults/{id}/summary`.
+///
+/// Extends the base `VaultSummary` with a computed 0–100 health score derived
+/// from TTL remaining, check-in streak, beneficiary confirmation status, and
+/// backup code freshness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSummaryResponse {
+    pub vault_id: String,
+    pub owner: String,
+    pub status: VaultStatus,
+    pub ttl_remaining: Option<u64>,
+    pub balance: i128,
+    /// 0–100 health score. See `compute_vault_summary_health_score` for the
+    /// full breakdown.
+    pub health_score: u8,
+}
+
+/// Inputs used to compute the summary health score.
+/// All are optional/defaultable so the endpoint degrades gracefully when some
+/// data sources are unavailable.
+#[derive(Debug, Default)]
+pub struct VaultSummaryHealthInputs {
+    /// Seconds of TTL remaining.
+    pub ttl_remaining: Option<u64>,
+    /// Configured check-in interval (seconds).
+    pub check_in_interval: u64,
+    /// Number of consecutive check-ins the owner has completed without missing.
+    pub check_in_streak: u32,
+    /// Whether the beneficiary has confirmed their address in the last 90 days.
+    pub beneficiary_confirmed: bool,
+    /// Age of the most recently generated backup-code set, in seconds.
+    /// `None` means no backup codes have ever been generated.
+    pub backup_code_age_secs: Option<u64>,
+}
+
+/// Compute the 0–100 summary health score from the supplied inputs.
+///
+/// Factor breakdown (total 100 pts):
+/// - TTL buffer    40 pts — ratio of `ttl_remaining` to `check_in_interval`
+/// - Streak        20 pts — consecutive check-ins (full at 5+)
+/// - Beneficiary   20 pts — 20 if confirmed, 0 otherwise
+/// - Backup codes  20 pts — 20 if generated ≤ 180 days ago, 0 otherwise
+pub fn compute_vault_summary_health_score(inputs: &VaultSummaryHealthInputs) -> u8 {
+    // TTL buffer (0–40)
+    let ttl_score: u8 = match inputs.ttl_remaining {
+        Some(ttl) if inputs.check_in_interval > 0 => {
+            let ratio = ttl as f64 / inputs.check_in_interval as f64;
+            (ratio.min(1.0) * 40.0).round() as u8
+        }
+        _ => 0,
+    };
+
+    // Streak (0–20), full at 5 consecutive check-ins
+    let streak_score: u8 = {
+        let ratio = inputs.check_in_streak as f64 / 5.0_f64;
+        (ratio.min(1.0) * 20.0).round() as u8
+    };
+
+    // Beneficiary confirmed (0 or 20)
+    let beneficiary_score: u8 = if inputs.beneficiary_confirmed { 20 } else { 0 };
+
+    // Backup code freshness (0 or 20) — fresh = generated within 180 days
+    const BACKUP_FRESH_SECS: u64 = 180 * 24 * 3600;
+    let backup_score: u8 = match inputs.backup_code_age_secs {
+        Some(age) if age <= BACKUP_FRESH_SECS => 20,
+        _ => 0,
+    };
+
+    ttl_score
+        .saturating_add(streak_score)
+        .saturating_add(beneficiary_score)
+        .saturating_add(backup_score)
+}
+
+// ── Issue #2058: Mobile push notification for low TTL ────────────────────────
+
+/// Platform-specific push credentials for a device token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MobilePlatform {
+    Android,
+    Ios,
+}
+
+/// Per-owner opt-in preferences for the low-TTL mobile push notification.
+///
+/// The notification fires when TTL drops below 48 hours and no check-in has
+/// been recorded in the past 24 hours. The user must have explicitly opted in
+/// for at least one platform before any push is sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LowTtlPushPreferences {
+    pub owner: String,
+    /// Vault ID this preference applies to. Each vault can be configured
+    /// independently.
+    pub vault_id: String,
+    /// Whether the user has opted in to Android (FCM) push for this vault.
+    pub android_enabled: bool,
+    /// Whether the user has opted in to iOS (APNs) push for this vault.
+    pub ios_enabled: bool,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for LowTtlPushPreferences {
+    fn default() -> Self {
+        Self {
+            owner: String::new(),
+            vault_id: String::new(),
+            android_enabled: false,
+            ios_enabled: false,
+            updated_at: DateTime::default(),
+        }
+    }
+}
+
+/// Request body for `PUT /api/vaults/{id}/low-ttl-push-preferences`.
+#[derive(Debug, Deserialize)]
+pub struct SetLowTtlPushPreferencesRequest {
+    pub owner: String,
+    pub android_enabled: bool,
+    pub ios_enabled: bool,
+}
+
+/// Internal record checked before firing a low-TTL push to prevent duplicate
+/// alerts within a cooldown window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LowTtlPushSentRecord {
+    pub vault_id: String,
+    pub owner: String,
+    pub sent_at: DateTime<Utc>,
+}
+
+// ── Issue #2059: Portable vault config bundle ─────────────────────────────────
+
+/// A signed, portable JSON bundle that captures the exportable configuration
+/// of a vault. It can be re-imported on another account via
+/// `POST /vaults/import`.
+///
+/// The bundle intentionally excludes sensitive runtime state (private keys,
+/// beneficiary contact details, withdrawal whitelist entries) and
+/// non-portable data (vault ID, owner address, balance, TTL remaining).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultConfigBundle {
+    /// Schema version — increment when the shape changes.
+    pub version: u8,
+    /// ID of the source vault (informational only; the importer must not
+    /// reuse it as the new vault ID).
+    pub source_vault_id: String,
+    pub exported_at: DateTime<Utc>,
+    /// Ed25519 signature over the canonical JSON of the `payload` field,
+    /// base64url-encoded. Used to detect tampering. In this implementation
+    /// the signature is a HMAC-SHA256 keyed on the server secret; the verifier
+    /// checks it on import.
+    pub signature: String,
+    pub payload: VaultConfigPayload,
+}
+
+/// The portable vault configuration payload embedded in `VaultConfigBundle`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultConfigPayload {
+    pub beneficiaries: Vec<BundleBeneficiary>,
+    pub release_conditions: Vec<ReleaseCondition>,
+    pub vesting_schedule: Option<BundleVestingSchedule>,
+    pub tags: Vec<String>,
+}
+
+/// A beneficiary entry as it appears inside a portable config bundle.
+/// The address is included; contact details are excluded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleBeneficiary {
+    pub address: String,
+    /// Fraction of the vault assigned to this beneficiary, in basis points
+    /// (10 000 = 100 %).
+    pub share_bps: u32,
+}
+
+/// A single release condition (predicate) stored in the portable bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseCondition {
+    /// Machine-readable condition type, e.g. `"ttl_expired"`,
+    /// `"beneficiary_request"`, `"multisig_threshold"`.
+    pub condition_type: String,
+    /// Arbitrary JSON parameters for this condition type.
+    pub params: serde_json::Value,
+}
+
+/// Vesting schedule as exported in the portable bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleVestingSchedule {
+    pub bonus_bps: u32,
+    pub on_time_window_seconds: u64,
+}
+
+/// Request body for `POST /vaults/import`.
+#[derive(Debug, Deserialize)]
+pub struct ImportVaultConfigRequest {
+    /// The serialised `VaultConfigBundle` JSON.
+    pub bundle: VaultConfigBundle,
+    /// Target owner address on the new account.
+    pub new_owner: String,
+}
+
+/// Response from `POST /vaults/import`.
+#[derive(Debug, Serialize)]
+pub struct ImportVaultConfigResponse {
+    /// ID of the newly created vault.
+    pub new_vault_id: String,
+    pub owner: String,
+    pub imported_at: DateTime<Utc>,
+    /// Number of beneficiaries applied to the new vault.
+    pub beneficiary_count: usize,
+    pub tags_applied: Vec<String>,
+}
+
+// ── Issue #1173: VaultReleaseHistory ────────────────────────────────────────
+
 /// Response body for GET /api/vaults/{id}/release-history — Issue #1173.
 #[derive(Debug, Serialize)]
 pub struct VaultReleaseHistory {
@@ -1072,6 +1338,28 @@ pub struct BeneficiaryArchivalNotification {
     pub error: Option<String>,
 }
 
+// ── Vault clone config (Issue #2050) ────────────────────────────────────────
+
+/// Controls which optional fields are copied when cloning a vault.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VaultCloneConfig {
+    /// Copy the beneficiary field (default: always copied).
+    /// Optional fields below default to false.
+    pub include_tags: bool,
+    pub include_notes: bool,
+    pub include_beneficiaries: bool,
+    pub include_vesting_schedule: bool,
+    pub include_release_conditions: bool,
+}
+
+/// Response from clone_vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloneVaultResponse {
+    pub original_vault_id: String,
+    pub cloned_vault_id: String,
+    pub cloned_vault: Vault,
+}
+
 // ── Vault summary / bulk summary ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1119,6 +1407,89 @@ pub struct VaultHealthResponse {
     pub score: u8,
     pub factors: HealthFactors,
     pub computed_at: DateTime<Utc>,
+}
+
+// ── Token price oracle (Issue #2066) ────────────────────────────────────────
+
+/// Which price oracle provider to use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OracleProvider {
+    /// Redstone — pull-model oracle, prices embedded in transactions.
+    Redstone,
+    /// Pyth Network — push-model oracle with on-chain price feeds.
+    Pyth,
+}
+
+/// Configuration for the token price oracle used by the backend to estimate
+/// vault values in USD.
+///
+/// One instance of this config is stored per deployment (admin-managed).
+/// The scheduler reads it to decide how often to refresh cached prices.
+///
+/// Issue #2066.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenPriceOracleConfig {
+    /// Which oracle provider to use.
+    pub provider: OracleProvider,
+    /// Base URL of the oracle REST or WebSocket endpoint.
+    /// Example: `"https://api.redstone.finance/prices"` or
+    ///          `"https://hermes.pyth.network/api"`.
+    pub endpoint_url: String,
+    /// How often the backend fetches a fresh price (seconds). Must be ≥ 10.
+    pub refresh_interval_seconds: u64,
+    /// XLM price feed identifier as understood by the chosen provider.
+    /// For Redstone: `"XLM"`. For Pyth: the hex feed ID.
+    pub xlm_feed_id: String,
+    /// Whether the oracle integration is currently enabled.
+    pub enabled: bool,
+    /// When this config was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A single cached price entry returned by the backend oracle poller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedTokenPrice {
+    /// Token symbol (e.g. `"XLM"` or the SEP-41 contract address).
+    pub token_id: String,
+    /// USD price (rounded to 8 decimal places).
+    pub price_usd: f64,
+    /// When this price was fetched from the upstream oracle.
+    pub fetched_at: DateTime<Utc>,
+    /// Source oracle provider.
+    pub provider: OracleProvider,
+}
+
+/// Response body for `GET /vaults/{id}/estimated-value`.
+///
+/// Issue #2066.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EstimatedVaultValue {
+    pub vault_id: String,
+    /// Vault balance in stroops (1 XLM = 10 000 000 stroops).
+    pub balance_stroops: i128,
+    /// Estimated USD value of the vault's balance, using the latest cached price.
+    /// `None` when no price data is available.
+    pub estimated_value_usd: Option<f64>,
+    /// Token symbol used for the valuation.
+    pub token_symbol: String,
+    /// USD price per token used for the calculation.
+    pub price_per_token_usd: Option<f64>,
+    /// When the price used for valuation was fetched.
+    pub price_fetched_at: Option<DateTime<Utc>>,
+    /// Whether the price data is considered stale (older than 2× refresh interval).
+    pub is_stale: bool,
+    pub estimated_at: DateTime<Utc>,
+}
+
+/// Request body for `PUT /admin/oracle/config`.
+#[derive(Debug, Deserialize)]
+pub struct SetOracleConfigRequest {
+    pub provider: OracleProvider,
+    pub endpoint_url: String,
+    pub refresh_interval_seconds: u64,
+    pub xlm_feed_id: String,
+    pub enabled: bool,
 }
 
 // ── Escalation (#1101) ──────────────────────────────────────────────────────
@@ -1291,4 +1662,249 @@ pub struct SponsoredReleaseResponse {
 #[derive(Debug, Serialize)]
 pub struct SponsoredReleaseListResponse {
     pub releases: Vec<serde_json::Value>,
+}
+
+// ── Issue #2069: vault full-text search over tags and notes ─────────────────
+
+/// Owner-supplied searchable metadata for a vault (persisted separately from
+/// the in-memory `Vault` record). Indexed by an FTS5 virtual table so the
+/// `GET /api/vaults/search?q=` endpoint can match against tags and notes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultMetadata {
+    pub vault_id: String,
+    pub owner: String,
+    /// Tag strings (stored as a JSON array in SQLite).
+    pub tags: Vec<String>,
+    pub notes: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Body for `PUT /api/vaults/{vault_id}/metadata`.
+#[derive(Debug, Deserialize)]
+pub struct SetVaultMetadataRequest {
+    pub owner: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// Query parameters for `GET /api/vaults/search?q=` (full-text search).
+#[derive(Debug, Deserialize)]
+pub struct VaultSearchQueryParams {
+    pub q: String,
+    /// Authenticated owner; results are scoped to this owner.
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Opaque cursor — the offset the next page should start from.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// A single full-text search hit. Live vault fields (`status`, `balance`,
+/// `ttl_remaining`) are populated when the vault is present in the in-memory
+/// store; they are `None` for metadata-only rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSearchHit {
+    pub vault_id: String,
+    pub owner: String,
+    pub tags: Vec<String>,
+    pub notes: String,
+    /// Matched-text snippet with `<mark>` highlights (FTS5 `snippet()`).
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<VaultStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<i128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_remaining: Option<u64>,
+}
+
+/// Response for `GET /api/vaults/search?q=`.
+#[derive(Debug, Serialize)]
+pub struct VaultSearchResponse {
+    pub query: String,
+    pub vaults: Vec<VaultSearchHit>,
+    pub next_cursor: Option<String>,
+    pub limit: u32,
+}
+
+// ── Issue #2068: check-in delegation audit log ──────────────────────────────
+
+/// Kind of check-in delegation event recorded by the TTL watcher.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckInDelegationEventKind {
+    Grant,
+    Revoke,
+}
+
+impl CheckInDelegationEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "grant" => Self::Grant,
+            _ => Self::Revoke,
+        }
+    }
+}
+
+/// Append-only check-in delegation audit entry, populated by the TTL watcher
+/// whenever it observes a grant/revoke transition, and exposed via
+/// `GET /api/vaults/{vault_id}/delegation-audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckInDelegationAuditEntry {
+    pub id: i64,
+    pub vault_id: String,
+    pub event_kind: CheckInDelegationEventKind,
+    /// Address delegated to. `None` on revoke.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegate: Option<String>,
+    pub actor: String,
+    pub timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Response for `GET /api/vaults/{vault_id}/delegation-audit`.
+#[derive(Debug, Serialize)]
+pub struct CheckInDelegationAuditResponse {
+    pub vault_id: String,
+    pub entries: Vec<CheckInDelegationAuditEntry>,
+}
+
+/// Current check-in delegation state for a vault (the source of truth the
+/// watcher diffs against its last-seen state to emit audit events).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckInDelegationState {
+    pub vault_id: String,
+    pub owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granted_at: Option<DateTime<Utc>>,
+}
+
+/// Body for `POST /api/vaults/{vault_id}/delegation` (grant).
+#[derive(Debug, Deserialize)]
+pub struct GrantCheckInDelegationRequest {
+    pub owner: String,
+    pub delegate: String,
+}
+
+// ── Issue #2070: multi-party withdrawal approval workflow ───────────────────
+
+/// Default approval TTL (48h) when a request omits `approval_ttl_seconds`.
+pub const DEFAULT_WITHDRAWAL_APPROVAL_TTL_SECS: u64 = 48 * 3_600;
+
+/// Lifecycle status of a withdrawal approval workflow.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WithdrawalApprovalStatus {
+    /// Awaiting the configured approvals; auto-cancels at `expires_at`.
+    Pending,
+    /// All required approvers have approved; the withdrawal may execute.
+    Approved,
+    /// Owner/canceller explicitly cancelled the pending request.
+    Cancelled,
+    /// The approval TTL elapsed before all approvals were collected.
+    Expired,
+    /// The withdrawal was executed on-chain.
+    Executed,
+}
+
+impl WithdrawalApprovalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+            Self::Executed => "executed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "approved" => Self::Approved,
+            "cancelled" => Self::Cancelled,
+            "expired" => Self::Expired,
+            "executed" => Self::Executed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+impl std::fmt::Display for WithdrawalApprovalStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// A single recorded approval for a withdrawal workflow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalApproval {
+    pub withdrawal_id: String,
+    pub approver: String,
+    pub approved_at: DateTime<Utc>,
+}
+
+/// A multi-party withdrawal approval workflow for a high-value vault.
+///
+/// `required_approvers` is the set of beneficiaries / designated signers whose
+/// approval is required; the workflow becomes `Approved` once every one of
+/// them has approved. A pending request auto-cancels (`Expired`) once
+/// `approval_ttl_seconds` elapses (checked lazily on read and swept by a
+/// background watcher).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalApprovalWorkflow {
+    pub vault_id: String,
+    pub withdrawal_id: String,
+    /// Amount requested for withdrawal (stroops / base units).
+    pub amount: i128,
+    /// Address that initiated the withdrawal request.
+    pub requested_by: String,
+    /// Approvers (a subset of beneficiaries or designated signers) whose
+    /// approval is required before the withdrawal may execute.
+    pub required_approvers: Vec<String>,
+    pub approval_ttl_seconds: u64,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: WithdrawalApprovalStatus,
+    pub approvals: Vec<WithdrawalApproval>,
+    /// On-chain transaction hash once the withdrawal has executed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_tx_hash: Option<String>,
+}
+
+/// Body for `POST /api/vaults/{vault_id}/withdrawal-approvals`.
+#[derive(Debug, Deserialize)]
+pub struct CreateWithdrawalApprovalRequest {
+    pub requested_by: String,
+    pub amount: i128,
+    pub required_approvers: Vec<String>,
+    /// Seconds before a pending request auto-cancels (default 48h).
+    #[serde(default)]
+    pub approval_ttl_seconds: Option<u64>,
+}
+
+/// Body for `POST /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id}/approvals`.
+#[derive(Debug, Deserialize)]
+pub struct SubmitWithdrawalApprovalRequest {
+    pub approver: String,
+}
+
+/// Response for `GET /api/vaults/{vault_id}/withdrawal-approvals`.
+#[derive(Debug, Serialize)]
+pub struct WithdrawalApprovalListResponse {
+    pub vault_id: String,
+    pub workflows: Vec<WithdrawalApprovalWorkflow>,
 }

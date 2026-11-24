@@ -19,6 +19,21 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Enforce commitlint on PRs
+        if: github.event_name == 'pull_request'
+        run: |
+          npm install --no-save @commitlint/cli@19 @commitlint/config-conventional@19
+          npx commitlint --config commitlint.config.js --from HEAD~1 --to HEAD --verbose
+
+      - name: Label PR based on changed files
+        if: github.event_name == 'pull_request'
+        uses: actions/labeler@v5
+        with:
+          repo-token: "${{ secrets.GITHUB_TOKEN }}"
+          configuration-path: .github/labeler.yml
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -162,6 +177,13 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Snapshot tests (fail on unexpected diffs)
+        # #2083 — run dashboard component snapshots in --ci mode so any
+        # snapshot mismatch causes a hard failure rather than a prompt to update.
+        # Pass --testPathPattern to scope this step to the snapshot file only;
+        # the full suite is already covered by the step above.
+        run: npm test -- --ci --testPathPattern=DashboardSnapshots
+
       - name: Build
         run: npm run build
 
@@ -216,3 +238,19 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  cargo-deny:
+    name: Cargo deny (duplicate crate versions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check for duplicate crate versions
+        run: cargo deny check bans

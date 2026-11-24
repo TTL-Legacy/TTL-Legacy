@@ -4,6 +4,8 @@ pub mod cache;
 pub mod consensus;
 pub mod contract_version_check;
 pub mod db;
+/// Issue #2073: dead-letter queue for permanently failed reminder dispatches.
+pub mod dead_letter;
 pub mod error;
 pub mod escalation;
 pub mod fee_sponsorship;
@@ -22,8 +24,9 @@ pub mod routes;
 pub mod sanitization;
 pub mod scheduler;
 pub mod security_headers;
-pub mod sms;
 pub mod templates;
+/// Issue #2066: token price oracle config and vault value estimation.
+pub mod token_price_oracle;
 /// Issue #1596: owner warning when storage TTL nears archival
 pub mod ttl_watch;
 pub mod two_factor;
