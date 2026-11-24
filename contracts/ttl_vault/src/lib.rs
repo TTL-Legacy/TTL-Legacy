@@ -105,6 +105,9 @@ mod beneficiary_conflict_resolution_tests;
 #[cfg(test)]
 mod issue_1525_1528_tests;
 
+#[cfg(test)]
+mod vesting_schedule_tests;
+
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const VAULT_TTL_THRESHOLD: u32 = 1000;
@@ -147,6 +150,73 @@ fn vault_ttl_ledgers(check_in_interval: u64) -> u32 {
         .saturating_mul(2)
         .saturating_div(LEDGER_SECOND);
     ledgers.clamp(VAULT_TTL_LEDGERS, MAX_PERSISTENT_TTL)
+}
+
+/// Derives the payout for `schedule` from the current ledger time and stored
+/// state. No result is cached, so a query made after a cliff passes always
+/// reflects the post-cliff amount.
+///
+/// Returns `(base_amount, amount_after_penalty, unlocked_installments)`.
+fn compute_vesting_claimable(
+    env: &Env,
+    vault_id: u64,
+    vault: &Vault,
+    schedule: &VestingSchedule,
+    now: u64,
+) -> (i128, i128, u32) {
+    let elapsed = now.saturating_sub(schedule.start_time);
+    let unlocked =
+        ((elapsed / schedule.interval) + 1).min(schedule.num_installments as u64) as u32;
+    let claimable = unlocked.saturating_sub(schedule.claimed_installments);
+    if claimable == 0 {
+        return (0, 0, unlocked);
+    }
+
+    let per_installment = schedule.total_amount / schedule.num_installments as i128;
+    let base_amount = if unlocked >= schedule.num_installments {
+        let claimed_so_far = per_installment * schedule.claimed_installments as i128;
+        schedule
+            .total_amount
+            .saturating_sub(claimed_so_far)
+            .min(vault.balance)
+    } else {
+        per_installment * claimable as i128
+    };
+
+    let amount = if let Some(penalty_cfg) = env
+        .storage()
+        .persistent()
+        .get::<StorageKey, VestingPenaltyConfig>(&StorageKey::VestingPenalty(vault_id))
+    {
+        let late_cutoff = now.saturating_sub(penalty_cfg.grace_period_seconds);
+        let mut late_count = 0u32;
+        for i in (schedule.claimed_installments + 1)..=unlocked {
+            let unlock_time = schedule
+                .start_time
+                .saturating_add((i as u64 - 1).saturating_mul(schedule.interval));
+            if unlock_time < late_cutoff {
+                late_count += 1;
+            }
+        }
+        if late_count > 0 {
+            let on_time_count = claimable.saturating_sub(late_count);
+            let on_time_amount = per_installment * on_time_count as i128;
+            let late_amount = per_installment * late_count as i128;
+            let penalty = late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
+            let penalized = on_time_amount + late_amount - penalty;
+            if unlocked >= schedule.num_installments {
+                penalized.min(vault.balance)
+            } else {
+                penalized
+            }
+        } else {
+            base_amount
+        }
+    } else {
+        base_amount
+    };
+
+    (base_amount, amount, unlocked)
 }
 
 #[contracterror(export = false)]
@@ -4823,6 +4893,44 @@ impl TtlVaultContract {
             .unwrap_or(0)
     }
 
+    /// Returns the amount currently claimable from a vesting schedule.
+    ///
+    /// The value is recomputed from the current ledger timestamp and the stored
+    /// schedule on every call (nothing is cached in temporary storage), so a
+    /// query made after `start_time + cliff_period` immediately reports the
+    /// post-cliff amount. Returns 0 if the vault is not Released, the schedule
+    /// does not exist, the cliff has not passed, or nothing is left to claim.
+    pub fn get_vesting_claimable(env: Env, vault_id: u64, schedule_id: u32) -> i128 {
+        let Some(vault) = Self::try_load_vault(&env, vault_id) else {
+            return 0;
+        };
+        if vault.status != ReleaseStatus::Released {
+            return 0;
+        }
+        let Some(schedule) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VestingSchedule>(&StorageKey::VestingSchedule(
+                vault_id,
+                schedule_id,
+            ))
+        else {
+            return 0;
+        };
+
+        let now = env.ledger().timestamp();
+        if now < schedule.start_time
+            || schedule.claimed_installments >= schedule.num_installments
+            || (schedule.cliff_period > 0
+                && now < schedule.start_time.saturating_add(schedule.cliff_period))
+        {
+            return 0;
+        }
+
+        let (_, amount, _) = compute_vesting_claimable(&env, vault_id, &vault, &schedule, now);
+        amount.min(vault.balance)
+    }
+
     /// Claim available vesting installments for a specific schedule.
     ///
     /// This is the primary beneficiary-facing function for time-based vesting.
@@ -4898,68 +5006,13 @@ impl TtlVaultContract {
                 .publish((CLIFF_REACHED_TOPIC, vault_id), (schedule_id, now));
         }
 
-        // How many installments are unlocked so far?
-        let elapsed = now.saturating_sub(schedule.start_time);
-        let unlocked =
-            ((elapsed / schedule.interval) + 1).min(schedule.num_installments as u64) as u32;
-
-        let claimable = unlocked.saturating_sub(schedule.claimed_installments);
-        if claimable == 0 {
-            return Err(ContractError::NothingToClaimYet);
-        }
-
-        // Calculate payout: each installment = total / num_installments,
-        // last installment absorbs remainder via vault.balance ceiling.
-        let per_installment = schedule.total_amount / schedule.num_installments as i128;
-        let base_amount = if unlocked >= schedule.num_installments {
-            // Final batch: drain whatever remains in the vault attributed to this schedule
-            let claimed_so_far = per_installment * schedule.claimed_installments as i128;
-            schedule
-                .total_amount
-                .saturating_sub(claimed_so_far)
-                .min(vault.balance)
-        } else {
-            per_installment * claimable as i128
-        };
-
+        // Derive the payout from current state. The same computation backs
+        // get_vesting_claimable, so the view and the claim cannot drift apart.
+        let (base_amount, amount, unlocked) =
+            compute_vesting_claimable(&env, vault_id, &vault, &schedule, now);
         if base_amount <= 0 {
             return Err(ContractError::NothingToClaimYet);
         }
-
-        // Issue #1756: apply late-claim penalty if VestingPenaltyConfig is set.
-        let amount = if let Some(penalty_cfg) = env
-            .storage()
-            .persistent()
-            .get::<StorageKey, VestingPenaltyConfig>(&StorageKey::VestingPenalty(vault_id))
-        {
-            let late_cutoff = now.saturating_sub(penalty_cfg.grace_period_seconds);
-            let mut late_count = 0u32;
-            for i in (schedule.claimed_installments + 1)..=unlocked {
-                let unlock_time = schedule
-                    .start_time
-                    .saturating_add((i as u64 - 1).saturating_mul(schedule.interval));
-                if unlock_time < late_cutoff {
-                    late_count += 1;
-                }
-            }
-            if late_count > 0 {
-                let on_time_count = claimable.saturating_sub(late_count);
-                let on_time_amount = per_installment * on_time_count as i128;
-                let late_amount = per_installment * late_count as i128;
-                let penalty =
-                    late_amount * penalty_cfg.penalty_bps as i128 / BASIS_POINTS_100_PERCENT;
-                let penalized = on_time_amount + late_amount - penalty;
-                if unlocked >= schedule.num_installments {
-                    penalized.min(vault.balance)
-                } else {
-                    penalized
-                }
-            } else {
-                base_amount
-            }
-        } else {
-            base_amount
-        };
 
         if vault.balance < amount {
             return Err(ContractError::InsufficientBalance);
