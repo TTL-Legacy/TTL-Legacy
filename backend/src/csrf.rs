@@ -15,7 +15,7 @@
 //    the next state-changing request (mitigates BREACH-style leakage).
 //
 // Safe methods (GET, HEAD, OPTIONS) are unconditionally allowed through.
-// The `/health`, `/ready`, and `/health/consensus` diagnostics paths are also
+// The `/health`, `/healthz`, `/ready`, `/readyz`, and `/health/consensus` diagnostics paths are also
 // exempted because they carry no side effects and no session context.
 
 use axum::{
@@ -86,7 +86,14 @@ fn csrf_forbidden() -> Response {
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 /// Paths that bypass CSRF validation entirely (diagnostics / token issuance).
-const EXEMPT_PATHS: &[&str] = &["/health", "/health/consensus", "/ready", "/api/csrf-token"];
+const EXEMPT_PATHS: &[&str] = &[
+    "/health",
+    "/healthz",
+    "/health/consensus",
+    "/ready",
+    "/readyz",
+    "/api/csrf-token",
+];
 
 /// Axum middleware that enforces CSRF token validation on state-mutating
 /// requests.
@@ -341,7 +348,14 @@ mod middleware_tests {
 
     #[tokio::test]
     async fn exempt_paths_bypass_validation() {
-        for path in &["/health", "/health/consensus", "/ready", "/api/csrf-token"] {
+        for path in &[
+            "/health",
+            "/healthz",
+            "/health/consensus",
+            "/ready",
+            "/readyz",
+            "/api/csrf-token",
+        ] {
             let app = test_app();
 
             let response = app

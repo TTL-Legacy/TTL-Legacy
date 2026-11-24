@@ -97,9 +97,9 @@ impl CorsConfig {
     }
 }
 
-// ── Health & readiness probes (#1489) ────────────────────────────────────────
+// ── Health & readiness probes (#1489, #2126) ────────────────────────────────
 
-/// GET /health
+/// GET /health or GET /healthz
 ///
 /// Cheap liveness probe: confirms the process is up and serving requests.
 /// Intentionally performs no dependency checks so it stays fast and cannot
@@ -107,6 +107,14 @@ impl CorsConfig {
 #[instrument]
 pub async fn health() -> StatusCode {
     StatusCode::OK
+}
+
+/// GET /healthz
+///
+/// Kubernetes liveness probe alias for [`health`].
+#[instrument]
+pub async fn healthz() -> StatusCode {
+    health().await
 }
 
 #[derive(serde::Serialize)]
@@ -121,7 +129,7 @@ pub struct ReadinessChecks {
     pub rpc: &'static str,
 }
 
-/// GET /ready
+/// GET /ready or GET /readyz
 ///
 /// Readiness probe: verifies that dependencies (DB connection and Soroban RPC)
 /// are reachable before the instance is considered ready to serve traffic.
@@ -148,6 +156,16 @@ pub async fn ready(
             checks,
         })))
     }
+}
+
+/// GET /readyz
+///
+/// Kubernetes readiness probe alias for [`ready`].
+#[instrument(skip(state))]
+pub async fn readyz(
+    state: Data<Arc<AppState>>,
+) -> Result<Json<ReadinessResponse>, AppError> {
+    ready(state).await
 }
 
 #[derive(Deserialize)]
