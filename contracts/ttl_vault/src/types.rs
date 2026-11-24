@@ -31,6 +31,8 @@ pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_ana");
 pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bkp_enc");
 // Issue #534: vesting cliff period reached
 pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("clif_rch");
+// Issue #2065: cliff grace period — late claim treated as on-time
+pub const CLIFF_GRACE_CLAIM_TOPIC: Symbol = symbol_short!("clif_grce");
 pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
 pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("v_resume");
 pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
@@ -612,17 +614,16 @@ pub enum StorageKey {
     MaxHibernationDuration(u64),
     // Issue #1836: vault-scoped bridge configuration for cross-chain deposits
     VaultBridgeConfig(u64),
-    // Issue #2044: vault tags — distinct prefix prevents collision with VaultNote
-    // Key: (vault_id, tag_id) → tag value
-    VaultTag(u64, u64),
-    // Issue #2044: vault notes — distinct prefix prevents collision with VaultTag
-    // Key: (vault_id, note_id) → note value
-    VaultNote(u64, u64),
-    // Issue #2045: single-use check-in email tokens.
-    // The key is removed (delete-on-use) rather than flagged so that a failed
-    // flag-update cannot leave the token reusable.
-    // Key: (vault_id, token_hash) → ()
-    CheckinEmailToken(u64, BytesN<32>),
+    // Issue #2060: BeneficiaryGroupConfig — named groups with shared BPS
+    /// Stores a `BeneficiaryGroupConfig` keyed by (vault_id, group_name).
+    BeneficiaryGroup(u64, String),
+    /// Stores the list of group names registered for a vault.
+    BeneficiaryGroupNames(u64),
+    // Issue #2061: VestingPauseConfig — pause/resume vesting mid-schedule
+    VestingPause(u64),
+    // Issue #2063: BeneficiaryConfirmationDeadline — auto-decline after N days
+    /// Stores a `BeneficiaryConfirmationDeadline` keyed by (vault_id, beneficiary).
+    BeneficiaryConfirmationDeadline(u64, Address),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -672,6 +673,15 @@ pub struct VestingSchedule {
     /// Cliff duration in seconds from `start_time`. No funds are claimable until
     /// `start_time + cliff_period` has elapsed. Set to 0 to disable.
     pub cliff_period: u64,
+    /// Grace window in seconds after the cliff date.
+    ///
+    /// A claim submitted within `[cliff_date, cliff_date + cliff_grace_period_seconds)` is
+    /// treated as on-time and does not incur the late-claim penalty defined by
+    /// `VestingPenaltyConfig`. Set to 0 to disable (default behaviour: any claim after
+    /// the cliff date is subject to the normal penalty logic).
+    ///
+    /// Issue #2065.
+    pub cliff_grace_period_seconds: u64,
 }
 
 /// Penalty configuration for late-claim vesting installments.
@@ -2015,6 +2025,136 @@ pub struct WithdrawalApprovalRequest {
     pub expires_at: u64,
 }
 
+// ── Issue #2060: BeneficiaryGroupConfig ──────────────────────────────────────
+
+/// Topic emitted when a beneficiary group is created or updated.
+pub const BENEFICIARY_GROUP_SET_TOPIC: Symbol = symbol_short!("ben_grp");
+/// Topic emitted when a beneficiary group is removed.
+pub const BENEFICIARY_GROUP_REMOVED_TOPIC: Symbol = symbol_short!("ben_grprm");
+/// Topic emitted when a member is added to a beneficiary group.
+pub const BENEFICIARY_GROUP_MEMBER_ADDED_TOPIC: Symbol = symbol_short!("grp_madd");
+/// Topic emitted when a member is removed from a beneficiary group.
+pub const BENEFICIARY_GROUP_MEMBER_REMOVED_TOPIC: Symbol = symbol_short!("grp_mrm");
+
+/// A single member inside a `BeneficiaryGroupConfig`.
+/// When `weight` is 0 for every member the group share is split equally.
+/// When any member carries a non-zero weight, distribution is proportional to
+/// weights across all members in that group.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryGroupMember {
+    /// Member's Stellar address.
+    pub address: Address,
+    /// Relative weight for this member (0 = use equal split).
+    pub weight: u32,
+}
+
+/// Named group of beneficiaries that share a single BPS allocation from the vault.
+///
+/// The vault owner assigns `group_bps` to the group as a whole. At release time
+/// the group's share is divided among its members either equally (all weights
+/// zero) or proportionally to `weight`.  Groups live in persistent storage
+/// keyed by `(vault_id, group_name)` and are independent of the flat
+/// `beneficiaries: Vec<BeneficiaryEntry>` on the `Vault` struct, so updating
+/// group membership never requires touching vault-level storage.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryGroupConfig {
+    /// Human-readable name for the group (e.g. "family", "advisors").
+    pub group_name: String,
+    /// Basis-points share of the vault balance allocated to this group (1–10 000).
+    pub group_bps: u32,
+    /// Members of the group and their relative weights.
+    pub members: Vec<BeneficiaryGroupMember>,
+}
+
+// ── Issue #2061: VestingPauseConfig ──────────────────────────────────────────
+
+/// Topic emitted when vesting is paused for a vault.
+pub const VESTING_PAUSED_TOPIC: Symbol = symbol_short!("vest_pau");
+/// Topic emitted when vesting is resumed for a vault.
+pub const VESTING_RESUMED_TOPIC: Symbol = symbol_short!("vest_res");
+
+/// Tracks the pause state of a vault's primary vesting schedule.
+///
+/// When `is_paused` is true the cliff and end counters are frozen: the amount
+/// accrued up to `paused_at` is preserved and can be claimed after resumption,
+/// but no additional time passes against the schedule until `resume_vesting` is
+/// called.
+///
+/// # Accrual semantics
+/// `accrued_at_pause` captures the number of installments already elapsed at
+/// the moment of pausing.  On resumption the schedule's `start_time` is shifted
+/// forward by `elapsed_paused_duration` so that the remaining installments play
+/// out from the resume point, not from an earlier wall-clock time.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingPauseConfig {
+    /// Whether vesting is currently paused.
+    pub is_paused: bool,
+    /// Ledger timestamp at which the last pause was initiated.
+    pub paused_at: u64,
+    /// Cumulative seconds spent in the paused state across all pause/resume cycles.
+    pub total_paused_duration: u64,
+    /// Number of installments that had already elapsed when the last pause began.
+    pub accrued_at_pause: u32,
+}
+
+// ── Issue #2062: contract_version on events ───────────────────────────────────
+
+/// Wraps any on-chain event payload with the contract version that produced it.
+///
+/// Callers that replay historical ledgers can inspect `contract_version` to
+/// determine which ABI was active when an event was emitted and decode the
+/// inner `payload` accordingly.
+///
+/// `contract_version` is populated from `get_contract_version()` at event
+/// emission time, which returns the `String` stored under `StorageKey::Version`.
+/// New event-emitting functions should use this wrapper instead of publishing
+/// a bare payload.
+#[contracttype]
+#[derive(Clone)]
+pub struct VersionedEvent {
+    /// The on-chain version string of the contract at emission time (e.g. "1.0.0").
+    pub contract_version: String,
+    /// Serialised event payload bytes.  Callers decode this according to the
+    /// ABI version indicated by `contract_version`.
+    pub payload: Bytes,
+}
+
+// ── Issue #2063: confirmation_deadline_days ───────────────────────────────────
+
+/// Topic emitted when a beneficiary's confirmation deadline expires and the
+/// slot is auto-declined, returning the BPS to the owner's unallocated pool.
+pub const BENEFICIARY_DEADLINE_EXPIRED_TOPIC: Symbol = symbol_short!("ben_dl_ex");
+/// Topic emitted when the owner sets or updates a confirmation deadline.
+pub const BENEFICIARY_DEADLINE_SET_TOPIC: Symbol = symbol_short!("ben_dl_st");
+
+/// Deadline enforcement record attached to a pending beneficiary slot.
+///
+/// When the vault owner calls `add_beneficiary` or a dedicated
+/// `set_beneficiary_confirmation_deadline`, the contract stores one of these
+/// records.  The scheduler (or any caller) may subsequently call
+/// `expire_beneficiary_confirmation` to auto-decline the slot once
+/// `deadline_timestamp` has passed.
+///
+/// If the beneficiary confirms (calls `accept_beneficiary_role`) before the
+/// deadline, the record is removed.  If the owner sets `deadline_days` to 0,
+/// no deadline is enforced for that slot.
+#[contracttype]
+#[derive(Clone)]
+pub struct BeneficiaryConfirmationDeadline {
+    /// The beneficiary address this deadline applies to.
+    pub beneficiary: Address,
+    /// Unix timestamp (seconds) after which the slot auto-declines.
+    pub deadline_timestamp: u64,
+    /// BPS that will be returned to the unallocated pool on expiry.
+    pub bps: u32,
+    /// Whether this deadline has already been enforced (slot was auto-declined).
+    pub expired: bool,
+}
+
+// ── Timelock delay (seconds) applied to admin ownership transfers ─────────────
 /// Timelock delay (seconds) applied to admin ownership transfers.
 pub const ADMIN_TRANSFER_TIMELOCK: u64 = 172_800;
 
@@ -2032,3 +2172,37 @@ pub const LOAN_REPAID_TOPIC: Symbol = symbol_short!("loan_rep");
 pub const TWO_FACTOR_ENABLED_TOPIC: Symbol = symbol_short!("2fa_en");
 pub const TWO_FACTOR_DISABLED_TOPIC: Symbol = symbol_short!("2fa_dis");
 pub const TWO_FACTOR_VERIFIED_TOPIC: Symbol = symbol_short!("2fa_vrf");
+
+// ---------------------------------------------------------------------------
+// Issue #2074 — beneficiary_swap on-chain event log
+// ---------------------------------------------------------------------------
+
+/// Topic emitted by `swap_allocations` when two beneficiaries exchange their
+/// BPS allocations atomically.
+///
+/// Downstream services (indexers, cached beneficiary indexes) can subscribe to
+/// this topic to stay consistent without polling `get_vault`.
+///
+/// Event payload: `(old_address: Address, new_address: Address, old_bps: u32,
+/// new_bps: u32, vault_id: u64)`
+pub const BENEFICIARY_SWAPPED_TOPIC: Symbol = symbol_short!("b_swapped");
+
+/// Event data emitted alongside [`BENEFICIARY_SWAPPED_TOPIC`].
+///
+/// `old_address` held `old_bps` before the swap; after the swap it holds
+/// `new_bps`.  Symmetrically, `new_address` moves from `new_bps` to
+/// `old_bps`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeneficiarySwappedEvent {
+    /// Vault in which the swap occurred.
+    pub vault_id: u64,
+    /// First beneficiary in the swap pair.
+    pub old_address: Address,
+    /// Second beneficiary in the swap pair.
+    pub new_address: Address,
+    /// BPS `old_address` held before the swap (= BPS `new_address` holds after).
+    pub old_bps: u32,
+    /// BPS `new_address` held before the swap (= BPS `old_address` holds after).
+    pub new_bps: u32,
+}
