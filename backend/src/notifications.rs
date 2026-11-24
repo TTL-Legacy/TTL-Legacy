@@ -7,8 +7,8 @@
 use crate::models::{
     ChannelDeliveryLog, DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken,
     IdempotencyRecord, NotificationChannel, NotificationPreferences, NotificationType,
-    RegisterTokenRequest, ReminderDeliveryLog, ReminderToken, ScheduledNotification,
-    UnsubscribeToken, UpdatePreferencesRequest, Vault,
+    PasskeyExpiryInput, RegisterTokenRequest, ReminderDeliveryLog, ReminderToken,
+    ScheduledNotification, UnsubscribeToken, UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -144,10 +144,16 @@ impl FcmClient {
 
 // ── Notification content helpers ─────────────────────────────────────────────
 
+/// Truncates a passkey hash/credential id to its first 8 characters for display — Issue #560.
+fn short_passkey_id(passkey_hash: Option<&str>) -> String {
+    passkey_hash.unwrap_or("").chars().take(8).collect()
+}
+
 fn notification_content(
     notification_type: &NotificationType,
     vault_id: &str,
     ttl_hours: Option<u64>,
+    passkey_hash: Option<&str>,
 ) -> (&'static str, String, Value) {
     match notification_type {
         NotificationType::ExpiryWarning => {
@@ -201,6 +207,11 @@ const FALLBACK_DELAY_SECS: u64 = 300;
 
 /// Idempotency key TTL in seconds (24 hours) (#825).
 pub const IDEMPOTENCY_TTL_SECS: i64 = 86_400;
+
+/// Default window before a passkey's expiry at which an "expiring soon"
+/// notification is scheduled — Issue #560 (24 hours, matching the contract's
+/// `EXPIRY_WARNING_THRESHOLD`).
+pub const PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS: i64 = 86_400;
 
 pub struct NotificationService {
     pub fcm: Arc<FcmClient>,
@@ -361,6 +372,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
     }
 
@@ -403,6 +415,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
         true
     }
@@ -433,6 +446,7 @@ impl NotificationService {
                 max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
                 sent_at: None,
                 ttl_hours: Some(ttl_secs / 3_600),
+                passkey_hash: None,
             });
         true
     }
@@ -451,6 +465,8 @@ impl NotificationService {
         let enabled = match (prefs, &notification_type) {
             (Some(p), NotificationType::VaultReleased) => p.vault_released_enabled,
             (Some(p), NotificationType::CheckInReminder) => p.check_in_reminder_enabled,
+            (Some(p), NotificationType::PasskeyExpiringSoon)
+            | (Some(p), NotificationType::PasskeyExpired) => p.expiry_warning_enabled,
             (Some(_), NotificationType::ExpiryWarning) => true,
             (None, _) => false,
             _ => true,
@@ -469,6 +485,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
     }
 
@@ -635,6 +652,7 @@ impl NotificationService {
             max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
             sent_at: None,
             ttl_hours: None,
+            passkey_hash: None,
         });
 
         tracing::info!(
@@ -742,8 +760,12 @@ impl NotificationService {
             return;
         }
 
-        let (title, body, data) =
-            notification_content(&notif.notification_type, &notif.vault_id, notif.ttl_hours);
+        let (title, body, data) = notification_content(
+            &notif.notification_type,
+            &notif.vault_id,
+            notif.ttl_hours,
+            notif.passkey_hash.as_deref(),
+        );
 
         let mut last_err = String::new();
         let mut any_ok = false;
