@@ -191,3 +191,18 @@ pub fn enforce_withdrawal_whitelist(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ApiErrorKind;
+
+    #[test]
+    fn non_whitelisted_address_returns_forbidden_api_error() {
+        let db = Db::new_in_memory().expect("in-memory db");
+        let err = enforce_withdrawal_whitelist(&db, "vault-1", "GADDRESS")
+            .expect_err("non-whitelisted address must be rejected");
+        assert_eq!(err.api_error_kind(), ApiErrorKind::Forbidden);
+        assert_eq!(err.api_error().code, "forbidden");
+    }
+}

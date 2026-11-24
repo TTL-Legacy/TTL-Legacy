@@ -12,7 +12,7 @@ use tracing::instrument;
 use crate::{
     audit,
     db::{AppState, Db},
-    error::AppError,
+    error::{ApiError, AppError},
     handlers::{
         claim_vesting_bonus_handler, get_vesting_bonus_handler, parse_scenario_types,
         simulate_release_handler,
@@ -432,4 +432,48 @@ pub async fn submit_proof_of_life(
         "vault_id": vault_id,
         "beneficiary": body.beneficiary,
     })))
+}
+
+// ── Typed error response shape (#2114) ──────────────────────────────────────
+
+/// Serialises an [`ApiError`] into the canonical `{code, message}` JSON body.
+///
+/// Route handlers return [`AppError`], whose `IntoResponse` impl delegates to
+/// this helper so every error response shares the same structure.
+pub fn api_error_body(err: &ApiError) -> serde_json::Value {
+    serde_json::to_value(err).unwrap_or_else(|_| {
+        serde_json::json!({
+            "code": "internal_error",
+            "message": "failed to serialise error",
+        })
+    })
+}
+
+#[cfg(test)]
+mod error_shape_tests {
+    use super::*;
+    use actix_web::body::to_bytes;
+
+    async fn body_json(res: HttpResponse) -> serde_json::Value {
+        let bytes = to_bytes(res.into_body()).await.expect("body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[actix_web::test]
+    async fn not_found_response_has_code_and_message() {
+        let res = AppError::NotFound.into_response();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let body = body_json(res).await;
+        assert!(body.get("code").is_some(), "missing code: {body}");
+        assert!(body.get("message").is_some(), "missing message: {body}");
+    }
+
+    #[actix_web::test]
+    async fn invalid_input_response_has_code_and_message() {
+        let res = AppError::InvalidInput("channels must not be empty".into()).into_response();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(res).await;
+        assert!(body.get("code").is_some(), "missing code: {body}");
+        assert!(body.get("message").is_some(), "missing message: {body}");
+    }
 }

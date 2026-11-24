@@ -22,6 +22,79 @@ impl ApiError {
             status,
         }
     }
+
+    /// Build an `ApiError` from a typed [`ApiErrorKind`], using the kind's
+    /// stable string `code` and HTTP status.
+    pub fn from_kind(kind: ApiErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            code: kind.code().to_string(),
+            message: message.into(),
+            details: None,
+            status: kind.status(),
+        }
+    }
+}
+
+/// Typed error kinds used by handlers, replacing ad-hoc string error codes.
+///
+/// Each variant maps to a stable string `code` (serialised in the JSON body)
+/// and an HTTP status. Use [`ApiError::from_kind`] or the
+/// `From<ApiErrorKind> for ApiError` impl to build a response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiErrorKind {
+    VaultNotFound,
+    ShareTokenNotFound,
+    InvalidShareToken,
+    ShareTokenRevoked,
+    ShareTokenExpired,
+    ShareTokenWrongPermission,
+    TokenVaultMismatch,
+    UnsupportedFormat,
+    Forbidden,
+    InvalidInput,
+    Internal,
+}
+
+impl ApiErrorKind {
+    /// Stable string code emitted in the JSON error body.
+    pub fn code(self) -> &'static str {
+        match self {
+            ApiErrorKind::VaultNotFound => "vault_not_found",
+            ApiErrorKind::ShareTokenNotFound => "share_token_not_found",
+            ApiErrorKind::InvalidShareToken => "invalid_share_token",
+            ApiErrorKind::ShareTokenRevoked => "share_token_revoked",
+            ApiErrorKind::ShareTokenExpired => "share_token_expired",
+            ApiErrorKind::ShareTokenWrongPermission => "share_token_wrong_permission",
+            ApiErrorKind::TokenVaultMismatch => "token_vault_mismatch",
+            ApiErrorKind::UnsupportedFormat => "unsupported_format",
+            ApiErrorKind::Forbidden => "forbidden",
+            ApiErrorKind::InvalidInput => "invalid_input",
+            ApiErrorKind::Internal => "internal_error",
+        }
+    }
+
+    /// HTTP status associated with the kind.
+    pub fn status(self) -> StatusCode {
+        match self {
+            ApiErrorKind::VaultNotFound => StatusCode::NOT_FOUND,
+            ApiErrorKind::ShareTokenNotFound => StatusCode::NOT_FOUND,
+            ApiErrorKind::InvalidShareToken => StatusCode::BAD_REQUEST,
+            ApiErrorKind::ShareTokenRevoked => StatusCode::GONE,
+            ApiErrorKind::ShareTokenExpired => StatusCode::GONE,
+            ApiErrorKind::ShareTokenWrongPermission => StatusCode::FORBIDDEN,
+            ApiErrorKind::TokenVaultMismatch => StatusCode::BAD_REQUEST,
+            ApiErrorKind::UnsupportedFormat => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiErrorKind::Forbidden => StatusCode::FORBIDDEN,
+            ApiErrorKind::InvalidInput => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<ApiErrorKind> for ApiError {
+    fn from(kind: ApiErrorKind) -> Self {
+        ApiError::from_kind(kind, kind.code())
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -135,6 +208,62 @@ mod tests {
         let err = AppError::SponsorInsufficientBalance("balance below fee".to_string());
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[test]
+    fn api_error_serializes_to_code_message_details() {
+        let err = ApiError::from_kind(ApiErrorKind::VaultNotFound, "vault missing");
+        let value = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(value["code"], "vault_not_found");
+        assert_eq!(value["message"], "vault missing");
+        assert!(value.get("details").is_some());
+        assert!(value["details"].is_null());
+        assert!(value.get("status").is_none());
+    }
+
+    #[test]
+    fn api_error_kind_statuses_map_correctly() {
+        assert_eq!(
+            ApiError::from_kind(ApiErrorKind::VaultNotFound, "x").into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            ApiError::from_kind(ApiErrorKind::ShareTokenNotFound, "x").into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            ApiError::from_kind(ApiErrorKind::Forbidden, "x").into_response().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            ApiError::from_kind(ApiErrorKind::InvalidShareToken, "x").into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ApiError::from_kind(ApiErrorKind::InvalidInput, "x").into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            ApiError::from_kind(ApiErrorKind::Internal, "x").into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn api_error_kind_codes_are_stable() {
+        assert_eq!(ApiErrorKind::VaultNotFound.code(), "vault_not_found");
+        assert_eq!(ApiErrorKind::InvalidShareToken.code(), "invalid_share_token");
+        assert_eq!(ApiErrorKind::UnsupportedFormat.code(), "unsupported_format");
+        assert_eq!(ApiErrorKind::Forbidden.code(), "forbidden");
+        assert_eq!(ApiErrorKind::InvalidInput.code(), "invalid_input");
+        assert_eq!(ApiErrorKind::Internal.code(), "internal_error");
+    }
+
+    #[test]
+    fn api_error_kind_converts_into_api_error() {
+        let err: ApiError = ApiErrorKind::Forbidden.into();
+        assert_eq!(err.code, "forbidden");
+        assert_eq!(err.into_response().status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

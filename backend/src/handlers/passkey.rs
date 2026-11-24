@@ -1,5 +1,5 @@
 use crate::db::*;
-use crate::error::AppError;
+use crate::error::{ApiError, ApiErrorKind, AppError};
 use crate::models::*;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -157,7 +157,12 @@ pub async fn recover_with_credential_handler(
                         && pk.is_backup
                         && pk.credential_id == body.recovery_credential
                 })
-                .ok_or(AppError::NotFound("Backup passkey not found".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::Api(ApiError::new(
+                        ApiErrorKind::NotFound,
+                        "Backup passkey not found",
+                    ))
+                })?;
 
             let passkey_id = passkey.passkey_id.clone();
             drop(store);
@@ -188,9 +193,12 @@ pub async fn recover_with_credential_handler(
                         && verify_code(&body.recovery_credential, &rc.code_hash)
                         && rc.used_at.is_none()
                 })
-                .ok_or(AppError::NotFound(
-                    "Invalid or expired recovery code".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    AppError::Api(ApiError::new(
+                        ApiErrorKind::InvalidInput,
+                        "Invalid or expired recovery code",
+                    ))
+                })?;
 
             code_entry.used_at = Some(Utc::now());
             drop(recovery_codes);
@@ -417,6 +425,17 @@ mod tests {
             .filter(|rc| rc.used_at.is_none())
             .count();
         assert_eq!(unused, 10);
+    }
+
+    #[test]
+    fn test_invalid_recovery_code_returns_invalid_input_error() {
+        let err = AppError::Api(ApiError::new(
+            ApiErrorKind::InvalidInput,
+            "Invalid or expired recovery code",
+        ));
+        let body = serde_json::to_value(err.to_api_error()).unwrap();
+        assert_eq!(body["code"], "invalid_input");
+        assert_eq!(body["message"], "Invalid or expired recovery code");
     }
 
     #[test]

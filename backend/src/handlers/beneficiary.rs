@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::error::{ApiError, ApiErrorKind};
 use crate::models::*;
 use chrono::Utc;
 
@@ -14,14 +15,14 @@ pub fn share_vault_handler(
     audit_store: &AuditStore,
     vault_id: &str,
     request: ShareRequest,
-) -> Result<VaultShare, String> {
+) -> Result<VaultShare, ApiError> {
     // Verify vault exists
     let vault = store
         .lock()
         .unwrap()
         .get(vault_id)
         .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
 
     let share = VaultShare {
         share_id: uuid::Uuid::new_v4().to_string(),
@@ -57,13 +58,13 @@ pub fn generate_share_token_handler(
     audit_store: &AuditStore,
     vault_id: &str,
     request: GenerateTokenRequest,
-) -> Result<ShareTokenResponse, String> {
+) -> Result<ShareTokenResponse, ApiError> {
     let vault = store
         .lock()
         .unwrap()
         .get(vault_id)
         .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
 
     let permission = request.permission.unwrap_or(SharePermission::ViewOnly);
     let expires_at = Utc::now()
@@ -125,19 +126,19 @@ pub fn revoke_share_token_handler(
     audit_store: &AuditStore,
     vault_id: &str,
     request: RevokeTokenRequest,
-) -> Result<ShareToken, String> {
+) -> Result<ShareToken, ApiError> {
     let vault = store
         .lock()
         .unwrap()
         .get(vault_id)
         .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
 
     let token = revoke_share_token(token_store, &request.token)
-        .ok_or_else(|| "Share token not found".to_string())?;
+        .ok_or_else(|| ApiError::from(ApiErrorKind::ShareTokenNotFound))?;
 
     if token.vault_id != vault_id {
-        return Err("Token does not belong to this vault".to_string());
+        return Err(ApiError::from(ApiErrorKind::TokenVaultMismatch));
     }
 
     append_audit_entry(
@@ -167,7 +168,7 @@ pub fn access_vault_via_share_handler(
     token_store: &ShareTokenStore,
     audit_store: &AuditStore,
     token: &str,
-) -> Result<Vault, String> {
+) -> Result<Vault, ApiError> {
     let share_token = validate_share_token(token_store, token)?;
 
     let vault = store
@@ -175,7 +176,7 @@ pub fn access_vault_via_share_handler(
         .unwrap()
         .get(&share_token.vault_id)
         .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
 
     append_audit_entry(
         audit_store,
@@ -198,7 +199,7 @@ pub fn access_vault_export_via_share_handler(
     token_store: &ShareTokenStore,
     token: &str,
     format: &str,
-) -> Result<String, String> {
+) -> Result<String, ApiError> {
     let share_token = validate_share_token(token_store, token)?;
 
     let vault = store
@@ -206,7 +207,7 @@ pub fn access_vault_export_via_share_handler(
         .unwrap()
         .get(&share_token.vault_id)
         .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
 
     let history = get_vault_history(event_store, &share_token.vault_id);
     let audit_log = get_vault_audit_log(audit_store, &share_token.vault_id);
@@ -229,26 +230,30 @@ pub fn access_vault_export_via_share_handler(
     );
 
     match format {
-        "json" => Ok(serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())?),
-        "csv" => export_to_csv(&export_data),
-        _ => Err("Unsupported format".to_string()),
+        "json" => Ok(serde_json::to_string_pretty(&export_data)
+            .map_err(|e| ApiError::internal(e.to_string()))?),
+        "csv" => export_to_csv(&export_data).map_err(ApiError::from),
+        _ => Err(ApiError::from(ApiErrorKind::UnsupportedFormat)),
     }
 }
 
-fn validate_share_token(token_store: &ShareTokenStore, token: &str) -> Result<ShareToken, String> {
-    let share_token =
-        get_share_token(token_store, token).ok_or_else(|| "Invalid share token".to_string())?;
+fn validate_share_token(
+    token_store: &ShareTokenStore,
+    token: &str,
+) -> Result<ShareToken, ApiError> {
+    let share_token = get_share_token(token_store, token)
+        .ok_or_else(|| ApiError::from(ApiErrorKind::InvalidShareToken))?;
 
     if share_token.revoked {
-        return Err("Share token has been revoked".to_string());
+        return Err(ApiError::from(ApiErrorKind::ShareTokenRevoked));
     }
 
     if Utc::now() > share_token.expires_at {
-        return Err("Share token has expired".to_string());
+        return Err(ApiError::from(ApiErrorKind::ShareTokenExpired));
     }
 
     if share_token.permission != SharePermission::ViewOnly {
-        return Err("Share token does not have ViewOnly permission".to_string());
+        return Err(ApiError::from(ApiErrorKind::ShareTokenWrongPermission));
     }
 
     Ok(share_token)
@@ -315,15 +320,16 @@ mod tests {
             shared_with: "someone".to_string(),
             permission: SharePermission::Edit,
         };
-        assert!(share_vault_handler(
+        let err = share_vault_handler(
             &store,
             &share_store,
             &token_store,
             &audit_store,
             "missing",
-            req
+            req,
         )
-        .is_err());
+        .unwrap_err();
+        assert_eq!(err.kind(), ApiErrorKind::VaultNotFound);
     }
 
     #[test]
@@ -479,7 +485,8 @@ mod tests {
                 expiry_seconds: None,
             },
         );
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ApiErrorKind::VaultNotFound);
     }
 
     #[test]
@@ -565,7 +572,8 @@ mod tests {
                 token: "does-not-exist".to_string(),
             },
         );
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ApiErrorKind::ShareTokenNotFound);
     }
 
     #[test]
@@ -611,7 +619,8 @@ mod tests {
                 token: "tok-other".to_string(),
             },
         );
-        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ApiErrorKind::TokenVaultMismatch);
     }
 
     #[test]
