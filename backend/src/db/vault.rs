@@ -24,6 +24,11 @@ pub fn search_vaults(store: &VaultStore, query: &SearchQuery) -> SearchResult {
                     return false;
                 }
             }
+            if let Some(ref tag) = query.tag {
+                if !v.tags.iter().any(|t| t == tag) {
+                    return false;
+                }
+            }
             if let Some(after) = query.created_after {
                 if v.created_at < after {
                     return false;
@@ -270,28 +275,4 @@ pub fn get_ttl_remaining_cached(
     let ttl = vault.ttl_remaining;
     cache.set_ttl_remaining(vault_id, ttl);
     Some(ttl)
-}
-
-/// Retrieve a lightweight `VaultSummary` for a vault, consulting the cache
-/// first.
-///
-/// Returns `None` if the vault does not exist in the store.
-pub fn get_vault_summary_cached(
-    store: &VaultStore,
-    cache: &VaultCache,
-    vault_id: &str,
-) -> Option<VaultSummary> {
-    if let Some(s) = cache.get_vault_summary(vault_id) {
-        return Some(s);
-    }
-    let vault = store.lock().unwrap().get(vault_id).cloned()?;
-    let summary = VaultSummary::from(&vault);
-    cache.set_vault_summary(vault_id, summary.clone());
-    Some(summary)
-}
-
-/// Invalidate all cached entries for `vault_id`.  Must be called whenever
-/// a check-in or state-change event modifies vault state.
-pub fn invalidate_vault_cache(cache: &VaultCache, vault_id: &str) {
-    cache.invalidate(vault_id);
 }

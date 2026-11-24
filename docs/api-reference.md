@@ -23,6 +23,7 @@ Create or update reminder preferences for a vault.
 | `channels`             | array of string | Yes      | One or more of: `"email"`, `"sms"`, `"push"`            |
 | `hours_before_expiry`  | integer (> 0)   | Yes      | Hours before TTL expiry to send the first reminder       |
 | `frequency`            | string          | Yes      | How often to repeat: `"once"`, `"daily"`, `"hourly"`    |
+| `timezone`             | string          | No       | IANA zone for the 09:00 local reminder time (default `"UTC"`) |
 
 **Example Request**
 
@@ -30,7 +31,8 @@ Create or update reminder preferences for a vault.
 {
   "channels": ["email", "sms"],
   "hours_before_expiry": 48,
-  "frequency": "daily"
+  "frequency": "daily",
+  "timezone": "America/New_York"
 }
 ```
 

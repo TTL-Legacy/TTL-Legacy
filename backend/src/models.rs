@@ -47,6 +47,12 @@ pub enum Frequency {
 
 pub type VaultNotificationPreferences = NotificationPreferences;
 
+/// Timezone used by reminder preferences created before #1752, and the
+/// fallback when a stored row has no timezone.
+pub fn default_reminder_timezone() -> String {
+    "UTC".to_string()
+}
+
 /// Persisted reminder preferences stored by `Db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReminderPreferences {
@@ -54,6 +60,11 @@ pub struct ReminderPreferences {
     pub channels: Vec<Channel>,
     pub hours_before_expiry: u32,
     pub frequency: Frequency,
+    /// IANA timezone (e.g. `America/New_York`) used to resolve the local
+    /// reminder time. The offset is re-evaluated for every occurrence, so DST
+    /// transitions do not shift the reminder (#1752).
+    #[serde(default = "default_reminder_timezone")]
+    pub timezone: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
 }
@@ -64,6 +75,10 @@ pub struct SetPreferencesRequest {
     pub channels: Vec<Channel>,
     pub hours_before_expiry: u32,
     pub frequency: Frequency,
+    /// IANA timezone for the local reminder time. Omitted values keep the
+    /// backwards-compatible `UTC` default.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 /// Notification type sent to a device.
@@ -923,6 +938,42 @@ pub struct VaultReleaseHistory {
     pub audit_entries: Vec<AuditLogEntry>,
     /// Sponsored-release attempts/completions recorded for this vault.
     pub sponsored_releases: Vec<crate::fee_sponsorship::SponsoredRelease>,
+}
+
+/// State transition entry for compliance reporting — Issue #1854.
+///
+/// Tracks vault status changes (Active -> Released, Active -> Paused, etc.)
+/// for audit and compliance purposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateTransitionEntry {
+    pub id: i64,
+    pub vault_id: String,
+    pub from_status: VaultStatus,
+    pub to_status: VaultStatus,
+    pub timestamp: DateTime<Utc>,
+    pub triggered_by: String, // "owner", "beneficiary", "system", "admin"
+    pub trigger_reason: Option<String>, // e.g., "owner_missing", "manual_release", "pause_requested"
+    pub details: Option<serde_json::Value>,
+}
+
+/// Query parameters for state transition history.
+#[derive(Debug, Default, Deserialize)]
+pub struct StateTransitionQuery {
+    pub vault_id: Option<String>,
+    pub from_status: Option<VaultStatus>,
+    pub to_status: Option<VaultStatus>,
+    pub triggered_by: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response for state transition history.
+#[derive(Debug, Serialize)]
+pub struct StateTransitionHistory {
+    pub vault_id: String,
+    pub transitions: Vec<StateTransitionEntry>,
 }
 
 // ── Auth: refresh token rotation (Issue #1177) ───────────────────────────────

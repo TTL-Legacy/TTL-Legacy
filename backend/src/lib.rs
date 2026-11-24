@@ -15,6 +15,8 @@ pub mod otel;
 /// Issue #1482: shared notification provider abstraction
 pub mod providers;
 pub mod rate_limit;
+/// Issue #1752: timezone-aware (DST-safe) reminder scheduling.
+pub mod reminder_time;
 pub mod routes;
 /// Issue #1199: request input sanitization middleware
 pub mod sanitization;

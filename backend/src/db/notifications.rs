@@ -24,12 +24,13 @@ impl Db {
         let channels_json = serde_json::to_string(&prefs.channels).unwrap();
         self.conn.lock().unwrap().execute(
             r#"
-            INSERT INTO reminder_preferences (vault_id, channels, hours_before_expiry, frequency)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO reminder_preferences (vault_id, channels, hours_before_expiry, frequency, timezone)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(vault_id) DO UPDATE SET
               channels = excluded.channels,
               hours_before_expiry = excluded.hours_before_expiry,
               frequency = excluded.frequency,
+              timezone = excluded.timezone,
               deleted_at = NULL
             "#,
             params![
@@ -37,6 +38,7 @@ impl Db {
                 channels_json,
                 prefs.hours_before_expiry as i64,
                 serde_json::to_string(&prefs.frequency).unwrap(),
+                prefs.timezone.as_str(),
             ],
         )?;
         Ok(())
@@ -45,7 +47,7 @@ impl Db {
     pub fn get(&self, vault_id: u64) -> Result<ReminderPreferences, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
-            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
+            r#"SELECT vault_id, channels, hours_before_expiry, frequency, timezone, deleted_at
                FROM reminder_preferences
                WHERE vault_id = ?1 AND deleted_at IS NULL"#,
         )?;
@@ -54,11 +56,15 @@ impl Db {
             let frequency_str: String = r.get(3)?;
             let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
             let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
+            let timezone = r
+                .get::<_, Option<String>>(4)?
+                .unwrap_or_else(crate::models::default_reminder_timezone);
             Ok(ReminderPreferences {
                 vault_id: r.get::<_, i64>(0)? as u64,
                 channels,
                 hours_before_expiry: r.get::<_, i64>(2)? as u32,
                 frequency,
+                timezone,
                 deleted_at: None,
             })
         })?;
@@ -68,7 +74,7 @@ impl Db {
     pub fn all(&self) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
-            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
+            r#"SELECT vault_id, channels, hours_before_expiry, frequency, timezone, deleted_at
                FROM reminder_preferences
                WHERE deleted_at IS NULL"#,
         )?;
@@ -77,11 +83,15 @@ impl Db {
             let frequency_str: String = r.get(3)?;
             let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
             let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
+            let timezone = r
+                .get::<_, Option<String>>(4)?
+                .unwrap_or_else(crate::models::default_reminder_timezone);
             Ok(ReminderPreferences {
                 vault_id: r.get::<_, i64>(0)? as u64,
                 channels,
                 hours_before_expiry: r.get::<_, i64>(2)? as u32,
                 frequency,
+                timezone,
                 deleted_at: None,
             })
         })?;
@@ -107,7 +117,7 @@ impl Db {
     ) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
         let binding = self.conn.lock().unwrap();
         let mut stmt = binding.prepare(
-            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
+            r#"SELECT vault_id, channels, hours_before_expiry, frequency, timezone, deleted_at
                FROM reminder_preferences
                WHERE vault_id = ?1"#,
         )?;
@@ -116,7 +126,10 @@ impl Db {
             let frequency_str: String = r.get(3)?;
             let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
             let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
-            let deleted_at_str: Option<String> = r.get(4)?;
+            let timezone = r
+                .get::<_, Option<String>>(4)?
+                .unwrap_or_else(crate::models::default_reminder_timezone);
+            let deleted_at_str: Option<String> = r.get(5)?;
             let deleted_at = deleted_at_str.and_then(|s| {
                 chrono::DateTime::parse_from_rfc3339(&s)
                     .ok()
@@ -127,6 +140,7 @@ impl Db {
                 channels,
                 hours_before_expiry: r.get::<_, i64>(2)? as u32,
                 frequency,
+                timezone,
                 deleted_at,
             })
         })?;

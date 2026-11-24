@@ -159,3 +159,35 @@ pub fn get_vesting_bonus_handler(
         on_time_window_seconds: bonus_config.as_ref().map(|c| c.on_time_window_seconds),
     })
 }
+
+// --- Issue #1760: Re-check withdrawal whitelist TTL expiry at enforcement time ---
+
+/// Verify that `address` is currently allowed to withdraw from `vault_id`.
+///
+/// Whitelist entries carry an optional TTL (`expires_at`). The expiry is
+/// validated when the entry is created, but it must also be re-checked here at
+/// enforcement time using the current ledger timestamp so that an entry which
+/// expired after being added can no longer authorize a withdrawal.
+pub fn enforce_withdrawal_whitelist(
+    db: &Db,
+    vault_id: &str,
+    address: &str,
+) -> Result<(), AppError> {
+    let entry = db
+        .get_withdrawal_whitelist_entry(vault_id, address)
+        .map_err(AppError::from)?
+        .ok_or_else(|| {
+            AppError::Forbidden("address is not on the withdrawal whitelist".to_string())
+        })?;
+
+    if let Some(expires_at) = entry.expires_at {
+        let now = Utc::now();
+        if now >= expires_at {
+            return Err(AppError::Forbidden(
+                "withdrawal whitelist entry has expired".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}

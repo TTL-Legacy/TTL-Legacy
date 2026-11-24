@@ -199,6 +199,19 @@ pub async fn set_preferences(
         ));
     }
 
+    // #1752: reminders fire at a local wall-clock hour, so the timezone must
+    // be a real IANA identifier; otherwise the scheduler would silently stop
+    // sending recurring reminders for this vault.
+    let timezone = body
+        .timezone
+        .clone()
+        .unwrap_or_else(crate::models::default_reminder_timezone);
+    if !crate::reminder_time::is_valid_timezone(&timezone) {
+        return Err(AppError::InvalidInput(format!(
+            "timezone must be a valid IANA identifier, got {timezone:?}"
+        )));
+    }
+
     // #825: Idempotency key support
     if let Some(idem_key) = req
         .headers()
@@ -217,6 +230,7 @@ pub async fn set_preferences(
         channels: body.channels.clone(),
         hours_before_expiry: body.hours_before_expiry,
         frequency: body.frequency.clone(),
+        timezone,
         deleted_at: None,
     };
     db.upsert(&prefs)?;

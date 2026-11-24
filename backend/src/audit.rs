@@ -123,6 +123,34 @@ pub async fn log_escalation_attempt(
     }
 }
 
+/// Record a vault state transition for compliance reporting — Issue #1854.
+///
+/// This is called when a vault's status changes (e.g., Active -> Released,
+/// Active -> Paused, etc.) to maintain an audit trail of state changes.
+pub async fn log_state_transition(
+    db: &Arc<Db>,
+    vault_id: &str,
+    from_status: crate::models::VaultStatus,
+    to_status: crate::models::VaultStatus,
+    triggered_by: &str,
+    trigger_reason: Option<String>,
+    details: Option<serde_json::Value>,
+) {
+    let entry = crate::models::StateTransitionEntry {
+        id: 0,
+        vault_id: vault_id.to_string(),
+        from_status,
+        to_status,
+        timestamp: chrono::Utc::now(),
+        triggered_by: triggered_by.to_string(),
+        trigger_reason,
+        details,
+    };
+    if let Err(e) = db.insert_state_transition(&entry) {
+        tracing::error!(error = %e, "failed to persist state transition entry");
+    }
+}
+
 /// Check that the request carries a valid admin API key.
 pub fn authorize_admin(headers: &HeaderMap) -> Result<(), ApiError> {
     let api_key = std::env::var("ADMIN_API_KEY").unwrap_or_default();
@@ -244,6 +272,215 @@ pub async fn export_vault_audit(
             &format!("unsupported export format: {other}"),
         )),
     }
+}
+
+/// Query parameters for state transition history — Issue #1854.
+#[derive(Debug, Deserialize)]
+pub struct StateTransitionQuery {
+    pub vault_id: Option<String>,
+    pub from_status: Option<String>,
+    pub to_status: Option<String>,
+    pub triggered_by: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// `GET /vaults/{id}/state-transitions`
+///
+/// Returns the state transition history for a vault.
+/// Only the vault owner may access this endpoint.
+pub async fn get_vault_state_transitions(
+    State(db): State<Arc<Db>>,
+    Path(vault_id): Path<String>,
+    Query(query): Query<StateTransitionQuery>,
+    headers: HeaderMap,
+) -> Result<Json<crate::models::StateTransitionHistory>, ApiError> {
+    let requester = extract_user_id(&headers);
+    if requester.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "authentication required",
+        ));
+    }
+
+    let owner = db.vault_owner(&vault_id).map_err(|e| {
+        tracing::error!(error = %e, "failed to load vault owner");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "failed to load vault",
+        )
+    })?;
+
+    let owner = match owner {
+        Some(owner) => owner,
+        None => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "vault not found",
+            ))
+        }
+    };
+
+    if owner != requester {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "only the vault owner may view state transitions",
+        ));
+    }
+
+    let mut db_query = crate::models::StateTransitionQuery {
+        vault_id: Some(vault_id.clone()),
+        from_status: query.from_status,
+        to_status: query.to_status,
+        triggered_by: query.triggered_by,
+        after: query.after,
+        before: query.before,
+        limit: query.limit,
+        offset: query.offset,
+    };
+
+    let transitions = db.query_state_transitions(&db_query).map_err(|e| {
+        tracing::error!(error = %e, "failed to load state transitions");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "failed to load state transitions",
+        )
+    })?;
+
+    Ok(Json(crate::models::StateTransitionHistory {
+        vault_id,
+        transitions,
+    }))
+}
+
+/// `GET /vaults/{id}/state-transitions/export?format=csv|json`
+///
+/// Exports the vault's state transition history as CSV or JSON.
+pub async fn export_vault_state_transitions(
+    State(db): State<Arc<Db>>,
+    Path(vault_id): Path<String>,
+    Query(query): Query<AuditExportQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let requester = extract_user_id(&headers);
+    if requester.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "authentication required",
+        ));
+    }
+
+    let owner = db.vault_owner(&vault_id).map_err(|e| {
+        tracing::error!(error = %e, "failed to load vault owner");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "failed to load vault",
+        )
+    })?;
+
+    let owner = match owner {
+        Some(owner) => owner,
+        None => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "vault not found",
+            ))
+        }
+    };
+
+    if owner != requester {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "only the vault owner may export state transitions",
+        ));
+    }
+
+    let transitions = db.get_vault_state_transitions(&vault_id).map_err(|e| {
+        tracing::error!(error = %e, "failed to load state transitions");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "failed to load state transitions",
+        )
+    })?;
+
+    let format = query.format.as_deref().unwrap_or("csv").to_ascii_lowercase();
+
+    match format.as_str() {
+        "json" => {
+            let body = serde_json::to_vec(&transitions.transitions).map_err(|e| {
+                tracing::error!(error = %e, "failed to serialize state transitions");
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "failed to serialize state transitions",
+                )
+            })?;
+            Ok((
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                Body::from(body),
+            )
+                .into_response())
+        }
+        "csv" => {
+            let mut out = String::from(
+                "id,vault_id,from_status,to_status,timestamp,triggered_by,trigger_reason,details\n",
+            );
+            for entry in &transitions.transitions {
+                out.push_str(&state_transition_csv_row(entry));
+            }
+            Ok((
+                StatusCode::OK,
+                [("content-type", "text/csv; charset=utf-8")],
+                Body::from(out),
+            )
+                .into_response())
+        }
+        other => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_format",
+            &format!("unsupported export format: {other}"),
+        )),
+    }
+}
+
+/// Render a single state transition entry as a CSV row (with a trailing newline).
+fn state_transition_csv_row(entry: &crate::models::StateTransitionEntry) -> String {
+    let details = entry
+        .details
+        .as_ref()
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+    let trigger_reason = entry.trigger_reason.as_ref().unwrap_or(&String::new());
+    let fields = [
+        entry.id.to_string(),
+        entry.vault_id.clone(),
+        format!("{:?}", entry.from_status),
+        format!("{:?}", entry.to_status),
+        entry.timestamp.to_rfc3339(),
+        entry.triggered_by.clone(),
+        trigger_reason.clone(),
+        details,
+    ];
+    let mut row = fields
+        .iter()
+        .map(|f| csv_escape(f))
+        .collect::<Vec<_>>()
+        .join(",");
+    row.push('\n');
+    row
 }
 
 /// Render a single audit entry as a CSV row (with a trailing newline).

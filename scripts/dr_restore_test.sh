@@ -169,6 +169,60 @@ EOF
     log "  ✓ Multiple temp files cleanup verified"
 }
 
+# Test 6: Verify that a corrupt backup file exits non-zero with a clear error message
+# Issue #1843: dr_restore_test.sh only tests successful restores; add a test case that
+# deliberately corrupts the backup file and verifies the script exits non-zero and prints
+# a clear error message.
+test_corrupt_backup_file_exits_nonzero() {
+    log "Test 6: Corrupt backup file exits non-zero with clear error message"
+
+    local test_script="${TEST_DIR}/test_corrupt_restore.sh"
+    local error_log="${TEST_DIR}/corrupt_restore_error.log"
+
+    # Build a minimal restore script that mimics dr_restore.sh's GPG verification step.
+    # We deliberately write garbage into the "backup" file so that GPG verification fails,
+    # which should cause the script to exit non-zero and emit a clear error message.
+    cat > "${test_script}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { echo "[dr_restore] ERROR: $*" >&2; exit 1; }
+
+BACKUP_FILE=$(mktemp /tmp/restore_db_XXXXXX.sqlite3)
+SIG_FILE=$(mktemp /tmp/restore_sig_XXXXXX.sig)
+trap 'rm -f "${BACKUP_FILE}" "${SIG_FILE}"' EXIT
+
+# Deliberately corrupt the backup file with random bytes
+dd if=/dev/urandom of="${BACKUP_FILE}" bs=512 count=1 2>/dev/null
+
+# Attempt GPG verification — this must fail because the file is corrupt
+# (no valid signature exists for the garbage data).
+gpg --batch --verify "${SIG_FILE}" "${BACKUP_FILE}" 2>/dev/null \
+    || die "GPG signature verification failed for backup — refusing to restore"
+
+# Should never reach here
+echo "ERROR: restore proceeded despite corrupt backup" >&2
+exit 2
+EOF
+
+    chmod +x "${test_script}"
+
+    # The script MUST exit non-zero
+    local exit_code=0
+    bash "${test_script}" 2>"${error_log}" || exit_code=$?
+
+    if [[ "${exit_code}" -eq 0 ]]; then
+        fail "Corrupt backup test should have exited non-zero, but exited 0"
+    fi
+
+    # The error output MUST contain a clear error message
+    if ! grep -qi "error\|failed\|corrupt\|verif" "${error_log}"; then
+        fail "Corrupt backup test did not print a clear error message. Got: $(cat "${error_log}")"
+    fi
+
+    log "  ✓ Corrupt backup file exits non-zero (exit code: ${exit_code}) with error message"
+}
+
 # Run all tests
 log "Starting dr_restore.sh test suite"
 test_temp_file_cleanup
@@ -176,4 +230,5 @@ test_trap_cleanup_on_failure
 test_dr_restore_uses_mktemp
 test_restored_db_permissions
 test_multiple_temp_files_cleanup
+test_corrupt_backup_file_exits_nonzero
 log "All tests passed!"

@@ -9,36 +9,7 @@ use soroban_sdk::{
     bytes, vec, Address, Bytes, BytesN, Env, IntoVal, TryIntoVal,
 };
 
-fn setup() -> (
-    Env,
-    Address,
-    Address,
-    Address,
-    Address,
-    TtlVaultContractClient<'static>,
-) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
-    let admin = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_address = env
-        .register_stellar_asset_contract_v2(token_admin)
-        .address();
-
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
-
-    let contract_address = env.register_contract(None, TtlVaultContract);
-    let client = TtlVaultContractClient::new(&env, &contract_address);
-    client.initialize(&token_address, &admin);
-
-    let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
-
-    (env, owner, beneficiary, admin, token_address, client)
-}
+use crate::tests::common::setup_with_roles as setup;
 
 // ---- existing tests ----
 
@@ -7131,6 +7102,97 @@ fn test_multi_sig_passkey_withdrawal_flow() {
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
 }
 
+// ── Issue #1850: End-to-end test for multi-sig vault release ────────────────
+
+#[test]
+fn test_multisig_vault_release_e2e() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    // Deposit funds
+    let deposit_amount = 10_000i128;
+    client.deposit(&vault_id, &owner, &deposit_amount);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount);
+
+    // Add passkeys for multi-sig
+    let passkey1 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey2 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey3 = BytesN::from_array(&env, &[3u8; 32]);
+    client.add_passkey(&vault_id, &owner, &passkey1);
+    client.add_passkey(&vault_id, &owner, &passkey2);
+    client.add_passkey(&vault_id, &owner, &passkey3);
+
+    // Configure multi-sig with 2-of-3 threshold
+    client.configure_multisig(&vault_id, &owner, &vec![&env, passkey1.clone(), passkey2.clone(), passkey3.clone()], &2u32);
+    let config = client.get_multisig_config(&vault_id).unwrap();
+    assert_eq!(config.threshold, 2);
+    assert_eq!(config.signers.len(), 3);
+
+    // Advance time past vault expiry (check_in_interval = 100, so advance 200)
+    env.ledger().with_mut(|l| l.timestamp += 200);
+
+    // Verify vault is expired
+    assert!(client.is_expired(&vault_id));
+
+    // Test multi-sig withdrawal before release (should work with 2 signatures)
+    let withdrawal_amount = 1_000i128;
+    let sigs = soroban_sdk::vec![&env, passkey1.clone(), passkey2.clone()];
+    client.withdraw_multi_sig(&vault_id, &owner, &withdrawal_amount, &sigs);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount - withdrawal_amount);
+
+    // Verify multi-sig proposal flow for updating beneficiary
+    let new_beneficiary = Address::generate(&env);
+    let proposal_id = client.propose_multisig(
+        &vault_id,
+        &owner,
+        &types::MultiSigOperation::UpdateBeneficiary,
+        &soroban_sdk::Bytes::new(&env),
+        &None,
+    );
+    assert!(proposal_id > 0);
+
+    // First approval (proposer auto-approves)
+    let status = client.get_multisig_proposal_status(&vault_id, &proposal_id).unwrap();
+    assert_eq!(status, types::ProposalStatus::Pending);
+
+    // Second approval from another signer
+    env.mock_all_auths_allowing_non_root_auth();
+    client.approve_multisig(&vault_id, &proposal_id);
+    
+    // Check proposal is now approved
+    let status = client.get_multisig_proposal_status(&vault_id, &proposal_id).unwrap();
+    assert_eq!(status, types::ProposalStatus::Approved);
+
+    // Execute the multi-sig proposal
+    client.execute_multisig(&vault_id, &proposal_id);
+
+    // Verify beneficiary was updated
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.beneficiary, new_beneficiary);
+
+    // Now test the full release flow with multi-sig configured
+    // Deposit more funds
+    client.deposit(&vault_id, &owner, &5_000i128);
+    assert_eq!(client.get_vault(&vault_id).balance, deposit_amount - withdrawal_amount + 5_000i128);
+
+    // Trigger release (vault is expired, no multi-sig needed for release)
+    client.trigger_release(&vault_id);
+
+    // Verify vault is released and beneficiary received funds
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(vault.status, types::ReleaseStatus::Released);
+    assert_eq!(vault.balance, 0);
+
+    let token_client = StellarAssetClient::new(&env, &token_address);
+    assert_eq!(token_client.balance(&new_beneficiary), deposit_amount - withdrawal_amount + 5_000i128);
+
+    // Verify state transition was recorded
+    let transitions = client.get_state_transition_log(&vault_id);
+    assert!(transitions.len() > 0);
+    let last_transition = transitions.get(transitions.len() - 1).unwrap();
+    assert_eq!(last_transition.to_status, types::ReleaseStatus::Released);
+}
+
 // ── Issue #1135: AdminTransferred event on accept_admin ─────────────────────
 
 #[test]
@@ -7375,4 +7437,62 @@ fn test_withdraw_succeeds_when_2fa_enabled_and_verified() {
 
     client.withdraw(&vault_id, &owner, &100i128, &None, &None, &None);
     assert_eq!(client.get_vault(&vault_id).balance, 900i128);
+}
+
+// ── Issue #1763: Passkey Rotation Minimum Interval Tests ─────────────────────
+
+// rotate_passkey needs a primary passkey on the vault, which no public call seeds on a
+// fresh vault, so set it through storage the same way other tests do.
+fn seed_primary_passkey(env: &Env, client: &TtlVaultContractClient<'static>, vault_id: u64, passkey: &BytesN<32>) {
+    env.as_contract(&client.address, || {
+        let key = StorageKey::Vault(vault_id);
+        let mut v: Vault = env.storage().persistent().get(&key).unwrap();
+        v.passkey_hash = Some(Bytes::from_array(env, &passkey.to_array()));
+        env.storage().persistent().set(&key, &v);
+    });
+}
+
+#[test]
+fn test_rotate_passkey_enforces_min_rotation_interval() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let passkey_0 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey_1 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey_2 = BytesN::from_array(&env, &[3u8; 32]);
+    seed_primary_passkey(&env, &client, vault_id, &passkey_0);
+
+    client.set_passkey_rotation_policy(&vault_id, &owner, &30u32, &true);
+
+    // No rotation is on record yet, so the first rotation is allowed.
+    client.rotate_passkey(&vault_id, &owner, &passkey_0, &passkey_1);
+
+    // Rotating again straight away would defeat replay protection, so it is rejected.
+    let err = client
+        .try_rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_sdk::Error::from_contract_error(ContractError::PasskeyRotationTooSoon as u32));
+
+    // Still rejected one day short of the 30-day minimum interval.
+    env.ledger().with_mut(|l| l.timestamp += 29 * 86_400);
+    assert!(client.try_rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2).is_err());
+
+    // Allowed once the full minimum interval has elapsed.
+    env.ledger().with_mut(|l| l.timestamp += 86_400);
+    client.rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2);
+}
+
+#[test]
+fn test_rotate_passkey_unrestricted_when_policy_not_enforced() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
+    let passkey_0 = BytesN::from_array(&env, &[1u8; 32]);
+    let passkey_1 = BytesN::from_array(&env, &[2u8; 32]);
+    let passkey_2 = BytesN::from_array(&env, &[3u8; 32]);
+    seed_primary_passkey(&env, &client, vault_id, &passkey_0);
+
+    client.set_passkey_rotation_policy(&vault_id, &owner, &30u32, &false);
+
+    client.rotate_passkey(&vault_id, &owner, &passkey_0, &passkey_1);
+    client.rotate_passkey(&vault_id, &owner, &passkey_1, &passkey_2);
 }

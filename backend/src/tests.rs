@@ -146,6 +146,7 @@ async fn test_set_and_get_preferences() {
         channels: vec![crate::models::Channel::Email],
         hours_before_expiry: 24,
         frequency: crate::models::Frequency::Once,
+        timezone: "UTC".to_string(),
         deleted_at: None,
     };
     db.upsert(&prefs).unwrap();
@@ -188,6 +189,22 @@ async fn test_set_zero_hours_rejected() {
     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// #1752: an unknown IANA zone would make the scheduler skip every recurring
+/// reminder for that vault, so it is rejected at the API boundary instead of
+/// being stored.
+#[tokio::test]
+async fn test_set_invalid_timezone_rejected() {
+    let app = test_app();
+    let body = json!({
+        "channels": ["email"],
+        "hours_before_expiry": 24,
+        "frequency": "daily",
+        "timezone": "Mars/Olympus_Mons"
+    });
+    let res = post_json(app, "/api/vaults/1/reminder-preferences", body).await;
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 #[tokio::test]
 async fn test_upsert_overwrites() {
     let db = Arc::new(Db::open(":memory:").unwrap());
@@ -198,6 +215,7 @@ async fn test_upsert_overwrites() {
         channels: vec![crate::models::Channel::Email],
         hours_before_expiry: 12,
         frequency: crate::models::Frequency::Once,
+        timezone: "UTC".to_string(),
         deleted_at: None,
     };
     db.upsert(&p1).unwrap();
@@ -207,6 +225,7 @@ async fn test_upsert_overwrites() {
         channels: vec![crate::models::Channel::Sms, crate::models::Channel::Push],
         hours_before_expiry: 6,
         frequency: crate::models::Frequency::Hourly,
+        timezone: "America/New_York".to_string(),
         deleted_at: None,
     };
     db.upsert(&p2).unwrap();
@@ -215,6 +234,8 @@ async fn test_upsert_overwrites() {
     assert_eq!(fetched.hours_before_expiry, 6);
     assert_eq!(fetched.channels.len(), 2);
     assert_eq!(fetched.frequency, crate::models::Frequency::Hourly);
+    // #1752: the IANA timezone must round-trip through SQLite.
+    assert_eq!(fetched.timezone, "America/New_York");
 }
 
 // ── #821: Health check endpoint tests ────────────────────────────────────────

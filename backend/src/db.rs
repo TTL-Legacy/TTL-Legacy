@@ -573,6 +573,24 @@ impl Db {
                     ON withdrawal_alert_preferences(owner);
                 "#,
             ),
+            (
+                "7",
+                r#"
+                CREATE TABLE IF NOT EXISTS state_transitions (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id        TEXT NOT NULL,
+                    from_status     TEXT NOT NULL,
+                    to_status       TEXT NOT NULL,
+                    timestamp       TEXT NOT NULL,
+                    triggered_by    TEXT NOT NULL,
+                    trigger_reason  TEXT,
+                    details         TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_vault_id ON state_transitions(vault_id);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON state_transitions(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_triggered_by ON state_transitions(triggered_by);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -600,243 +618,6 @@ impl Db {
         }
 
         Ok(())
-    }
-
-    pub fn upsert(&self, prefs: &ReminderPreferences) -> Result<(), rusqlite::Error> {
-        let channels_json = serde_json::to_string(&prefs.channels).unwrap();
-        self.conn.lock().unwrap().execute(
-            r#"
-            INSERT INTO reminder_preferences (vault_id, channels, hours_before_expiry, frequency)
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(vault_id) DO UPDATE SET
-              channels = excluded.channels,
-              hours_before_expiry = excluded.hours_before_expiry,
-              frequency = excluded.frequency,
-              deleted_at = NULL
-            "#,
-            params![
-                prefs.vault_id as i64,
-                channels_json,
-                prefs.hours_before_expiry as i64,
-                serde_json::to_string(&prefs.frequency).unwrap(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn get(&self, vault_id: u64) -> Result<ReminderPreferences, rusqlite::Error> {
-        let binding = self.conn.lock().unwrap();
-        let mut stmt = binding.prepare(
-            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
-               FROM reminder_preferences
-               WHERE vault_id = ?1 AND deleted_at IS NULL"#,
-        )?;
-        let row = stmt.query_row(params![vault_id as i64], |r| {
-            let channels_str: String = r.get(1)?;
-            let frequency_str: String = r.get(3)?;
-            let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
-            let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
-            Ok(ReminderPreferences {
-                vault_id: r.get::<_, i64>(0)? as u64,
-                channels,
-                hours_before_expiry: r.get::<_, i64>(2)? as u32,
-                frequency,
-                deleted_at: None,
-            })
-        })?;
-        Ok(row)
-    }
-
-    pub fn all(&self) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
-        let binding = self.conn.lock().unwrap();
-        let mut stmt = binding.prepare(
-            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
-               FROM reminder_preferences
-               WHERE deleted_at IS NULL"#,
-        )?;
-        let iter = stmt.query_map([], |r| {
-            let channels_str: String = r.get(1)?;
-            let frequency_str: String = r.get(3)?;
-            let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
-            let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
-            Ok(ReminderPreferences {
-                vault_id: r.get::<_, i64>(0)? as u64,
-                channels,
-                hours_before_expiry: r.get::<_, i64>(2)? as u32,
-                frequency,
-                deleted_at: None,
-            })
-        })?;
-
-        let mut out = Vec::new();
-        for item in iter {
-            out.push(item?);
-        }
-        Ok(out)
-    }
-
-    pub fn soft_delete_reminder(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
-        self.conn.lock().unwrap().execute(
-            "UPDATE reminder_preferences SET deleted_at = ?1 WHERE vault_id = ?2 AND deleted_at IS NULL",
-            params![chrono::Utc::now().to_rfc3339(), vault_id as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn all_reminders_including_deleted(
-        &self,
-        vault_id: u64,
-    ) -> Result<Vec<ReminderPreferences>, rusqlite::Error> {
-        let binding = self.conn.lock().unwrap();
-        let mut stmt = binding.prepare(
-            r#"SELECT vault_id, channels, hours_before_expiry, frequency, deleted_at
-               FROM reminder_preferences
-               WHERE vault_id = ?1"#,
-        )?;
-        let iter = stmt.query_map(params![vault_id as i64], |r| {
-            let channels_str: String = r.get(1)?;
-            let frequency_str: String = r.get(3)?;
-            let channels: Vec<Channel> = serde_json::from_str(&channels_str).unwrap_or_default();
-            let frequency: Frequency = serde_json::from_str(&frequency_str).unwrap();
-            let deleted_at_str: Option<String> = r.get(4)?;
-            let deleted_at = deleted_at_str.and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(&s)
-                    .ok()
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-            });
-            Ok(ReminderPreferences {
-                vault_id: r.get::<_, i64>(0)? as u64,
-                channels,
-                hours_before_expiry: r.get::<_, i64>(2)? as u32,
-                frequency,
-                deleted_at,
-            })
-        })?;
-
-        let mut out = Vec::new();
-        for item in iter {
-            out.push(item?);
-        }
-        Ok(out)
-    }
-
-    pub fn upsert_subscription(&self, sub: &Subscription) -> Result<(), rusqlite::Error> {
-        let channels_json = serde_json::to_string(&sub.channels).unwrap();
-        let frequency_json = serde_json::to_string(&sub.frequency).unwrap();
-        self.conn.lock().unwrap().execute(
-            r#"
-            INSERT INTO vault_subscriptions (vault_id, owner, channels, frequency)
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(vault_id) DO UPDATE SET
-              owner = excluded.owner,
-              channels = excluded.channels,
-              frequency = excluded.frequency
-            "#,
-            params![
-                sub.vault_id as i64,
-                sub.owner,
-                channels_json,
-                frequency_json,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_subscription(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM vault_subscriptions WHERE vault_id = ?1",
-            params![vault_id as i64],
-        )?;
-        Ok(())
-    }
-
-    // ── Withdrawal alert preferences ─────────────────────────────────────────
-
-    /// Upsert per-vault withdrawal alert notification preferences.
-    pub fn upsert_withdrawal_alert_prefs(
-        &self,
-        prefs: &crate::models::WithdrawalAlertPreferences,
-    ) -> Result<(), rusqlite::Error> {
-        self.conn.lock().unwrap().execute(
-            r#"
-            INSERT INTO withdrawal_alert_preferences (vault_id, owner, email_enabled, push_enabled)
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(vault_id) DO UPDATE SET
-                owner         = excluded.owner,
-                email_enabled = excluded.email_enabled,
-                push_enabled  = excluded.push_enabled
-            "#,
-            params![
-                prefs.vault_id as i64,
-                prefs.owner,
-                prefs.email_enabled as i64,
-                prefs.push_enabled as i64,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Retrieve withdrawal alert preferences for a vault.
-    /// Returns `None` if no record exists (owner has never configured prefs).
-    pub fn get_withdrawal_alert_prefs(
-        &self,
-        vault_id: u64,
-    ) -> Result<Option<crate::models::WithdrawalAlertPreferences>, rusqlite::Error> {
-        let binding = self.conn.lock().unwrap();
-        let mut stmt = binding.prepare(
-            r#"SELECT vault_id, owner, email_enabled, push_enabled
-               FROM withdrawal_alert_preferences
-               WHERE vault_id = ?1"#,
-        )?;
-        let row = stmt.query_row(params![vault_id as i64], |r| {
-            Ok(crate::models::WithdrawalAlertPreferences {
-                vault_id: r.get::<_, i64>(0)? as u64,
-                owner: r.get(1)?,
-                email_enabled: r.get::<_, i64>(2)? != 0,
-                push_enabled: r.get::<_, i64>(3)? != 0,
-            })
-        });
-        match row {
-            Ok(p) => Ok(Some(p)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Delete withdrawal alert preferences for a vault.
-    pub fn delete_withdrawal_alert_prefs(&self, vault_id: u64) -> Result<(), rusqlite::Error> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM withdrawal_alert_preferences WHERE vault_id = ?1",
-            params![vault_id as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_subscription(&self, vault_id: u64) -> Result<Option<Subscription>, rusqlite::Error> {
-        let binding = self.conn.lock().unwrap();
-        let mut stmt = binding.prepare(
-            r#"SELECT vault_id, owner, channels, frequency
-               FROM vault_subscriptions
-               WHERE vault_id = ?1"#,
-        )?;
-        let row = stmt.query_row(params![vault_id as i64], |r| {
-            let channels_str: String = r.get(2)?;
-            let frequency_str: String = r.get(3)?;
-            let channels: Vec<SubscriptionChannel> =
-                serde_json::from_str(&channels_str).unwrap_or_default();
-            let frequency: SubscriptionFrequency = serde_json::from_str(&frequency_str).unwrap();
-            Ok(Subscription {
-                vault_id: r.get::<_, i64>(0)? as u64,
-                owner: r.get(1)?,
-                channels,
-                frequency,
-            })
-        });
-        match row {
-            Ok(sub) => Ok(Some(sub)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e),
-        }
     }
 
     pub fn get_webhook_subscriptions_for_vault(
@@ -1063,6 +844,141 @@ impl Db {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Record a vault state transition for compliance reporting — Issue #1854.
+    pub fn insert_state_transition(
+        &self,
+        entry: &crate::models::StateTransitionEntry,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"
+            INSERT INTO state_transitions (vault_id, from_status, to_status, timestamp, triggered_by, trigger_reason, details)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                entry.vault_id,
+                format!("{:?}", entry.from_status),
+                format!("{:?}", entry.to_status),
+                entry.timestamp.to_rfc3339(),
+                entry.triggered_by,
+                entry.trigger_reason.as_deref().unwrap_or(""),
+                entry.details.as_ref().map(|d| d.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Query state transitions for a vault — Issue #1854.
+    pub fn query_state_transitions(
+        &self,
+        query: &crate::models::StateTransitionQuery,
+    ) -> Result<Vec<crate::models::StateTransitionEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut sql = String::from(
+            "SELECT id, vault_id, from_status, to_status, timestamp, triggered_by, trigger_reason, details FROM state_transitions WHERE 1=1"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref vault_id) = query.vault_id {
+            sql.push_str(" AND vault_id = ?");
+            param_values.push(Box::new(vault_id.clone()));
+        }
+        if let Some(ref from_status) = query.from_status {
+            sql.push_str(" AND from_status = ?");
+            param_values.push(Box::new(format!("{:?}", from_status)));
+        }
+        if let Some(ref to_status) = query.to_status {
+            sql.push_str(" AND to_status = ?");
+            param_values.push(Box::new(format!("{:?}", to_status)));
+        }
+        if let Some(ref triggered_by) = query.triggered_by {
+            sql.push_str(" AND triggered_by = ?");
+            param_values.push(Box::new(triggered_by.clone()));
+        }
+        if let Some(after) = query.after {
+            sql.push_str(" AND timestamp >= ?");
+            param_values.push(Box::new(after.to_rfc3339()));
+        }
+        if let Some(before) = query.before {
+            sql.push_str(" AND timestamp <= ?");
+            param_values.push(Box::new(before.to_rfc3339()));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC");
+
+        let limit = query.limit.unwrap_or(100);
+        let offset = query.offset.unwrap_or(0);
+        sql.push_str(" LIMIT ? OFFSET ?");
+        param_values.push(Box::new(limit));
+        param_values.push(Box::new(offset));
+
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            let timestamp_str: String = r.get(4)?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            let from_status_str: String = r.get(2)?;
+            let to_status_str: String = r.get(3)?;
+            let trigger_reason: Option<String> = r.get(6)?;
+            let details_str: Option<String> = r.get(7)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+
+            Ok(crate::models::StateTransitionEntry {
+                id: r.get(0)?,
+                vault_id: r.get(1)?,
+                from_status: match from_status_str.as_str() {
+                    "Active" => crate::models::VaultStatus::Active,
+                    "Expired" => crate::models::VaultStatus::Expired,
+                    "Released" => crate::models::VaultStatus::Released,
+                    "Paused" => crate::models::VaultStatus::Paused,
+                    _ => crate::models::VaultStatus::Active,
+                },
+                to_status: match to_status_str.as_str() {
+                    "Active" => crate::models::VaultStatus::Active,
+                    "Expired" => crate::models::VaultStatus::Expired,
+                    "Released" => crate::models::VaultStatus::Released,
+                    "Paused" => crate::models::VaultStatus::Paused,
+                    _ => crate::models::VaultStatus::Active,
+                },
+                timestamp,
+                triggered_by: r.get(5)?,
+                trigger_reason: if trigger_reason.is_empty() { None } else { trigger_reason },
+                details,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Get state transition history for a specific vault — Issue #1854.
+    pub fn get_vault_state_transitions(
+        &self,
+        vault_id: &str,
+    ) -> Result<crate::models::StateTransitionHistory, rusqlite::Error> {
+        let transitions = self.query_state_transitions(&crate::models::StateTransitionQuery {
+            vault_id: Some(vault_id.to_string()),
+            ..Default::default()
+        })?;
+        Ok(crate::models::StateTransitionHistory {
+            vault_id: vault_id.to_string(),
+            transitions,
+        })
     }
 
     // ── Refresh token rotation (Issue #1177) ─────────────────────────────────

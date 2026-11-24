@@ -19,13 +19,25 @@ pub struct VaultEntry {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingSchedule {
+    pub cliff: u64,
+    pub end: u64,
+    pub total: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VaultError {
     NoteTooLong = 1,
     TagTooLong = 2,
     BatchTooLarge = 3,
+    InvalidCliff = 4,
+    InvalidEnd = 5,
+    InvalidTotal = 6,
 }
 
 const ENTRY_KEY: Symbol = symbol_short!("ENTRY");
+const SCHEDULE_KEY: Symbol = symbol_short!("SCHEDULE");
 
 #[contract]
 pub struct VaultContract;
@@ -51,6 +63,32 @@ impl VaultContract {
     /// Retrieve the stored vault entry, if any.
     pub fn get_entry(env: Env) -> Option<VaultEntry> {
         env.storage().persistent().get(&ENTRY_KEY)
+    }
+
+    /// Store a vesting schedule, validating cliff/end/total bounds.
+    ///
+    /// Returns a typed `VaultError` for invalid input instead of panicking.
+    pub fn set_vesting_schedule(
+        env: Env,
+        schedule: VestingSchedule,
+    ) -> Result<(), VaultError> {
+        if schedule.cliff > schedule.end {
+            return Err(VaultError::InvalidCliff);
+        }
+        if schedule.end == 0 {
+            return Err(VaultError::InvalidEnd);
+        }
+        if schedule.total <= 0 {
+            return Err(VaultError::InvalidTotal);
+        }
+
+        env.storage().persistent().set(&SCHEDULE_KEY, &schedule);
+        Ok(())
+    }
+
+    /// Retrieve the stored vesting schedule, if any.
+    pub fn get_vesting_schedule(env: Env) -> Option<VestingSchedule> {
+        env.storage().persistent().get(&SCHEDULE_KEY)
     }
 
     /// Retrieve multiple vault entries in a single call.
@@ -163,5 +201,51 @@ mod test {
             ids.push_back(i as u64);
         }
         assert_eq!(client.get_vaults(&ids), Err(VaultError::BatchTooLarge));
+    }
+
+    #[test]
+    fn set_vesting_schedule_accepts_valid() {
+        let (_env, client, _owner) = setup();
+        let schedule = VestingSchedule { cliff: 10, end: 100, total: 1_000 };
+        assert_eq!(client.set_vesting_schedule(&schedule), Ok(()));
+        assert_eq!(client.get_vesting_schedule().unwrap(), schedule);
+    }
+
+    #[test]
+    fn set_vesting_schedule_rejects_invalid() {
+        let (_env, client, _owner) = setup();
+
+        let bad_cliff = VestingSchedule { cliff: 200, end: 100, total: 1_000 };
+        assert_eq!(client.set_vesting_schedule(&bad_cliff), Err(VaultError::InvalidCliff));
+
+        let bad_end = VestingSchedule { cliff: 0, end: 0, total: 1_000 };
+        assert_eq!(client.set_vesting_schedule(&bad_end), Err(VaultError::InvalidEnd));
+
+        let bad_total = VestingSchedule { cliff: 0, end: 100, total: 0 };
+        assert_eq!(client.set_vesting_schedule(&bad_total), Err(VaultError::InvalidTotal));
+    }
+
+    /// Deterministic fuzz-style sweep over arbitrary cliff/end/total values.
+    ///
+    /// Mirrors the libFuzzer target: for every generated `VestingSchedule` the
+    /// contract must either accept it or return a typed `VaultError` — never panic.
+    #[test]
+    fn fuzz_set_vesting_schedule_never_panics() {
+        let (_env, client, _owner) = setup();
+
+        let cliffs = [0u64, 1, 50, 100, u64::MAX];
+        let ends = [0u64, 1, 50, 100, u64::MAX];
+        let totals = [i128::MIN, -1, 0, 1, i128::MAX];
+
+        for &cliff in cliffs.iter() {
+            for &end in ends.iter() {
+                for &total in totals.iter() {
+                    let schedule = VestingSchedule { cliff, end, total };
+                    let result = client.set_vesting_schedule(&schedule);
+                    let valid = cliff <= end && end != 0 && total > 0;
+                    assert_eq!(result.is_ok(), valid);
+                }
+            }
+        }
     }
 }

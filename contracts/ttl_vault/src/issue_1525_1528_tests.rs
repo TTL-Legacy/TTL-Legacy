@@ -267,7 +267,7 @@ fn test_whitelist_entry_valid_until_expiry_ledger() {
     client.deposit(&vault_id, &owner, &1_000_000);
 
     let expiry = env.ledger().sequence() + 100;
-    client.add_whitelist_address_with_expiry(
+    client.add_whitelist_with_expiry(
         &vault_id,
         &owner,
         &owner,
@@ -291,7 +291,7 @@ fn test_expired_whitelist_entry_is_rejected() {
     client.deposit(&vault_id, &owner, &1_000_000);
 
     let expiry = env.ledger().sequence() + 100;
-    client.add_whitelist_address_with_expiry(
+    client.add_whitelist_with_expiry(
         &vault_id,
         &owner,
         &owner,
@@ -310,7 +310,7 @@ fn test_whitelist_expiry_must_be_in_future() {
     let vault_id = client.create_vault(&owner, &beneficiary, &INTERVAL, &None);
 
     let current = env.ledger().sequence();
-    let res = client.try_add_whitelist_address_with_expiry(
+    let res = client.try_add_whitelist_with_expiry(
         &vault_id,
         &owner,
         &owner,
@@ -327,7 +327,7 @@ fn test_readding_whitelist_address_replaces_expired_entry() {
     client.deposit(&vault_id, &owner, &1_000_000);
 
     let expiry = env.ledger().sequence() + 10;
-    client.add_whitelist_address_with_expiry(
+    client.add_whitelist_with_expiry(
         &vault_id,
         &owner,
         &owner,

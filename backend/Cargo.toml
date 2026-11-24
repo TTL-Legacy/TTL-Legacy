@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# IANA timezone database for DST-aware reminder scheduling (issue #1752).
+chrono-tz = "0.9"
 futures = "0.3"
 log = "0.4"
 tracing = "0.1"

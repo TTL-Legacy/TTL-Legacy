@@ -5,40 +5,10 @@ extern crate alloc;
 use super::*;
 use soroban_sdk::{
     testutils::{storage::Instance as _, Address as _, Events, Ledger},
-    token::StellarAssetClient,
     vec, Address, Env,
 };
 
-fn setup() -> (
-    Env,
-    Address,
-    Address,
-    Address,
-    Address,
-    TtlVaultContractClient<'static>,
-) {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
-    let admin = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_address = env
-        .register_stellar_asset_contract_v2(token_admin)
-        .address();
-
-    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000_000);
-
-    let contract_address = env.register_contract(None, TtlVaultContract);
-    let client = TtlVaultContractClient::new(&env, &contract_address);
-    client.initialize(&token_address, &admin);
-
-    let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
-
-    (env, owner, beneficiary, admin, token_address, client)
-}
+use crate::tests::common::setup_with_roles_and_balance;
 
 fn create_vault_with_deposit(
     env: &Env,
@@ -56,7 +26,7 @@ fn create_vault_with_deposit(
 
 #[test]
 fn test_set_beneficiary_vesting_schedule() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 1_000_000);
 
@@ -91,7 +61,7 @@ fn test_set_beneficiary_vesting_schedule() {
 
 #[test]
 fn test_beneficiary_vesting_requires_owner() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 1_000_000);
     let non_owner = Address::generate(&env);
@@ -113,7 +83,7 @@ fn test_beneficiary_vesting_requires_owner() {
 
 #[test]
 fn test_beneficiary_vesting_with_cliff() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 4_000_000);
 
@@ -138,7 +108,7 @@ fn test_beneficiary_vesting_with_cliff() {
 
 #[test]
 fn test_claim_beneficiary_vesting_installment() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 4_000_000);
 
@@ -172,7 +142,7 @@ fn test_claim_beneficiary_vesting_installment() {
 
 #[test]
 fn test_multiple_beneficiary_vesting_schedules() {
-    let (env, owner, _, _, _, client) = setup();
+    let (env, owner, _, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let ben_a = Address::generate(&env);
     let ben_b = Address::generate(&env);
@@ -211,7 +181,7 @@ fn test_multiple_beneficiary_vesting_schedules() {
 
 #[test]
 fn test_beneficiary_vesting_rejects_zero_interval() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 1_000_000);
 
@@ -230,7 +200,7 @@ fn test_beneficiary_vesting_rejects_zero_interval() {
 
 #[test]
 fn test_beneficiary_vesting_rejects_zero_installments() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 1_000_000);
 
@@ -251,7 +221,7 @@ fn test_beneficiary_vesting_rejects_zero_installments() {
 
 #[test]
 fn test_create_beneficiary_auction() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -282,7 +252,7 @@ fn test_create_beneficiary_auction() {
 
 #[test]
 fn test_auction_requires_owner() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
     let non_owner = Address::generate(&env);
@@ -301,7 +271,7 @@ fn test_auction_requires_owner() {
 
 #[test]
 fn test_place_auction_bid() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -332,7 +302,7 @@ fn test_place_auction_bid() {
 
 #[test]
 fn test_auction_bid_requires_minimum() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -361,7 +331,7 @@ fn test_auction_bid_requires_minimum() {
 
 #[test]
 fn test_auction_bid_outside_window() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -386,7 +356,7 @@ fn test_auction_bid_outside_window() {
 
 #[test]
 fn test_finalize_auction_selects_winner() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -427,7 +397,7 @@ fn test_finalize_auction_selects_winner() {
 
 #[test]
 fn test_auction_cannot_be_created_twice() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -457,7 +427,7 @@ fn test_auction_cannot_be_created_twice() {
 
 #[test]
 fn test_multiple_bids_in_auction() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 
@@ -488,7 +458,7 @@ fn test_multiple_bids_in_auction() {
 
 #[test]
 fn test_get_auction_bids() {
-    let (env, owner, beneficiary, _, _, client) = setup();
+    let (env, owner, beneficiary, _, _, client) = setup_with_roles_and_balance(1_000_000_000);
 
     let vault_id = create_vault_with_deposit(&env, &client, &owner, &beneficiary, 10_000_000);
 

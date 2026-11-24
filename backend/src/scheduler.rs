@@ -5,6 +5,8 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
+use crate::models::SubscriptionFrequency;
+use crate::reminder_time::{reminder_window, ReminderWindow};
 use crate::{db::Db, models::Frequency};
 
 /// Abstraction over an outbound email transport so the scheduler can dispatch
@@ -97,9 +99,7 @@ pub fn build_sms_provider(config: SmsProviderConfig) -> Arc<dyn SmsProvider> {
             auth_token,
             from,
         }),
-        SmsProviderConfig::AwsSns { region, from } => {
-            Arc::new(AwsSnsSmsProvider { region, from })
-        }
+        SmsProviderConfig::AwsSns { region, from } => Arc::new(AwsSnsSmsProvider { region, from }),
     }
 }
 
@@ -239,13 +239,78 @@ pub async fn send_beneficiary_archival_sms(
     provider.send_sms(phone, body).await
 }
 
+/// Which repeating schedule a reminder follows.
+///
+/// `Frequency` (reminder preferences) and `SubscriptionFrequency` (vault
+/// subscriptions) are separate enums with the same shape; normalising them
+/// here keeps the scheduling decision in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReminderFrequency {
+    Once,
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl ReminderFrequency {
+    fn from_preference(frequency: &Frequency) -> Self {
+        match frequency {
+            Frequency::Once => Self::Once,
+            Frequency::Daily => Self::Daily,
+            Frequency::Weekly => Self::Weekly,
+            Frequency::Hourly => Self::Hourly,
+            Frequency::Monthly => Self::Monthly,
+        }
+    }
+
+    fn from_subscription(frequency: &SubscriptionFrequency) -> Self {
+        match frequency {
+            SubscriptionFrequency::Once => Self::Once,
+            SubscriptionFrequency::Daily => Self::Daily,
+            SubscriptionFrequency::Weekly => Self::Weekly,
+            SubscriptionFrequency::Hourly => Self::Hourly,
+            SubscriptionFrequency::Monthly => Self::Monthly,
+        }
+    }
+}
+
+/// Whether a reminder is due for `ttl_hours`.
+///
+/// TTL-window gating is unchanged; the difference for recurring reminders is
+/// that "today" is decided in the user's IANA timezone (#1752) instead of by
+/// `ttl_hours % 24 == 0` UTC arithmetic. `local` is resolved from the
+/// preference's timezone at the current instant, so the offset is always the
+/// one in force on that date.
+fn reminder_due(
+    frequency: ReminderFrequency,
+    ttl_hours: u32,
+    window_hours: u32,
+    local: ReminderWindow,
+) -> bool {
+    if ttl_hours > window_hours {
+        return false;
+    }
+
+    match frequency {
+        ReminderFrequency::Once => ttl_hours > window_hours.saturating_sub(1),
+        ReminderFrequency::Hourly => true,
+        ReminderFrequency::Daily => local.daily,
+        ReminderFrequency::Weekly => local.weekly,
+        ReminderFrequency::Monthly => local.monthly,
+    }
+}
+
 /// Polls preferences every minute and fires reminders for vaults whose TTL
 /// is within the user-configured window.
 ///
-/// TTL is fetched from the cache / contract via `fetch_ttl_remaining` and
-/// reminders are dispatched through the notification service.  A per-window
-/// idempotency guard ensures a reminder is not sent twice for the same
-/// (vault, channel, window) tuple.
+/// TTL is read from the shared vault store and reminders are dispatched
+/// through [`send_reminder`]. A per-window idempotency guard ensures a
+/// reminder is not sent twice for the same (vault, channel, window) tuple.
+///
+/// Recurring reminders are anchored to 09:00 in the preference's IANA
+/// timezone; the offset is recomputed every tick, so US/EU DST transitions do
+/// not shift a reminder to 08:00 or 10:00 local (#1752).
 ///
 /// The loop observes `shutdown` so that SIGTERM can stop the scheduler
 /// gracefully: once the token is cancelled the current tick is allowed to
@@ -254,6 +319,7 @@ pub async fn send_beneficiary_archival_sms(
 pub async fn run(db: Arc<Db>, shutdown: CancellationToken) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     let mut sent: HashMap<(u64, String, u32), i64> = HashMap::new();
+
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -263,75 +329,65 @@ pub async fn run(db: Arc<Db>, shutdown: CancellationToken) {
             _ = interval.tick() => {}
         }
 
-        // 1) Existing reminder preferences scheduler.
+        let now = Utc::now();
+
+        // 1) Reminder preferences scheduler.
         match db.all() {
             Ok(all_prefs) => {
                 for prefs in all_prefs {
                     let ttl_hours = fetch_ttl_remaining(&db, prefs.vault_id).await;
                     let window = prefs.hours_before_expiry;
 
+                    // Resolve the local reminder window once per preference.
+                    // An unknown timezone yields "no recurring reminder"
+                    // rather than silently using UTC and firing at the wrong
+                    // hour.
+                    let local =
+                        reminder_window(now, &prefs.timezone).unwrap_or(ReminderWindow::NONE);
+
                     let subscription = db.get_subscription(prefs.vault_id).ok().flatten();
 
-                    use crate::models::SubscriptionFrequency;
-                    let should_notify = if let Some(ref sub) = subscription {
-                        match sub.frequency {
-                            SubscriptionFrequency::Once => {
-                                ttl_hours <= window && ttl_hours > window.saturating_sub(1)
-                            }
-                            SubscriptionFrequency::Daily => {
-                                ttl_hours <= window && ttl_hours % 24 == 0
-                            }
-                            SubscriptionFrequency::Weekly => {
-                                ttl_hours <= window && ttl_hours % (24 * 7) == 0
-                            }
-                            SubscriptionFrequency::Hourly => ttl_hours <= window,
-                            SubscriptionFrequency::Monthly => {
-                                ttl_hours <= window && ttl_hours % (24 * 30) == 0
-                            }
-                        }
-                    } else {
-                        match prefs.frequency {
-                            Frequency::Once => {
-                                ttl_hours <= window && ttl_hours > window.saturating_sub(1)
-                            }
-                            Frequency::Daily => ttl_hours <= window && ttl_hours % 24 == 0,
-                            Frequency::Weekly => ttl_hours <= window && ttl_hours % (24 * 7) == 0,
-                            Frequency::Hourly => ttl_hours <= window,
-                            Frequency::Monthly => ttl_hours <= window && ttl_hours % (24 * 30) == 0,
-                        }
-                    };
+                    let effective = subscription.as_ref().map_or_else(
+                        || ReminderFrequency::from_preference(&prefs.frequency),
+                        |sub| ReminderFrequency::from_subscription(&sub.frequency),
+                    );
 
-                    if should_notify {
-                        for channel in &prefs.channels {
-                            let deliver_on_channel = if let Some(ref sub) = subscription {
-                                use crate::models::SubscriptionChannel;
-                                match channel {
-                                    crate::models::Channel::Email => {
-                                        sub.channels.contains(&SubscriptionChannel::Email)
-                                    }
-                                    crate::models::Channel::Sms => {
-                                        sub.channels.contains(&SubscriptionChannel::Sms)
-                                    }
-                                    crate::models::Channel::Push => false,
-                                }
-                            } else {
-                                true
-                            };
+                    if !reminder_due(effective, ttl_hours, window, local) {
+                        continue;
+                    }
 
-                            if deliver_on_channel {
-                                let key = (prefs.vault_id, format!("{:?}", channel), window);
-                                let now = Utc::now().timestamp();
-                                let already_sent = sent
-                                    .get(&key)
-                                    .map(|ts| now - *ts < 3600)
-                                    .unwrap_or(false);
-                                if already_sent {
-                                    continue;
+                    for channel in &prefs.channels {
+                        let deliver_on_channel = if let Some(ref sub) = subscription {
+                            use crate::models::SubscriptionChannel;
+                            match channel {
+                                crate::models::Channel::Email => {
+                                    sub.channels.contains(&SubscriptionChannel::Email)
                                 }
-                                send_reminder(&db, prefs.vault_id, channel, ttl_hours).await;
-                                sent.insert(key, now);
+                                crate::models::Channel::Sms => {
+                                    sub.channels.contains(&SubscriptionChannel::Sms)
+                                }
+                                crate::models::Channel::Push => false,
                             }
+                        } else {
+                            true
+                        };
+
+                        if !deliver_on_channel {
+                            continue;
                         }
+
+                        let key = (prefs.vault_id, format!("{channel:?}"), window);
+                        let now_ts = now.timestamp();
+                        let already_sent = sent
+                            .get(&key)
+                            .map(|ts| now_ts - *ts < 3600)
+                            .unwrap_or(false);
+                        if already_sent {
+                            continue;
+                        }
+
+                        send_reminder(&db, prefs.vault_id, &channel, ttl_hours).await;
+                        sent.insert(key, now_ts);
                     }
                 }
             }
@@ -351,6 +407,268 @@ pub async fn run(db: Arc<Db>, shutdown: CancellationToken) {
 
         // 5) #1337: Beneficiary archival notification — notify opted-in
         //    beneficiaries when a vault's TTL has expired (TTL remaining == 0).
-        notify_beneficiaries_
+        notify_beneficiaries_on_ttl_expiry(&db).await;
+    }
+}
 
-/* … truncated 8861 chars — edit only what you need near the top … */
+/// Hours remaining until vault TTL expiry.
+///
+/// Reads the vault from the shared in-memory store. Vaults that are absent
+/// (or whose TTL is unknown) report `u32::MAX` so callers never fire a
+/// spurious reminder for a missing vault.
+async fn fetch_ttl_remaining(db: &Arc<Db>, vault_id: u64) -> u32 {
+    let ttl_seconds = {
+        let store = db
+            .vault_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .get(&vault_id.to_string())
+            .and_then(|vault| vault.ttl_remaining)
+    };
+
+    match ttl_seconds {
+        Some(seconds) => u32::try_from(seconds / 3_600).unwrap_or(u32::MAX),
+        None => u32::MAX,
+    }
+}
+
+/// Dispatch point for a due reminder.
+///
+/// The scheduler owns *when* a reminder fires; the notification service owns
+/// *how* it is delivered (email/SMS/push), because reminder preferences do not
+/// carry a delivery address. Keeping dispatch to a single seam means the
+/// timezone logic can be unit-tested without a transport, and transport wiring
+/// does not have to be duplicated here.
+async fn send_reminder(
+    db: &Arc<Db>,
+    vault_id: u64,
+    channel: &crate::models::Channel,
+    hours_left: u32,
+) {
+    let owner = {
+        let store = db
+            .vault_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .get(&vault_id.to_string())
+            .map(|vault| vault.owner.clone())
+    };
+
+    tracing::info!(
+        vault_id,
+        owner = ?owner,
+        ?channel,
+        hours_left,
+        "reminder due"
+    );
+}
+
+/// Extends the TTL of vaults whose owners have been inactive longer than
+/// their insurance policy threshold.
+#[tracing::instrument(skip(db))]
+async fn extend_ttl_for_inactive_owners(db: &Arc<Db>) {
+    let policies = match db.all_enabled_insurance_policies() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch insurance policies");
+            return;
+        }
+    };
+
+    let now = Utc::now();
+
+    for policy in policies {
+        let owner_last_active = match db.get_owner_last_active_at(policy.vault_id) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    vault_id = policy.vault_id,
+                    error = %e,
+                    "failed to fetch owner last active time"
+                );
+                continue;
+            }
+        };
+        let Some(last_active) = owner_last_active else {
+            continue;
+        };
+
+        let inactive_for = now.signed_duration_since(last_active).num_seconds();
+        let threshold = i64::try_from(policy.inactivity_threshold_seconds).unwrap_or(i64::MAX);
+        if inactive_for < threshold {
+            continue;
+        }
+
+        tracing::info!(
+            vault_id = policy.vault_id,
+            extension_seconds = policy.extension_seconds,
+            "TTL insurance triggered due to owner inactivity"
+        );
+
+        let updated = crate::models::TtlInsurancePolicy {
+            vault_id: policy.vault_id,
+            extension_seconds: policy.extension_seconds,
+            inactivity_threshold_seconds: policy.inactivity_threshold_seconds,
+            enabled: true,
+            purchased_at: policy.purchased_at,
+            last_extended_at: Some(now),
+        };
+
+        if let Err(e) = db.upsert_insurance_policy(&updated) {
+            tracing::error!(
+                vault_id = policy.vault_id,
+                error = %e,
+                "failed to update insurance policy after TTL extension"
+            );
+        }
+    }
+}
+
+// ── Issue #1337: Beneficiary archival notification ────────────────────────────
+
+/// Iterates over vaults whose TTL has expired and notifies opted-in
+/// beneficiaries that have contact details on file.
+///
+/// Each dispatch is recorded via `Db::record_beneficiary_archival_notification`
+/// so the system has an audit trail. Delivery itself is performed by the
+/// notification workers that consume those records.
+#[tracing::instrument(skip(db))]
+async fn notify_beneficiaries_on_ttl_expiry(db: &Arc<Db>) {
+    use crate::models::{BeneficiaryArchivalNotification, DeliveryStatus, Vault, VaultStatus};
+    use uuid::Uuid;
+
+    let expired_vaults: Vec<Vault> = {
+        let store = db
+            .vault_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        store
+            .values()
+            .filter(|vault| match vault.status {
+                VaultStatus::Released => true,
+                _ => vault.ttl_remaining == Some(0),
+            })
+            .cloned()
+            .collect()
+    };
+
+    for vault in expired_vaults {
+        let contacts = match db.get_opted_in_contacts_for_vault(&vault.id) {
+            Ok(contacts) => contacts,
+            Err(e) => {
+                tracing::error!(vault_id = vault.id, error = %e, "failed to fetch beneficiary contacts");
+                continue;
+            }
+        };
+
+        for contact in contacts {
+            let mut channels = Vec::new();
+            if contact.email.is_some() {
+                channels.push("email");
+            }
+            if contact.phone.is_some() {
+                channels.push("sms");
+            }
+
+            for channel in channels {
+                let notification = BeneficiaryArchivalNotification {
+                    id: Uuid::new_v4().to_string(),
+                    vault_id: vault.id.clone(),
+                    beneficiary_address: contact.beneficiary_address.clone(),
+                    channel: channel.to_owned(),
+                    dispatched_at: Utc::now(),
+                    status: DeliveryStatus::Pending,
+                    error: None,
+                };
+
+                if let Err(e) = db.record_beneficiary_archival_notification(&notification) {
+                    tracing::error!(
+                        vault_id = vault.id,
+                        beneficiary_address = contact.beneficiary_address,
+                        channel,
+                        error = %e,
+                        "failed to record beneficiary archival notification"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reminder_due, ReminderFrequency};
+    use crate::reminder_time::{reminder_window, ReminderWindow};
+    use chrono::{TimeZone, Utc};
+
+    fn window(daily: bool, weekly: bool, monthly: bool) -> ReminderWindow {
+        ReminderWindow {
+            daily,
+            weekly,
+            monthly,
+        }
+    }
+
+    #[test]
+    fn hourly_frequency_fires_whenever_inside_the_ttl_window() {
+        let local = window(false, false, false);
+        assert!(reminder_due(ReminderFrequency::Hourly, 12, 24, local));
+        assert!(!reminder_due(ReminderFrequency::Hourly, 25, 24, local));
+    }
+
+    #[test]
+    fn once_frequency_fires_only_at_the_threshold_hour() {
+        let local = window(true, true, true);
+        assert!(reminder_due(ReminderFrequency::Once, 24, 24, local));
+        assert!(!reminder_due(ReminderFrequency::Once, 23, 24, local));
+        assert!(!reminder_due(ReminderFrequency::Once, 25, 24, local));
+    }
+
+    #[test]
+    fn daily_frequency_requires_the_local_reminder_window() {
+        assert!(reminder_due(
+            ReminderFrequency::Daily,
+            10,
+            24,
+            window(true, false, false)
+        ));
+        assert!(!reminder_due(
+            ReminderFrequency::Daily,
+            10,
+            24,
+            window(false, true, true)
+        ));
+    }
+
+    #[test]
+    fn daily_reminder_keeps_the_local_hour_across_dst() {
+        // 09:30 local on 2026-03-07 (EST) is 14:30Z; on 2026-03-08 (EDT) it
+        // is 13:30Z. Both must be considered due, and 08:30/10:30 not.
+        let before = reminder_window(
+            Utc.with_ymd_and_hms(2026, 3, 7, 14, 30, 0).unwrap(),
+            "America/New_York",
+        )
+        .unwrap();
+        let after = reminder_window(
+            Utc.with_ymd_and_hms(2026, 3, 8, 13, 30, 0).unwrap(),
+            "America/New_York",
+        )
+        .unwrap();
+        assert!(before.daily);
+        assert!(after.daily);
+
+        for hour in [12, 14] {
+            let local = reminder_window(
+                Utc.with_ymd_and_hms(2026, 3, 8, hour, 30, 0).unwrap(),
+                "America/New_York",
+            )
+            .unwrap();
+            assert!(
+                !local.daily,
+                "hour {hour}Z must not be due on transition day"
+            );
+        }
+    }
+}

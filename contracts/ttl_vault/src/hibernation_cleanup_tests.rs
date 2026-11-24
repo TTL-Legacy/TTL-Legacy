@@ -6,22 +6,7 @@
 mod tests {
     use super::super::*;
 
-    fn setup() -> (Env, Address, Address, TtlVaultContractClient<'static>) {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let owner = Address::generate(&env);
-        let beneficiary = Address::generate(&env);
-
-        let contract_id = env.register_contract(None, TtlVaultContract);
-        let client = TtlVaultContractClient::new(&env, &contract_id);
-
-        let xlm_token = Address::generate(&env);
-        client.initialize(&xlm_token, &admin);
-
-        (env, owner, beneficiary, client)
-    }
+    use crate::tests::common::setup_unfunded as setup;
 
     #[test]
     fn test_get_hibernation_returns_none_after_exit_hibernation() {

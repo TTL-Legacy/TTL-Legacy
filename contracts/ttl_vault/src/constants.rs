@@ -84,3 +84,6 @@ pub const MIN_CHECK_IN_INTERVAL: u64 = 3600;
 /// interval (e.g. near u64::MAX) from overflowing TTL arithmetic or making
 /// automatic release practically unreachable.
 pub const MAX_CHECK_IN_INTERVAL: u64 = 315_360_000;
+
+/// Oracle attestation freshness window in seconds (5 minutes) - Issue #1832.
+pub const ORACLE_FRESHNESS_WINDOW: u64 = 300;

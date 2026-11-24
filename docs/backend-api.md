@@ -130,7 +130,8 @@ POST /vaults/{vault_id}/reminder-preferences
 {
   "channels": ["email", "push"],
   "hours_before_expiry": 24,
-  "frequency": "daily"
+  "frequency": "daily",
+  "timezone": "America/New_York"
 }
 ```
 
@@ -141,6 +142,7 @@ POST /vaults/{vault_id}/reminder-preferences
 | `channels` | array | ✓ | Notification channels | Non-empty; values: `"email"`, `"sms"`, `"push"` |
 | `hours_before_expiry` | integer | ✓ | Hours before vault expiry to notify | > 0 |
 | `frequency` | string | ✓ | Notification frequency | One of: `"once"`, `"daily"`, `"weekly"`, `"hourly"`, `"monthly"` |
+| `timezone` | string | ✗ | IANA timezone for the 09:00 local reminder time | Valid IANA identifier; defaults to `"UTC"` |
 
 **Response** (200 OK):
 
@@ -149,7 +151,8 @@ POST /vaults/{vault_id}/reminder-preferences
   "vault_id": 123,
   "channels": ["email", "push"],
   "hours_before_expiry": 24,
-  "frequency": "daily"
+  "frequency": "daily",
+  "timezone": "America/New_York"
 }
 ```
 
@@ -161,6 +164,7 @@ POST /vaults/{vault_id}/reminder-preferences
 | `channels` | array | Stored notification channels |
 | `hours_before_expiry` | integer | Hours before expiry |
 | `frequency` | string | Notification frequency |
+| `timezone` | string | IANA timezone used to resolve the local reminder hour |
 
 **Error Responses**:
 
@@ -394,6 +398,7 @@ CREATE TABLE reminder_preferences (
     channels TEXT NOT NULL,          -- JSON array: ["email", "push", ...]
     hours_before_expiry INTEGER NOT NULL,
     frequency TEXT NOT NULL,         -- "daily", "weekly", ...
+    timezone TEXT NOT NULL DEFAULT 'UTC',  -- IANA zone (#1752)
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

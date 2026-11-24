@@ -172,6 +172,7 @@ paths:
                     - email
                   hours_before_expiry: 24
                   frequency: daily
+                  timezone: America/New_York
               multiChannel:
                 summary: Multiple notification channels
                 value:
@@ -1149,7 +1150,6 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
   /api/vaults/{vault_id}/vesting/bonus:
-=======
     get:
       summary: Get vesting bonus configuration
       operationId: getVestingBonus
@@ -1319,11 +1319,20 @@ components:
           description: Hours before expiry to send reminder
         frequency:
           $ref: '#/components/schemas/Frequency'
+        timezone:
+          type: string
+          default: UTC
+          description: >
+            IANA timezone used to resolve the 09:00 local reminder time
+            (issue #1752). The UTC offset is re-evaluated for every occurrence,
+            so DST transitions do not shift the reminder.
+          example: America/New_York
       required:
         - vault_id
         - channels
         - hours_before_expiry
         - frequency
+        - timezone
 
     SetPreferencesRequest:
       type: object
@@ -1340,6 +1349,12 @@ components:
           description: Hours before expiry to send reminder
         frequency:
           $ref: '#/components/schemas/Frequency'
+        timezone:
+          type: string
+          description: >
+            IANA timezone for the local reminder time. Omit to keep the
+            backwards-compatible `UTC` default (issue #1752).
+          example: America/New_York
       required:
         - channels
         - hours_before_expiry
