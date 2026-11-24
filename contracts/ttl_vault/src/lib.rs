@@ -107,6 +107,16 @@ mod beneficiary_conflict_resolution_tests;
 #[cfg(test)]
 mod issue_1525_1528_tests;
 
+// Issue #2074: beneficiary_swap on-chain event log
+#[cfg(test)]
+mod beneficiary_swap_event_tests;
+
+// Issue #2075: clone_vault field-propagation property tests
+#[cfg(test)]
+mod clone_vault_tests;
+#[cfg(test)]
+mod clone_vault_proptests;
+
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
 pub const VAULT_TTL_THRESHOLD: u32 = 1000;
@@ -4179,6 +4189,86 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((SET_BENEFICIARIES_TOPIC, vault_id), beneficiaries);
+        Ok(())
+    }
+
+    /// Atomically swaps the BPS allocations of two beneficiaries in a vault.
+    ///
+    /// After the call, `address_a` holds `address_b`'s previous allocation and
+    /// vice-versa.  The total BPS sum is preserved.  Downstream services should
+    /// listen for [`BENEFICIARY_SWAPPED_TOPIC`] to update cached beneficiary
+    /// indexes without re-reading the vault.
+    ///
+    /// # Arguments
+    /// * `vault_id`   - Target vault (must be Locked, owned by `caller`)
+    /// * `caller`     - Must be the vault owner (requires auth)
+    /// * `address_a`  - First beneficiary in the swap pair
+    /// * `address_b`  - Second beneficiary in the swap pair
+    ///
+    /// # Errors
+    /// * [`ContractError::NotOwner`]           - `caller` is not the vault owner
+    /// * [`ContractError::VaultNotFound`]      - vault does not exist
+    /// * [`ContractError::InvalidBeneficiary`] - either address is not a registered beneficiary
+    /// * [`ContractError::AlreadyReleased`]    - vault is not Locked
+    pub fn swap_allocations(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address_a: Address,
+        address_b: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        // Locate both entries — both must be present.
+        let mut idx_a: Option<u32> = None;
+        let mut idx_b: Option<u32> = None;
+        for (i, entry) in vault.beneficiaries.iter().enumerate() {
+            if entry.address == address_a {
+                idx_a = Some(i as u32);
+            }
+            if entry.address == address_b {
+                idx_b = Some(i as u32);
+            }
+        }
+        let idx_a = idx_a.ok_or(ContractError::InvalidBeneficiary)?;
+        let idx_b = idx_b.ok_or(ContractError::InvalidBeneficiary)?;
+
+        let bps_a = vault.beneficiaries.get(idx_a).unwrap().bps;
+        let bps_b = vault.beneficiaries.get(idx_b).unwrap().bps;
+
+        // Perform the swap.
+        let mut entry_a = vault.beneficiaries.get(idx_a).unwrap();
+        let mut entry_b = vault.beneficiaries.get(idx_b).unwrap();
+        entry_a.bps = bps_b;
+        entry_b.bps = bps_a;
+        vault.beneficiaries.set(idx_a, entry_a);
+        vault.beneficiaries.set(idx_b, entry_b);
+
+        Self::save_vault(&env, vault_id, &vault);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (BENEFICIARY_SWAPPED_TOPIC,),
+            BeneficiarySwappedEvent {
+                vault_id,
+                old_address: address_a,
+                new_address: address_b,
+                old_bps: bps_a,
+                new_bps: bps_b,
+            },
+        );
+
         Ok(())
     }
 
