@@ -60,6 +60,12 @@ mod passkey_device_type_tests;
 #[cfg(test)]
 mod passkey_last_used_tests;
 #[cfg(test)]
+mod passkey_delegation_tests;
+#[cfg(test)]
+mod passkey_audit_trail_tests;
+#[cfg(test)]
+mod passkey_escrow_tests;
+#[cfg(test)]
 mod regression_tests;
 #[cfg(test)]
 mod vault_expiry_tests;
@@ -1931,7 +1937,7 @@ impl TtlVaultContract {
         if caller != vault.owner && !is_delegate && !is_passkey_delegate {
             return Err(ContractError::NotOwner);
         }
-        // Enforce per-delegation nonce to prevent replay attacks
+        // Enforce per-delegation nonce to prevent replay attacks (vault-level delegates only)
         if is_delegate {
             let nonce_key = StorageKey::DelegateNonce(vault_id, caller.clone());
             let expected: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
@@ -2077,6 +2083,15 @@ impl TtlVaultContract {
 
         // Log passkey usage - Issue #395
         Self::log_passkey_usage(&env, vault_id, &passkey_hash, now);
+        // Issue #558: append passkey audit entry for check-in use.
+        Self::append_passkey_audit_entry(
+            &env,
+            vault_id,
+            "use",
+            &caller,
+            &passkey_hash,
+            vault.check_in_interval,
+        );
 
         // Issue #559: reject check-in if the passkey is currently in escrow.
         {
@@ -4095,6 +4110,43 @@ impl TtlVaultContract {
         }
 
         ttl
+    }
+
+    /// Checks all passkeys for a vault and emits `pk_exp_warn` for any whose
+    /// remaining time until expiry is at or below `EXPIRY_WARNING_THRESHOLD`.
+    ///
+    /// Issue #560 — Requirement 4, AC7.
+    ///
+    /// # Returns
+    /// The number of passkeys for which a warning was emitted.
+    pub fn ping_passkey_expiry(env: Env, vault_id: u64) -> u32 {
+        let pk_key = StorageKey::VaultPasskeys(vault_id);
+        let passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&pk_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let now = env.ledger().timestamp();
+        let mut warned: u32 = 0;
+        for pk in passkeys.iter() {
+            let expiry_opt: Option<u64> = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::PasskeyExpiry(vault_id, pk.hash.clone()));
+            if let Some(expiry) = expiry_opt {
+                if expiry > now {
+                    let remaining = expiry - now;
+                    if remaining <= EXPIRY_WARNING_THRESHOLD {
+                        env.events().publish(
+                            (PK_EXPIRY_WARN_TOPIC, vault_id),
+                            (pk.hash.clone(), remaining),
+                        );
+                        warned += 1;
+                    }
+                }
+            }
+        }
+        warned
     }
 
     // --- Task 2: partial_release ---
@@ -10973,6 +11025,19 @@ impl TtlVaultContract {
             }
         }
 
+        // Issue #559: block check-in if passkey is currently held in escrow.
+        if env
+            .storage()
+            .persistent()
+            .get::<StorageKey, PasskeyEscrowRecord>(&StorageKey::PasskeyEscrow(
+                vault_id,
+                passkey_hash.clone(),
+            ))
+            .is_some()
+        {
+            return Err(ContractError::PasskeyInEscrow);
+        }
+
         // Expiry check — applies regardless of registration path.
         if let Some(expiry) = env
             .storage()
@@ -11812,6 +11877,23 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        // Issue #558: append two audit entries for rotation (remove old, add new).
+        Self::append_passkey_audit_entry(
+            &env,
+            vault_id,
+            "rotate_remove",
+            &caller,
+            &old_passkey_hash,
+            vault.check_in_interval,
+        );
+        Self::append_passkey_audit_entry(
+            &env,
+            vault_id,
+            "rotate_add",
+            &caller,
+            &new_passkey_hash,
+            vault.check_in_interval,
+        );
         env.events().publish(
             (ROTATE_PASSKEY_TOPIC, vault_id),
             (old_passkey_hash.clone(), new_passkey_hash.clone()),
@@ -12022,6 +12104,15 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        // Issue #558: append audit entry for passkey add.
+        Self::append_passkey_audit_entry(
+            &env,
+            vault_id,
+            "add",
+            &caller,
+            &passkey_hash,
+            vault.check_in_interval,
+        );
         env.events()
             .publish((ADD_PASSKEY_TOPIC, vault_id), (passkey_hash.clone(), backup_eligible));
         // Issue #558: append to passkey audit log
@@ -12322,6 +12413,15 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        // Issue #558: append audit entry for passkey remove.
+        Self::append_passkey_audit_entry(
+            &env,
+            vault_id,
+            "remove",
+            &caller,
+            &passkey_hash,
+            vault.check_in_interval,
+        );
         env.events()
             .publish((REMOVE_PASSKEY_TOPIC, vault_id), passkey_hash.clone());
         // Issue #1525: passkey_revoked event with credential ID hash and timestamp

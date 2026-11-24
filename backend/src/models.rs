@@ -306,6 +306,8 @@ pub struct UpdatePreferencesRequest {
     pub vault_released_enabled: Option<bool>,
     pub warning_hours_before: Option<u64>,
     pub locale: Option<Locale>,
+    /// Opt out of passkey-expiry notifications — Issue #560.
+    pub passkey_expiry_warnings_enabled: Option<bool>,
 }
 
 // ── Existing models (unchanged) ──────────────────────────────────────────────
@@ -433,6 +435,12 @@ pub struct AuditEntry {
     pub timestamp: DateTime<Utc>,
     pub action: String,
     pub actor: String,
+    /// IP address of the actor, if available from the request context.
+    ///
+    /// Populated from the `X-Forwarded-For` or `X-Real-IP` request header by
+    /// axum-based handlers. `None` for background tasks and internal operations
+    /// that have no associated HTTP request.
+    pub actor_ip: Option<String>,
     pub details: serde_json::Value,
 }
 
