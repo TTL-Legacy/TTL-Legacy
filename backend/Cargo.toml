@@ -69,6 +69,7 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 # Recovery code generation and hashing
 rand = "0.8"
 sha2 = "0.10"
+base64 = "0.22"
 
 # URL encoding/decoding for form field values
 urlencoding = "2"
