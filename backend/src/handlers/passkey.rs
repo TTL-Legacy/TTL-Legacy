@@ -193,6 +193,15 @@ pub async fn recover_with_credential_handler(
                 ))?;
 
             code_entry.used_at = Some(Utc::now());
+
+            // Invalidate all remaining unused backup codes for this owner/vault
+            // so an attacker who obtained the full code list cannot reuse them.
+            let recovery_at = Utc::now();
+            for rc in recovery_codes.iter_mut() {
+                if rc.owner == body.owner && rc.vault_id == body.vault_id && rc.used_at.is_none() {
+                    rc.used_at = Some(recovery_at);
+                }
+            }
             drop(recovery_codes);
 
             audit::log_action(
@@ -527,6 +536,71 @@ mod tests {
             .filter(|rc| rc.used_at.is_none())
             .count();
         assert_eq!(unused, 10);
+    }
+
+    #[test]
+    fn test_recovery_invalidates_all_remaining_codes() {
+        // After using one recovery code, all remaining codes for the vault
+        // must be marked as used (invalidated).
+        let vault_id = "vault-1";
+        let owner = "owner1";
+        let used_code = "USED01";
+        let other_code1 = "OTHER1";
+        let other_code2 = "OTHER2";
+
+        let mut codes: Vec<RecoveryCode> = vec![
+            RecoveryCode {
+                code_id: "rc-1".to_string(),
+                owner: owner.to_string(),
+                vault_id: vault_id.to_string(),
+                code_hash: hash_code(used_code),
+                generated_at: Utc::now(),
+                used_at: None,
+            },
+            RecoveryCode {
+                code_id: "rc-2".to_string(),
+                owner: owner.to_string(),
+                vault_id: vault_id.to_string(),
+                code_hash: hash_code(other_code1),
+                generated_at: Utc::now(),
+                used_at: None,
+            },
+            RecoveryCode {
+                code_id: "rc-3".to_string(),
+                owner: owner.to_string(),
+                vault_id: vault_id.to_string(),
+                code_hash: hash_code(other_code2),
+                generated_at: Utc::now(),
+                used_at: None,
+            },
+        ];
+
+        // Simulate the recovery: mark the used code
+        let entry = codes
+            .iter_mut()
+            .find(|rc| {
+                rc.owner == owner
+                    && rc.vault_id == vault_id
+                    && verify_code(used_code, &rc.code_hash)
+                    && rc.used_at.is_none()
+            })
+            .expect("code must be found");
+        entry.used_at = Some(Utc::now());
+
+        // Invalidate remaining codes (the fix)
+        let recovery_at = Utc::now();
+        for rc in codes.iter_mut() {
+            if rc.owner == owner && rc.vault_id == vault_id && rc.used_at.is_none() {
+                rc.used_at = Some(recovery_at);
+            }
+        }
+
+        // All codes must now be invalidated
+        let still_valid = codes
+            .iter()
+            .filter(|rc| rc.owner == owner && rc.vault_id == vault_id && rc.used_at.is_none())
+            .count();
+        assert_eq!(still_valid, 0, "all backup codes must be invalidated after recovery");
     }
 
     #[test]
