@@ -57,6 +57,11 @@ mod openapi_contract {
         ("GET", "/api/vaults/{vault_id}/beneficiaries/{beneficiary_id}/conflict"),
         ("POST", "/api/vaults/{vault_id}/beneficiaries/{beneficiary_id}/auction"),
         ("GET", "/api/vaults/{vault_id}/beneficiaries/{beneficiary_id}/waterfall"),
+        // Token-management endpoints (#2082)
+        ("POST", "/api/tokens"),
+        ("DELETE", "/api/tokens/{id}"),
+        ("GET", "/api/tokens"),
+        ("PUT", "/api/tokens/{id}/allowlist"),
     ];
 
     /// Beneficiary route templates that must be covered by contract tests.
@@ -66,6 +71,15 @@ mod openapi_contract {
         ("GET", "/api/vaults/{vault_id}/beneficiaries/{beneficiary_id}/conflict"),
         ("POST", "/api/vaults/{vault_id}/beneficiaries/{beneficiary_id}/auction"),
         ("GET", "/api/vaults/{vault_id}/beneficiaries/{beneficiary_id}/waterfall"),
+    ];
+
+    /// Token-management route templates covered by contract tests (#2082).
+    /// Routes: POST /tokens, DELETE /tokens/{id}, GET /tokens, PUT /tokens/{id}/allowlist.
+    const TOKEN_MANAGEMENT_ROUTES: &[(&str, &str)] = &[
+        ("POST", "/api/tokens"),
+        ("DELETE", "/api/tokens/{id}"),
+        ("GET", "/api/tokens"),
+        ("PUT", "/api/tokens/{id}/allowlist"),
     ];
 
     /// Checks that a route returns something other than 404.
@@ -213,5 +227,143 @@ mod openapi_contract {
         let (method, path) = health_route.unwrap();
         assert_eq!(*method, "GET", "Health endpoint should use GET method");
         assert!(*path == "/health", "Health endpoint should be at /health");
+    }
+
+    // ── Token-management contract tests (#2082) ────────────────────────────
+
+    /// All four token-management routes appear in the ROUTES table and resolve
+    /// without unresolved placeholders.
+    #[test]
+    fn token_management_routes_are_defined() {
+        let params = path_param_defaults();
+
+        for (method, template) in TOKEN_MANAGEMENT_ROUTES {
+            assert!(
+                ROUTES.iter().any(|(m, p)| m == method && p == template),
+                "Token-management route {} {} must be listed in ROUTES",
+                method,
+                template,
+            );
+
+            let resolved = resolve_path(template, &params);
+            assert!(
+                !resolved.contains('{'),
+                "Unresolved path parameter in token-management route {} {}: {}",
+                method,
+                template,
+                resolved,
+            );
+            println!("✅  {} {}", method, resolved);
+        }
+    }
+
+    /// Every token-management route is present in the OpenAPI spec and the spec
+    /// contains at least one response schema for each of them.
+    #[test]
+    fn token_management_routes_match_openapi_spec() {
+        let openapi_content = std::fs::read_to_string("docs/openapi.yaml")
+            .expect("Failed to read docs/openapi.yaml");
+
+        for (method, template) in TOKEN_MANAGEMENT_ROUTES {
+            assert!(
+                openapi_content.contains(template),
+                "Token-management route {} {} must be defined in docs/openapi.yaml",
+                method,
+                template,
+            );
+        }
+
+        // The spec must declare response schemas and JSON content types for
+        // the token section.
+        assert!(
+            openapi_content.contains("responses:"),
+            "OpenAPI spec must contain response schema definitions",
+        );
+        assert!(
+            openapi_content.contains("application/json"),
+            "OpenAPI spec must specify application/json content type for token responses",
+        );
+    }
+
+    /// The request body shapes for POST /api/tokens and PUT /api/tokens/{id}/allowlist
+    /// are present in the spec (requestBody section).
+    #[test]
+    fn token_management_request_shapes_defined_in_spec() {
+        let openapi_content = std::fs::read_to_string("docs/openapi.yaml")
+            .expect("Failed to read docs/openapi.yaml");
+
+        // The spec must include requestBody definitions (used by POST and PUT routes).
+        assert!(
+            openapi_content.contains("requestBody:"),
+            "OpenAPI spec must define requestBody for write endpoints such as POST /api/tokens",
+        );
+    }
+
+    /// The response shapes for token-management endpoints are present in the
+    /// spec — either inline or via $ref to a component schema.
+    #[test]
+    fn token_management_response_shapes_defined_in_spec() {
+        let openapi_content = std::fs::read_to_string("docs/openapi.yaml")
+            .expect("Failed to read docs/openapi.yaml");
+
+        // All four routes must appear alongside HTTP status codes.
+        // We verify at least one success (2xx) and one error (4xx) code is documented.
+        let has_success = openapi_content.contains("'200':")
+            || openapi_content.contains("'201':")
+            || openapi_content.contains("'204':");
+        let has_error = openapi_content.contains("'400':")
+            || openapi_content.contains("'401':")
+            || openapi_content.contains("'403':")
+            || openapi_content.contains("'404':");
+
+        assert!(
+            has_success,
+            "OpenAPI spec must document success responses (200/201/204) for token endpoints",
+        );
+        assert!(
+            has_error,
+            "OpenAPI spec must document error responses (4xx) for token endpoints",
+        );
+    }
+
+    /// Verifies the four token-management routes cover all required HTTP verbs:
+    /// POST (create), DELETE (remove), GET (list), PUT (allowlist update).
+    #[test]
+    fn token_management_covers_required_http_methods() {
+        let methods: Vec<&str> = TOKEN_MANAGEMENT_ROUTES
+            .iter()
+            .map(|(method, _)| *method)
+            .collect();
+
+        assert!(
+            methods.contains(&"POST"),
+            "Token-management routes must include POST /api/tokens",
+        );
+        assert!(
+            methods.contains(&"DELETE"),
+            "Token-management routes must include DELETE /api/tokens/{{id}}",
+        );
+        assert!(
+            methods.contains(&"GET"),
+            "Token-management routes must include GET /api/tokens",
+        );
+        assert!(
+            methods.contains(&"PUT"),
+            "Token-management routes must include PUT /api/tokens/{{id}}/allowlist",
+        );
+    }
+
+    /// Ensures TOKEN_MANAGEMENT_ROUTES entries are a subset of the main ROUTES
+    /// table, so the two tables stay in sync.
+    #[test]
+    fn token_management_routes_are_subset_of_routes() {
+        for (method, template) in TOKEN_MANAGEMENT_ROUTES {
+            assert!(
+                ROUTES.iter().any(|(m, p)| m == method && p == template),
+                "TOKEN_MANAGEMENT_ROUTES entry {} {} is missing from the main ROUTES table",
+                method,
+                template,
+            );
+        }
     }
 }

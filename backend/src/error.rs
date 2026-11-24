@@ -70,6 +70,12 @@ pub enum AppError {
     SponsorInsufficientBalance(String),
     #[error("internal error: {0}")]
     Internal(String),
+    // Issue #2056: withdrawal rate limit
+    #[error("withdrawal rate limit exceeded: {0}")]
+    WithdrawalRateLimitExceeded(String),
+    // Issue #2059: vault config import/export
+    #[error("invalid bundle signature")]
+    InvalidBundleSignature,
 }
 
 impl IntoResponse for AppError {
@@ -89,6 +95,12 @@ impl IntoResponse for AppError {
                 (StatusCode::PAYMENT_REQUIRED, "sponsor_insufficient_balance")
             }
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            AppError::WithdrawalRateLimitExceeded(_) => {
+                (StatusCode::TOO_MANY_REQUESTS, "withdrawal_rate_limit_exceeded")
+            }
+            AppError::InvalidBundleSignature => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "invalid_bundle_signature")
+            }
         };
         ApiError::new(status, code, self.to_string()).into_response()
     }

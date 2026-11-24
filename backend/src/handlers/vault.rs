@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::events;
 use crate::models::*;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -667,6 +668,109 @@ pub fn bulk_vault_summary_handler(
     Ok(BulkSummaryResponse { summaries })
 }
 
+// ── Issue #2050: Clone vault ──────────────────────────────────────────────────
+
+/// Clone an existing vault, creating a new vault that copies the original's
+/// base fields.  `config` records the caller's intent for optional fields;
+/// since the current `Vault` struct does not carry those fields, all base
+/// fields are always copied.  The config is preserved in the audit entry for
+/// future use once the extended fields are added.
+pub fn clone_vault(
+    store: &VaultStore,
+    audit_store: &AuditStore,
+    vault_id: &str,
+    config: VaultCloneConfig,
+) -> Result<CloneVaultResponse, String> {
+    let original = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let cloned_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    let cloned_vault = Vault {
+        id: cloned_id.clone(),
+        owner: original.owner.clone(),
+        beneficiary: original.beneficiary.clone(),
+        balance: original.balance,
+        check_in_interval: original.check_in_interval,
+        last_check_in: now,
+        created_at: now,
+        status: VaultStatus::Active,
+        ttl_remaining: original.ttl_remaining,
+    };
+
+    store
+        .lock()
+        .unwrap()
+        .insert(cloned_id.clone(), cloned_vault.clone());
+
+    append_audit_entry(
+        audit_store,
+        "vault_cloned",
+        &original.owner,
+        serde_json::json!({
+            "original_vault_id": vault_id,
+            "cloned_vault_id": cloned_id,
+            "include_tags": config.include_tags,
+            "include_notes": config.include_notes,
+            "include_beneficiaries": config.include_beneficiaries,
+            "include_vesting_schedule": config.include_vesting_schedule,
+            "include_release_conditions": config.include_release_conditions,
+        }),
+    );
+
+    Ok(CloneVaultResponse {
+        original_vault_id: vault_id.to_string(),
+        cloned_vault_id: cloned_id,
+        cloned_vault,
+    })
+}
+
+// ── Issue #2048: Vault Archival ───────────────────────────────────────────────
+
+/// Archive a vault: emit the `ARCHIVE_TOPIC` event, transition status to
+/// `Archived`, remove the entry from the active store, and append an audit
+/// record.
+///
+/// Returns `Err` if the vault is not found.
+pub fn archive_vault(
+    store: &VaultStore,
+    audit_store: &AuditStore,
+    vault_id: &str,
+) -> Result<(), String> {
+    // Retrieve the vault before modifying or removing it.
+    let vault = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| format!("vault not found: {}", vault_id))?;
+
+    // Emit the archive event BEFORE purging (spec requirement).
+    events::emit_archive(vault_id, &vault.owner);
+
+    // Remove from active store (purge).
+    store.lock().unwrap().remove(vault_id);
+
+    // Append audit entry.
+    append_audit_entry(
+        audit_store,
+        "vault_archived",
+        &vault.owner,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "previous_status": format!("{:?}", vault.status),
+            "new_status": format!("{:?}", VaultStatus::Archived),
+        }),
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,4 +1276,329 @@ mod tests {
             "user2 should have independent rate limit"
         );
     }
+}
+
+// ── Issue #2057: Vault summary with health score ──────────────────────────────
+
+/// `GET /vaults/{id}/summary`
+///
+/// Returns extended vault metadata including a 0–100 health score computed
+/// from TTL remaining, check-in streak, beneficiary confirmation status, and
+/// backup code freshness.
+///
+/// `check_in_streak`, `beneficiary_confirmed`, and `backup_code_age_secs` are
+/// sourced from their respective stores by the caller; pass defaults when
+/// unavailable and the score degrades gracefully.
+pub fn get_vault_summary_handler(
+    store: &VaultStore,
+    vault_id: &str,
+    check_in_streak: u32,
+    beneficiary_confirmed: bool,
+    backup_code_age_secs: Option<u64>,
+) -> Result<crate::models::VaultSummaryResponse, String> {
+    let vault = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    let inputs = crate::models::VaultSummaryHealthInputs {
+        ttl_remaining: vault.ttl_remaining,
+        check_in_interval: vault.check_in_interval,
+        check_in_streak,
+        beneficiary_confirmed,
+        backup_code_age_secs,
+    };
+    let health_score = crate::models::compute_vault_summary_health_score(&inputs);
+
+    Ok(crate::models::VaultSummaryResponse {
+        vault_id: vault.id,
+        owner: vault.owner,
+        status: vault.status,
+        ttl_remaining: vault.ttl_remaining,
+        balance: vault.balance,
+        health_score,
+    })
+}
+
+// ── Issue #2059: Vault config export / import ─────────────────────────────────
+
+/// Bundle signing secret — in production this is sourced from an environment
+/// variable; here we define the env-var name and a test fallback.
+const BUNDLE_HMAC_SECRET_ENV: &str = "VAULT_BUNDLE_SIGNING_SECRET";
+const BUNDLE_HMAC_SECRET_FALLBACK: &[u8] = b"change-me-in-production";
+
+/// Compute an HMAC-SHA256 signature over `data`, base64url-encoded (no padding).
+fn hmac_sha256_b64(key: &[u8], data: &[u8]) -> String {
+    // Pure-Rust HMAC-SHA256 — no external crate required.
+    // Block size for SHA-256 is 64 bytes.
+    const BLOCK: usize = 64;
+
+    // Derive the HMAC key (pad or hash if longer than block size).
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        // Hash the key — simple SHA-256 inline.
+        let hashed = sha256(key);
+        k[..32].copy_from_slice(&hashed);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+
+    // Build ipad and opad.
+    let mut ipad = [0u8; BLOCK];
+    let mut opad = [0u8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5C;
+    }
+
+    // inner = SHA-256(ipad || data)
+    let mut inner_input = ipad.to_vec();
+    inner_input.extend_from_slice(data);
+    let inner = sha256(&inner_input);
+
+    // outer = SHA-256(opad || inner)
+    let mut outer_input = opad.to_vec();
+    outer_input.extend_from_slice(&inner);
+    let mac = sha256(&outer_input);
+
+    base64url_encode(&mac)
+}
+
+/// Minimal pure-Rust SHA-256 implementation (RFC 6234 / FIPS 180-4).
+fn sha256(data: &[u8]) -> [u8; 32] {
+    // Initial hash values (first 32 bits of fractional parts of sqrt of primes 2..19).
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    // Round constants.
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    // Pre-processing: pad the message.
+    let bit_len = data.len() as u64 * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    // Process each 512-bit chunk.
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g; g = f; f = e;
+            e = d.wrapping_add(temp1);
+            d = c; c = b; b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e); h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g); h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+/// Encode bytes as base64url without padding.
+fn base64url_encode(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let combined = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((combined >> 18) & 0x3F) as usize] as char);
+        out.push(CHARS[((combined >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(CHARS[((combined >> 6) & 0x3F) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(combined & 0x3F) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Return the bundle signing key — env var if set, otherwise the test fallback.
+fn bundle_signing_key() -> Vec<u8> {
+    std::env::var(BUNDLE_HMAC_SECRET_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.into_bytes())
+        .unwrap_or_else(|| BUNDLE_HMAC_SECRET_FALLBACK.to_vec())
+}
+
+/// `GET /vaults/{id}/export`
+///
+/// Serialises the vault's exportable configuration into a signed, portable
+/// JSON bundle. The signature is HMAC-SHA256 over the canonical JSON of the
+/// payload, allowing an importer to verify it was produced by this server.
+///
+/// The bundle **excludes** private keys, whitelist entries, balances, and
+/// non-portable runtime state.
+pub fn export_vault_config_handler(
+    store: &VaultStore,
+    vault_id: &str,
+    user_id: Option<&str>,
+) -> Result<crate::models::VaultConfigBundle, String> {
+    let vaults = store.lock().unwrap();
+    let vault = vaults
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    if let Some(uid) = user_id {
+        if vault.owner != uid {
+            return Err("Forbidden: not vault owner".to_string());
+        }
+    }
+
+    // Build payload from available vault data.
+    // Beneficiaries: the primary beneficiary gets 100% if no multi-party split
+    // is stored; a real implementation would query a beneficiaries table.
+    let beneficiaries = vec![crate::models::BundleBeneficiary {
+        address: vault.beneficiary.clone(),
+        share_bps: 10_000, // 100 %
+    }];
+
+    let release_conditions = vec![crate::models::ReleaseCondition {
+        condition_type: "ttl_expired".to_string(),
+        params: serde_json::json!({
+            "check_in_interval_seconds": vault.check_in_interval,
+        }),
+    }];
+
+    // Tags are not stored on the Vault struct; pass the empty vec here.
+    // A richer implementation would source them from a separate tags table.
+    let tags: Vec<String> = Vec::new();
+
+    let payload = crate::models::VaultConfigPayload {
+        beneficiaries,
+        release_conditions,
+        // Vesting schedule is not stored on Vault directly; set None unless
+        // the caller enriches this via the vesting-bonus endpoint.
+        vesting_schedule: None,
+        tags,
+    };
+
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|e| format!("serialisation error: {e}"))?;
+    let key = bundle_signing_key();
+    let signature = hmac_sha256_b64(&key, payload_json.as_bytes());
+
+    Ok(crate::models::VaultConfigBundle {
+        version: 1,
+        source_vault_id: vault_id.to_string(),
+        exported_at: Utc::now(),
+        signature,
+        payload,
+    })
+}
+
+/// `POST /vaults/import`
+///
+/// Verifies the bundle signature, creates a new vault from the payload, and
+/// returns the new vault ID. The original vault ID is **not** reused.
+pub fn import_vault_config_handler(
+    store: &VaultStore,
+    req: crate::models::ImportVaultConfigRequest,
+) -> Result<crate::models::ImportVaultConfigResponse, crate::error::AppError> {
+    // Verify signature over the payload.
+    let payload_json = serde_json::to_string(&req.bundle.payload)
+        .map_err(|e| crate::error::AppError::InvalidInput(format!("invalid bundle payload: {e}")))?;
+    let key = bundle_signing_key();
+    let expected_sig = hmac_sha256_b64(&key, payload_json.as_bytes());
+
+    if req.bundle.signature != expected_sig {
+        return Err(crate::error::AppError::InvalidBundleSignature);
+    }
+
+    let payload = &req.bundle.payload;
+
+    // Pick the primary beneficiary (highest share or first in list).
+    let primary_beneficiary = payload
+        .beneficiaries
+        .iter()
+        .max_by_key(|b| b.share_bps)
+        .map(|b| b.address.clone())
+        .unwrap_or_default();
+
+    // Derive check-in interval from release conditions if present.
+    let check_in_interval = payload
+        .release_conditions
+        .iter()
+        .find(|c| c.condition_type == "ttl_expired")
+        .and_then(|c| c.params.get("check_in_interval_seconds").and_then(|v| v.as_u64()))
+        .unwrap_or(86_400);
+
+    let new_vault_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    let vault = Vault {
+        id: new_vault_id.clone(),
+        owner: req.new_owner.clone(),
+        beneficiary: primary_beneficiary,
+        balance: 0,
+        check_in_interval,
+        last_check_in: now,
+        created_at: now,
+        status: VaultStatus::Active,
+        ttl_remaining: Some(check_in_interval),
+    };
+
+    store
+        .lock()
+        .map_err(|_| crate::error::AppError::Internal("vault store lock poisoned".to_string()))?
+        .insert(new_vault_id.clone(), vault);
+
+    let tags_applied = payload.tags.clone();
+    let beneficiary_count = payload.beneficiaries.len();
+
+    Ok(crate::models::ImportVaultConfigResponse {
+        new_vault_id,
+        owner: req.new_owner,
+        imported_at: now,
+        beneficiary_count,
+        tags_applied,
+    })
 }

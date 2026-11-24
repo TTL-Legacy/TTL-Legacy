@@ -3,3 +3,4 @@
 //! See [`common`] for the fixture helpers.
 
 pub mod common;
+pub mod helpers;

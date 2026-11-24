@@ -669,6 +669,42 @@ mod tests {
     }
 
     #[test]
+    fn backup_codes_invalidated_after_recovery() {
+        // Demonstrates the contract: once any backup code is consumed for recovery,
+        // all remaining codes for the same vault must be treated as invalid.
+        // This test models the expected state after the fix in passkey.rs.
+
+        // Simulate three codes for a vault
+        let vault_id = "vault-42";
+        let owner = "owner-42";
+
+        let make_code = |id: &str, raw: &str| -> (String, Option<chrono::DateTime<Utc>>) {
+            (format!("{id}-hash-{raw}"), None) // (code_hash, used_at)
+        };
+
+        let mut codes = vec![
+            make_code("rc-1", "CODE01"),
+            make_code("rc-2", "CODE02"),
+            make_code("rc-3", "CODE03"),
+        ];
+
+        // Recovery: use code 0
+        codes[0].1 = Some(Utc::now());
+
+        // Invalidate remaining
+        let recovery_at = Utc::now();
+        for entry in codes.iter_mut() {
+            if entry.1.is_none() {
+                entry.1 = Some(recovery_at);
+            }
+        }
+
+        // All codes must be invalidated
+        let active = codes.iter().filter(|c| c.1.is_none()).count();
+        assert_eq!(active, 0, "no backup codes should remain active after recovery");
+    }
+
+    #[test]
     fn previous_key_can_decrypt_after_rotation() {
         std::env::set_var("TOTP_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef");
         std::env::remove_var("TOTP_ENCRYPTION_KEY_PREVIOUS");

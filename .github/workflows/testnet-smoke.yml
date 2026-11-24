@@ -16,7 +16,7 @@ jobs:
   smoke-test:
     name: Stellar Testnet Smoke Test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -104,6 +104,41 @@ jobs:
           # --- Beneficiary: address only, no funding needed ---
           stellar keys generate "smoke-bene-${SUFFIX}" --network testnet
           BENE_ADDR=$(stellar keys address "smoke-bene-${SUFFIX}")
+
+          # --- Twenty funded beneficiaries for the varying-BPS payout E2E ---
+          : > smoke-beneficiaries.tsv
+          python3 - <<'PY'
+          import json
+          import subprocess
+
+          suffix = "${SUFFIX}"
+          for i in range(20):
+              key_name = f"smoke-bene-{i:02d}-{suffix}"
+              subprocess.run(
+                  ["stellar", "keys", "generate", key_name, "--network", "testnet"],
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+              )
+              address = subprocess.check_output(
+                  ["stellar", "keys", "address", key_name],
+                  text=True,
+              ).strip()
+              subprocess.run(
+                  ["curl", "-sSf", f"https://friendbot.stellar.org?addr={address}"],
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+              )
+              with open("smoke-beneficiaries.tsv", "a", encoding="utf-8") as output:
+                  output.write(f"{i}\t{address}\n")
+          PY
+          sleep 5
+
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          with open("smoke-beneficiaries.tsv", encoding="utf-8") as source:
+              for line in source:
+                  index, address = line.rstrip().split("\t", 1)
+                  print(f"BENE_ADDR_{int(index):02d}={address}")
+          PY
 
           echo "KEY_SUFFIX=${SUFFIX}"     >> "$GITHUB_ENV"
           echo "ADMIN_ADDR=${ADMIN_ADDR}" >> "$GITHUB_ENV"
@@ -232,9 +267,7 @@ jobs:
 
           echo "::notice::Smoke test passed. Vault ${VAULT_ID} TTL: ${TTL}s remaining"
 
-      # Runs even on failure so we don't leave funded vaults open on testnet.
-      - name: Cleanup — cancel vault
-        if: always()
+      - name: Smoke — 20-beneficiary varying-BPS release
         run: |
           if [ -z "${VAULT_ID:-}" ] || [ -z "${CONTRACT_ID:-}" ]; then
             echo "Nothing to clean up (vault or contract not created)"
@@ -245,11 +278,151 @@ jobs:
             --id "${CONTRACT_ID}" \
             --source "smoke-owner-${KEY_SUFFIX}" \
             --network testnet \
-            -- cancel_vault \
-            --vault_id "${VAULT_ID}" \
+            -- set_beneficiaries \
+            --vault_id "${SPLIT_VAULT_ID}" \
             --caller "${OWNER_ADDR}" \
-            && echo "Vault ${VAULT_ID} cancelled (refund returned to owner)" \
-            || echo "Warning: cancel_vault failed — vault may already be cancelled or deposit never landed"
+            --beneficiaries "${BENEFICIARY_JSON}"
+
+          stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- deposit \
+            --vault_id "${SPLIT_VAULT_ID}" \
+            --from "${OWNER_ADDR}" \
+            --amount 100000000
+
+          python3 <<'PY' > split-baselines.tsv
+          import json
+          import os
+          import urllib.request
+
+          for i in range(20):
+              address = os.environ[f"BENE_ADDR_{i:02d}"]
+              with urllib.request.urlopen(
+                  f"https://horizon-testnet.stellar.org/accounts/{address}",
+                  timeout=20,
+              ) as response:
+                  account = json.load(response)
+              native = next(
+                  balance["balance"]
+                  for balance in account["balances"]
+                  if balance["asset_type"] == "native"
+              )
+              print(f"{i}\t{native}")
+          PY
+
+          # The contract requires 3,600 seconds of inactivity. Poll the real
+          # testnet TTL, waiting for expiry before invoking release.
+          for attempt in $(seq 1 150); do
+            TTL=$(stellar contract invoke \
+              --id "${CONTRACT_ID}" \
+              --source "smoke-owner-${KEY_SUFFIX}" \
+              --network testnet \
+              -- get_ttl_remaining \
+              --vault_id "${SPLIT_VAULT_ID}" || true)
+            TTL="${TTL//\"/}"
+            if [ "${TTL}" = "0" ] || [ "${TTL}" = "null" ] || [ -z "${TTL}" ]; then
+              break
+            fi
+            echo "Waiting for split vault expiry (${attempt}/150): ${TTL}s"
+            sleep 30
+          done
+
+          # trigger_release waits for and is committed into one ledger close.
+          # Immediately read Horizon state, which confirms the payout landed.
+          stellar contract invoke \
+            --id "${CONTRACT_ID}" \
+            --source "smoke-owner-${KEY_SUFFIX}" \
+            --network testnet \
+            -- trigger_release \
+            --vault_id "${SPLIT_VAULT_ID}"
+
+          python3 <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from decimal import Decimal
+
+          stroops_per_xlm = Decimal("10000000")
+          deposit_stroops = 100_000_000
+
+          baselines = {}
+          with open("split-baselines.tsv", encoding="utf-8") as source:
+              for line in source:
+                  index, balance = line.rstrip().split("\t", 1)
+                  baselines[int(index)] = Decimal(balance) * stroops_per_xlm
+
+          for i in range(20):
+              address = os.environ[f"BENE_ADDR_{i:02d}"]
+              bps = 25 if i == 0 else ((i + 1) * 25 if i < 19 else 5250)
+              expected = (
+                  deposit_stroops * bps // 10_000
+                  if i < 19
+                  else deposit_stroops
+                  - sum(
+                      deposit_stroops * (
+                          25 if j == 0 else ((j + 1) * 25 if j < 19 else 5250)
+                      ) // 10_000
+                      for j in range(19)
+                  )
+              )
+
+              deadline = time.monotonic() + 60
+              while True:
+                  try:
+                      with urllib.request.urlopen(
+                          f"https://horizon-testnet.stellar.org/accounts/{address}",
+                          timeout=20,
+                      ) as response:
+                          account = json.load(response)
+                      native = next(
+                          balance["balance"]
+                          for balance in account["balances"]
+                          if balance["asset_type"] == "native"
+                      )
+                      after = Decimal(native) * stroops_per_xlm
+                      received = after - baselines[i]
+                      if received == expected:
+                          print(
+                              f"Beneficiary {i}: received {received} stroops "
+                              f"(expected {expected})"
+                          )
+                          break
+                  except (urllib.error.URLError, StopIteration):
+                      pass
+                  if time.monotonic() >= deadline:
+                      raise AssertionError(
+                          f"Beneficiary {i}: balance did not increase by {expected} "
+                          f"stroops within one ledger-close verification window"
+                      )
+                  time.sleep(1)
+          PY
+
+      # Runs even on failure so we don't leave funded vaults open on testnet.
+      - name: Cleanup — cancel vault
+        if: always()
+        run: |
+          if [ -z "${CONTRACT_ID:-}" ]; then
+            echo "Nothing to clean up (contract not created)"
+            exit 0
+          fi
+          for vault_id in "${VAULT_ID:-}" "${SPLIT_VAULT_ID:-}"; do
+            if [ -z "${vault_id}" ]; then
+              continue
+            fi
+            stellar contract invoke \
+              --id "${CONTRACT_ID}" \
+              --source "smoke-owner-${KEY_SUFFIX}" \
+              --network testnet \
+              -- cancel_vault \
+              --vault_id "${vault_id}" \
+              --caller "${OWNER_ADDR}" \
+              && echo "Vault ${vault_id} cancelled (refund returned to owner)" \
+              || echo "Warning: cancel_vault failed — vault may already be cancelled or deposit never landed"
+          done
 
       # Opens a GitHub issue on first failure; comments on the existing open
       # issue for repeated failures so the tracker stays clean.
@@ -299,7 +472,10 @@ jobs:
                   '5. `deposit` 10 XLM',
                   '6. `check_in`',
                   '7. `get_ttl_remaining` — assert non-null',
-                  '8. `cancel_vault` (cleanup)',
+                  '8. 20-beneficiary varying-BPS vault: set split, deposit 10 XLM',
+                  '9. Wait for 1-hour TTL expiry, trigger release',
+                  '10. Verify all 20 Horizon account balances within the ledger-close window',
+                  '11. `cancel_vault` (cleanup)',
                   '',
                   'Check the workflow run for the failing step and investigate',
                   'deployment fees, contract init, token setup, or network issues.',

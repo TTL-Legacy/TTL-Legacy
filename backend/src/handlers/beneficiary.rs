@@ -714,3 +714,61 @@ pub fn submit_proof_of_life_handler(
 
     Ok(())
 }
+
+// ── Issue #2051: Beneficiary payout address update with owner notification ───
+
+/// Updates a beneficiary's payout address for a vault and records an audit
+/// entry that notifies the vault owner of the change.
+pub fn update_beneficiary_payout_address(
+    store: &VaultStore,
+    payout_store: &PayoutAddressStore,
+    audit_store: &AuditStore,
+    vault_id: &str,
+    request: UpdatePayoutAddressRequest,
+) -> Result<BeneficiaryPayoutAddress, String> {
+    let vault = store
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .cloned()
+        .ok_or_else(|| "Vault not found".to_string())?;
+
+    if vault.beneficiary != request.beneficiary {
+        return Err("Not the vault beneficiary".to_string());
+    }
+
+    let store_key = format!("{}:{}", vault_id, request.beneficiary);
+
+    let old_payout_address = payout_store
+        .lock()
+        .unwrap()
+        .get(&store_key)
+        .map(|entry| entry.payout_address.clone());
+
+    let new_entry = BeneficiaryPayoutAddress {
+        vault_id: vault_id.to_string(),
+        beneficiary: request.beneficiary.clone(),
+        payout_address: request.new_payout_address.clone(),
+        updated_at: Utc::now(),
+    };
+
+    payout_store
+        .lock()
+        .unwrap()
+        .insert(store_key, new_entry.clone());
+
+    append_audit_entry(
+        audit_store,
+        "beneficiary_payout_address_changed",
+        &request.beneficiary,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "beneficiary": request.beneficiary,
+            "old_payout_address": old_payout_address,
+            "new_payout_address": request.new_payout_address,
+            "vault_owner": vault.owner,
+        }),
+    );
+
+    Ok(new_entry)
+}
