@@ -82,6 +82,8 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
+#[cfg(test)]
+mod batch_check_in_stress_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
 mod batch_withdrawal_tests;
