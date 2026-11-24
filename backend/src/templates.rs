@@ -107,9 +107,11 @@ pub fn email_subject(
         (Locale::De, NotificationType::WithdrawalAlert) => {
             "Abhebungsversuch auf Ihrem Tresor erkannt"
         }
-        // Fallback for notification types without a localized email template
-        // (e.g. passkey expiry push notifications — Issue #560).
-        _ => "TTL-Legacy notification",
+        // Passkey expiry — all locales (no locale-specific translations yet)
+        (_, NotificationType::PasskeyExpiringSoon) => "Passkey expiring soon",
+        (_, NotificationType::PasskeyExpired) => "Passkey has expired",
+        // Fallback
+        _ => "Notification from TTL-Legacy",
     }
 }
 
@@ -172,9 +174,16 @@ pub fn email_body(
             "Ihr Tresor wurde an den designierten Begünstigten freigegeben.".to_string()
         }
         (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert.".to_string(),
-        // Fallback for notification types without a localized email template
-        // (e.g. passkey expiry push notifications — Issue #560).
-        _ => "You have a new notification regarding your TTL-Legacy vault.".to_string(),
+        // Passkey expiry — all locales
+        (_, NotificationType::PasskeyExpiringSoon) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!("A passkey on your vault expires in approximately {h} hours. Rotate or extend it to keep vault access.")
+        }
+        (_, NotificationType::PasskeyExpired) => {
+            "A passkey on your vault has expired. Rotate it now to restore check-in access.".to_string()
+        }
+        // Fallback for notification types without locale-specific email body templates.
+        _ => String::new(),
     }
 }
 
