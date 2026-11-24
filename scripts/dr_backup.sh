@@ -100,6 +100,7 @@ fi
 # ---------------------------------------------------------------------------
 
 CONTRACT_STATE_FILE=$(mktemp /tmp/contract_state_XXXXXX.json)
+trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}" "${CHECKSUM_FILE:-}" "${CHECKSUM_SIG_FILE:-}"' EXIT
 SIG_DIR=$(mktemp -d /tmp/dr_sig_XXXXXX)
 trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"; rm -rf "${SIG_DIR}"' EXIT
 
@@ -137,6 +138,79 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 4. Compute SHA-256 checksums and optionally GPG-sign the checksum file
+# ---------------------------------------------------------------------------
+# This step produces a machine-verifiable integrity record for every artefact
+# that was included in the backup set.  Downstream restore and audit tooling
+# (see dr_restore.sh and scripts/test_dr_backup_integrity.sh) can re-compute
+# the SHA-256 digest of each downloaded artefact and compare it against this
+# file, then verify the GPG detached signature to confirm the file has not
+# been tampered with since the backup was taken.
+#
+# Optional environment variables consumed here:
+#   DR_GPG_KEY_ID   – GPG key fingerprint / e-mail used to sign the checksum
+#                     file.  When empty, GPG signing is skipped.
+
+CHECKSUM_FILE=$(mktemp /tmp/checksums_XXXXXX.sha256)
+
+log "Computing SHA-256 checksums for backup artefacts..."
+
+compute_checksums() {
+    # Build an array of local files that are part of this backup so we can
+    # hash them before they are uploaded.
+    local -a artefact_files=()
+    artefact_files+=("${CONTRACT_STATE_FILE}")
+    if ! ${SKIP_DB:-false}; then
+        artefact_files+=("${DB_SNAPSHOT_FILE}")
+    fi
+    if ! ${SKIP_WASM:-false}; then
+        artefact_files+=("${WASM_PATH}")
+    fi
+
+    : > "${CHECKSUM_FILE}"
+    for f in "${artefact_files[@]}"; do
+        local digest
+        digest=$(sha256sum "${f}" | awk '{print $1}')
+        # Record the basename only so the checksum file is portable
+        printf '%s  %s\n' "${digest}" "$(basename "${f}")" >> "${CHECKSUM_FILE}"
+        log "  SHA-256 $(basename "${f}"): ${digest}"
+    done
+}
+
+sign_checksums() {
+    # Produce a detached ASCII-armoured GPG signature for the checksum file.
+    # The signature is uploaded alongside the checksums so a restore operator
+    # can run:
+    #   gpg --verify checksums.sha256.asc checksums.sha256
+    # to confirm the file was produced by the trusted backup key.
+    if [[ -z "${DR_GPG_KEY_ID:-}" ]]; then
+        log "DR_GPG_KEY_ID not set — skipping GPG signing."
+        return
+    fi
+
+    CHECKSUM_SIG_FILE="${CHECKSUM_FILE}.asc"
+    log "GPG-signing checksum file with key ${DR_GPG_KEY_ID}..."
+    if $DRY_RUN; then
+        log "[DRY-RUN] Would run: gpg --batch --yes --armor --detach-sign --local-user ${DR_GPG_KEY_ID} ${CHECKSUM_FILE}"
+    else
+        gpg --batch --yes --armor --detach-sign \
+            --local-user "${DR_GPG_KEY_ID}" \
+            --output "${CHECKSUM_SIG_FILE}" \
+            "${CHECKSUM_FILE}" \
+            || die "GPG signing failed — is the key '${DR_GPG_KEY_ID}' available in the keyring?"
+        log "GPG signature written to ${CHECKSUM_SIG_FILE}"
+    fi
+}
+
+if $DRY_RUN; then
+    log "[DRY-RUN] Would compute SHA-256 checksums and sign with GPG (if DR_GPG_KEY_ID is set)"
+else
+    compute_checksums
+    sign_checksums
+fi
+
+# ---------------------------------------------------------------------------
+# 4b. Upload artefacts to S3-compatible storage
 # 3b. Export vault snapshots
 # ---------------------------------------------------------------------------
 # The contract has no public index of snapshot timestamps, so the operator
@@ -224,6 +298,14 @@ if ! $SKIP_VAULT_SNAPSHOTS; then
     done
 fi
 
+# Upload the checksum file and, if present, its GPG signature
+if ! $DRY_RUN; then
+    upload_to_s3 "${CHECKSUM_FILE}" "${BACKUP_KEY_PREFIX}/checksums.sha256"
+    if [[ -n "${CHECKSUM_SIG_FILE:-}" && -f "${CHECKSUM_SIG_FILE}" ]]; then
+        upload_to_s3 "${CHECKSUM_SIG_FILE}" "${BACKUP_KEY_PREFIX}/checksums.sha256.asc"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Write backup manifest
 # ---------------------------------------------------------------------------
@@ -245,6 +327,10 @@ cat > "${MANIFEST_FILE}" <<EOF
   "contract": "${CONTRACT_TTL_VAULT}",
   "artefacts": {
     "contract_state": "${BACKUP_KEY_PREFIX}/contract_state.json",
+    "backend_db": "$(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi)",
+    "wasm": "$(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)",
+    "checksums": "${BACKUP_KEY_PREFIX}/checksums.sha256",
+    "checksums_sig": "$(if [[ -n "${DR_GPG_KEY_ID:-}" ]]; then echo "\"${BACKUP_KEY_PREFIX}/checksums.sha256.asc\""; else echo null; fi)"
     "backend_db": $(if $SKIP_DB; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/backend_db.sqlite3\""; fi),
     "wasm": $(if $SKIP_WASM; then echo null; else echo "\"${BACKUP_KEY_PREFIX}/ttl_vault.wasm\""; fi)
   },

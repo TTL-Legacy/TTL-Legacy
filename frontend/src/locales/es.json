@@ -17,11 +17,47 @@
     "checkInIntervalLabel": "Intervalo de registro de presencia (segundos)",
     "idLabel": "ID de la bóveda"
   },
+  "vaultWizard": {
+    "stepBasic": "Configuración básica",
+    "stepBeneficiaries": "Beneficiarios",
+    "stepReleaseConditions": "Condiciones de liberación",
+    "stepVesting": "Vesting",
+    "stepReview": "Revisar y firmar",
+    "resumeDraft": "Tienes un borrador de creación de bóveda sin guardar. ¿Continuar o empezar de nuevo?",
+    "resume": "Continuar",
+    "discard": "Descartar",
+    "back": "← Atrás",
+    "next": "Siguiente →",
+    "cancel": "Cancelar",
+    "signAndCreate": "Firmar y crear bóveda",
+    "submitting": "Enviando…",
+    "draftSaved": "Borrador guardado",
+    "totalMustBe100": "(debe ser igual a 100)",
+    "noBeneficiaries": "Agrega al menos un beneficiario",
+    "releaseConditionTtl": "Vencimiento de TTL",
+    "releaseConditionOwner": "Iniciado por el propietario",
+    "releaseConditionOracle": "Oráculo",
+    "vestingEnabled": "Habilitar programa de vesting",
+    "cliffGraceHint": "Las reclamaciones dentro de esta ventana después de la fecha de cliff no incurren en penalización."
+  },
   "common": {
     "loading": "Cargando…",
     "error": "Se produjo un error",
     "retry": "Reintentar",
     "confirm": "Confirmar",
     "cancel": "Cancelar"
+  },
+  "vaultNotes": {
+    "heading": "Notas de bóveda",
+    "edit": "Editar",
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "saving": "Guardando…",
+    "noNotes": "Sin notas aún.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Vista previa",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Error al guardar. Por favor, intente de nuevo.",
+    "ariaLabel": "Notas para la bóveda {{vaultId}}"
   }
 }
