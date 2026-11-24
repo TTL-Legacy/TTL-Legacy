@@ -1121,6 +1121,89 @@ pub struct VaultHealthResponse {
     pub computed_at: DateTime<Utc>,
 }
 
+// ── Token price oracle (Issue #2066) ────────────────────────────────────────
+
+/// Which price oracle provider to use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OracleProvider {
+    /// Redstone — pull-model oracle, prices embedded in transactions.
+    Redstone,
+    /// Pyth Network — push-model oracle with on-chain price feeds.
+    Pyth,
+}
+
+/// Configuration for the token price oracle used by the backend to estimate
+/// vault values in USD.
+///
+/// One instance of this config is stored per deployment (admin-managed).
+/// The scheduler reads it to decide how often to refresh cached prices.
+///
+/// Issue #2066.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenPriceOracleConfig {
+    /// Which oracle provider to use.
+    pub provider: OracleProvider,
+    /// Base URL of the oracle REST or WebSocket endpoint.
+    /// Example: `"https://api.redstone.finance/prices"` or
+    ///          `"https://hermes.pyth.network/api"`.
+    pub endpoint_url: String,
+    /// How often the backend fetches a fresh price (seconds). Must be ≥ 10.
+    pub refresh_interval_seconds: u64,
+    /// XLM price feed identifier as understood by the chosen provider.
+    /// For Redstone: `"XLM"`. For Pyth: the hex feed ID.
+    pub xlm_feed_id: String,
+    /// Whether the oracle integration is currently enabled.
+    pub enabled: bool,
+    /// When this config was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A single cached price entry returned by the backend oracle poller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedTokenPrice {
+    /// Token symbol (e.g. `"XLM"` or the SEP-41 contract address).
+    pub token_id: String,
+    /// USD price (rounded to 8 decimal places).
+    pub price_usd: f64,
+    /// When this price was fetched from the upstream oracle.
+    pub fetched_at: DateTime<Utc>,
+    /// Source oracle provider.
+    pub provider: OracleProvider,
+}
+
+/// Response body for `GET /vaults/{id}/estimated-value`.
+///
+/// Issue #2066.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EstimatedVaultValue {
+    pub vault_id: String,
+    /// Vault balance in stroops (1 XLM = 10 000 000 stroops).
+    pub balance_stroops: i128,
+    /// Estimated USD value of the vault's balance, using the latest cached price.
+    /// `None` when no price data is available.
+    pub estimated_value_usd: Option<f64>,
+    /// Token symbol used for the valuation.
+    pub token_symbol: String,
+    /// USD price per token used for the calculation.
+    pub price_per_token_usd: Option<f64>,
+    /// When the price used for valuation was fetched.
+    pub price_fetched_at: Option<DateTime<Utc>>,
+    /// Whether the price data is considered stale (older than 2× refresh interval).
+    pub is_stale: bool,
+    pub estimated_at: DateTime<Utc>,
+}
+
+/// Request body for `PUT /admin/oracle/config`.
+#[derive(Debug, Deserialize)]
+pub struct SetOracleConfigRequest {
+    pub provider: OracleProvider,
+    pub endpoint_url: String,
+    pub refresh_interval_seconds: u64,
+    pub xlm_feed_id: String,
+    pub enabled: bool,
+}
+
 // ── Escalation (#1101) ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

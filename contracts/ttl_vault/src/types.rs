@@ -31,6 +31,8 @@ pub const PASSKEY_ANALYTICS_TOPIC: Symbol = symbol_short!("pk_ana");
 pub const BACKUP_CODES_ENCRYPTED_TOPIC: Symbol = symbol_short!("bkp_enc");
 // Issue #534: vesting cliff period reached
 pub const CLIFF_REACHED_TOPIC: Symbol = symbol_short!("clif_rch");
+// Issue #2065: cliff grace period — late claim treated as on-time
+pub const CLIFF_GRACE_CLAIM_TOPIC: Symbol = symbol_short!("clif_grce");
 pub const PAUSE_VAULT_TOPIC: Symbol = symbol_short!("v_pause");
 pub const RESUME_VAULT_TOPIC: Symbol = symbol_short!("v_resume");
 pub const SET_METADATA_TOPIC: Symbol = symbol_short!("set_meta");
@@ -671,6 +673,15 @@ pub struct VestingSchedule {
     /// Cliff duration in seconds from `start_time`. No funds are claimable until
     /// `start_time + cliff_period` has elapsed. Set to 0 to disable.
     pub cliff_period: u64,
+    /// Grace window in seconds after the cliff date.
+    ///
+    /// A claim submitted within `[cliff_date, cliff_date + cliff_grace_period_seconds)` is
+    /// treated as on-time and does not incur the late-claim penalty defined by
+    /// `VestingPenaltyConfig`. Set to 0 to disable (default behaviour: any claim after
+    /// the cliff date is subject to the normal penalty logic).
+    ///
+    /// Issue #2065.
+    pub cliff_grace_period_seconds: u64,
 }
 
 /// Penalty configuration for late-claim vesting installments.
