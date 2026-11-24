@@ -46,5 +46,18 @@
     "retry": "Réessayer",
     "confirm": "Confirmer",
     "cancel": "Annuler"
+  },
+  "vaultNotes": {
+    "heading": "Notes du coffre-fort",
+    "edit": "Modifier",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "saving": "Enregistrement…",
+    "noNotes": "Aucune note pour l'instant.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Aperçu",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Échec de l'enregistrement. Veuillez réessayer.",
+    "ariaLabel": "Notes pour le coffre-fort {{vaultId}}"
   }
 }

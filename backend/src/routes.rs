@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use std::sync::Arc;
+
 use actix_web::{
     http::StatusCode,
     web::{Data, Json, Path, Query},
@@ -18,9 +20,9 @@ use crate::{
         simulate_release_handler,
     },
     models::{
-        AuditLogEntry, ClaimBonusRequest, ReminderPreferences, SetPreferencesRequest,
-        SetSubscriptionRequest, SimulateReleaseQuery, SimulateReleaseResponse, Subscription,
-        VaultReleaseHistory,
+        AuditLogEntry, ClaimBonusRequest, PauseHistoryResponse, ReminderPreferences,
+        SetPreferencesRequest, SetSubscriptionRequest, SimulateReleaseQuery,
+        SimulateReleaseResponse, Subscription, VaultReleaseHistory,
     },
 };
 

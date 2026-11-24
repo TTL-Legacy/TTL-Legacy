@@ -356,6 +356,8 @@ pub enum ContractError {
     InvalidSignature = 161,
     /// No identity oracle has been configured for the vault.
     IdentityOracleNotSet = 162,
+    /// Deposit amount is below the configured minimum (Issue #2054).
+    DepositTooSmall = 163,
 }
 
 #[contract]
@@ -542,6 +544,43 @@ impl TtlVaultContract {
         env.storage()
             .instance()
             .get(&StorageKey::MaxCheckInInterval)
+    }
+
+    /// Sets the minimum deposit amount for all vaults (Issue #2054).
+    ///
+    /// Any `deposit` call with an amount below this threshold is rejected with
+    /// `ContractError::DepositTooSmall`.  Defaults to `DEFAULT_MIN_DEPOSIT_AMOUNT`
+    /// (0.1 XLM = 1_000_000 stroops) when not explicitly configured.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `min_amount` - Minimum deposit in stroops (must be > 0)
+    ///
+    /// # Panics
+    /// * Panics if the caller is not the admin
+    /// * Panics if `min_amount` is not positive
+    pub fn set_min_deposit_amount(env: Env, min_amount: i128) {
+        Self::require_admin(&env);
+        if min_amount <= 0 {
+            panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&StorageKey::MinDepositAmount, &min_amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+    }
+
+    /// Returns the current minimum deposit amount in stroops (Issue #2054).
+    ///
+    /// Returns the admin-configured value when set, otherwise falls back to
+    /// `DEFAULT_MIN_DEPOSIT_AMOUNT`.
+    pub fn get_min_deposit_amount(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get::<StorageKey, i128>(&StorageKey::MinDepositAmount)
+            .unwrap_or(DEFAULT_MIN_DEPOSIT_AMOUNT)
     }
 
     /// Sets the maximum TTL (time-to-live) for vaults in seconds.
@@ -2030,7 +2069,7 @@ impl TtlVaultContract {
             .extend_ttl(&lci_key, VAULT_TTL_THRESHOLD, lci_ttl);
 
         // Issue #478: record history for adaptive interval
-        Self::record_check_in_history(&env, vault_id, now);
+        Self::record_check_in_history(&env, vault_id, now, 0);
         // Issue #479: update streak
         Self::update_check_in_streak(&env, vault_id, &vault, now);
 
@@ -2096,6 +2135,17 @@ impl TtlVaultContract {
         Self::require_initialized(&env);
         if amount <= 0 {
             panic_with_error!(&env, ContractError::InvalidAmount);
+        }
+        // Issue #2054: reject deposits below the configured minimum to prevent
+        // storage bloat from dust entries whose TTL-extension cost exceeds
+        // their economic value.
+        let min_deposit = env
+            .storage()
+            .instance()
+            .get::<StorageKey, i128>(&StorageKey::MinDepositAmount)
+            .unwrap_or(DEFAULT_MIN_DEPOSIT_AMOUNT);
+        if amount < min_deposit {
+            panic_with_error!(&env, ContractError::DepositTooSmall);
         }
         from.require_auth();
         let mut vault = Self::load_vault(&env, vault_id);
@@ -15338,7 +15388,7 @@ impl TtlVaultContract {
             let mut vault = Self::load_vault(&env, vault_id);
             vault.last_check_in = now;
             Self::save_vault(&env, vault_id, &vault);
-            Self::record_check_in_history(&env, vault_id, now);
+            Self::record_check_in_history(&env, vault_id, now, 2);
             Self::update_check_in_streak(&env, vault_id, &vault, now);
             Self::log_passkey_usage(&env, vault_id, &passkey_hash, now);
             env.events().publish((CHECK_IN_TOPIC, vault_id), now);
@@ -15543,6 +15593,27 @@ impl TtlVaultContract {
         result
     }
 
+    /// Returns a paginated list of `CheckInRecord` entries for a vault.
+    ///
+    /// Issue #2052: each record carries `ledger_sequence`, `method`, and
+    /// `timestamp`, giving callers the full audit trail without extra RPC
+    /// lookups. Entries are returned in chronological order (oldest first).
+    ///
+    /// # Arguments
+    /// * `vault_id`  - The vault whose history to query
+    /// * `page`      - Zero-based page number
+    /// * `page_size` - Entries per page; automatically capped at 50
+    ///
+    /// Returns an empty vec when `page` exceeds available entries.
+    pub fn get_check_in_history_query(
+        env: Env,
+        vault_id: u64,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<CheckInRecord> {
+        Self::get_check_in_history_page(env, vault_id, page, page_size)
+    }
+
     /// Returns a paginated page of the deposit history for a vault.
     ///
     /// Holds up to the last `DEPOSIT_HISTORY_CAP` (100) deposits; older entries
@@ -15649,7 +15720,7 @@ impl TtlVaultContract {
         let owner_ids = Self::load_owner_vault_ids(&env, &vault.owner);
         Self::save_owner_vault_ids(&env, &vault.owner, &owner_ids, vault.check_in_interval);
         Self::log_passkey_usage(&env, vault_id, &passkey_hash, now);
-        Self::record_check_in_history(&env, vault_id, now);
+        Self::record_check_in_history(&env, vault_id, now, 0);
         Self::update_check_in_streak(&env, vault_id, &vault, now);
         Self::log_audit_entry(&env, vault_id, "check_in_pow", &caller, "");
         env.storage()
@@ -15965,7 +16036,7 @@ impl TtlVaultContract {
             .extend_ttl(&lci_key, VAULT_TTL_THRESHOLD, ttl);
 
         // Record check-in history and streak
-        Self::record_check_in_history(&env, vault_id, now);
+        Self::record_check_in_history(&env, vault_id, now, 1);
         Self::update_check_in_streak(&env, vault_id, &vault, now);
 
         Self::log_audit_entry(&env, vault_id, "check_in_as_delegate", &caller, "");
@@ -16134,12 +16205,21 @@ impl TtlVaultContract {
 
     // ── Issue #482: check-in history helpers ─────────────────────────────────
 
-    fn record_check_in_history(env: &Env, vault_id: u64, timestamp: u64) {
+    /// Issue #2052: `ledger_sequence` and `method` are now recorded alongside
+    /// the timestamp so callers of `get_check_in_history` receive rich
+    /// `CheckInRecord` entries without extra RPC lookups.
+    ///
+    /// `method` encoding: 0 = owner passkey, 1 = delegate, 2 = batch.
+    fn record_check_in_history(env: &Env, vault_id: u64, timestamp: u64, method: u32) {
         let len_key = StorageKey::CheckInHistoryLen(vault_id);
         let head_key = StorageKey::CheckInHistoryHead(vault_id);
         let mut len: u32 = env.storage().persistent().get(&len_key).unwrap_or(0);
         let mut head: u32 = env.storage().persistent().get(&head_key).unwrap_or(0);
-        let entry = CheckInHistoryEntry { timestamp };
+        let entry = CheckInHistoryEntry {
+            timestamp,
+            ledger_sequence: env.ledger().sequence(),
+            method,
+        };
 
         // Ring buffer capped at 50 entries.
         // While filling (<50): write to slot `len`, then increment len.

@@ -1065,10 +1065,86 @@ impl Db {
         })
     }
 
+    // ── Vault pause/resume history (Issue #2053) ─────────────────────────────
+
+    /// Record a vault pause or resume event emitted on-chain.
+    ///
+    /// `event_type` must be `"pause"` or `"resume"`.
+    pub fn insert_pause_event(
+        &self,
+        vault_id: &str,
+        actor: &str,
+        event_type: &str,
+        reason: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO vault_pause_history (vault_id, actor, event_type, reason, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                vault_id,
+                actor,
+                event_type,
+                reason,
+                timestamp.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return paginated pause/resume events for a vault, newest first.
+    ///
+    /// Returns `(events, total_count)`.
+    pub fn get_pause_history(
+        &self,
+        vault_id: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<crate::models::PauseEvent>, u32), rusqlite::Error> {
+        let page_size = page_size.clamp(1, 100);
+        let offset = page * page_size;
+
+        let conn = self.conn.lock().unwrap();
+
+        let total: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM vault_pause_history WHERE vault_id = ?1",
+            params![vault_id],
+            |row| row.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, vault_id, actor, event_type, reason, timestamp
+               FROM vault_pause_history
+              WHERE vault_id = ?1
+              ORDER BY timestamp DESC
+              LIMIT ?2 OFFSET ?3",
+        )?;
+
+        let events = stmt
+            .query_map(params![vault_id, page_size, offset], |row| {
+                let ts_str: String = row.get(5)?;
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                Ok(crate::models::PauseEvent {
+                    id: row.get(0)?,
+                    vault_id: row.get(1)?,
+                    actor: row.get(2)?,
+                    event_type: row.get(3)?,
+                    reason: row.get(4)?,
+                    timestamp,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok((events, total))
+    }
+
     // ── Refresh token rotation (Issue #1177) ─────────────────────────────────
 
-    pub fn insert_refresh_token(
-        &self,
+    pub fn insert_refresh_token(        &self,
         jti: &str,
         family_id: &str,
         sub: &str,
