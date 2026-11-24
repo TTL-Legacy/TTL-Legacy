@@ -367,12 +367,13 @@ async fn record_timeline_event(db: &Arc<Db>, delivery: &WebhookDelivery, success
         timestamp: Utc::now(),
         description,
         amount: None,
-        metadata: serde_json::json!({
-            "delivery_id": delivery.id,
-            "event_type": delivery.event_type,
-            "endpoint_url": delivery.endpoint_url,
-            "attempt_count": delivery.attempt_count,
-        }),
+        metadata: crate::models::VaultMetadata {
+            delivery_id: Some(delivery.id.clone()),
+            event_type: Some(delivery.event_type.clone()),
+            endpoint_url: Some(delivery.endpoint_url.clone()),
+            attempt_count: Some(delivery.attempt_count),
+            ..Default::default()
+        },
     };
     if let Err(e) = db.insert_timeline_event(&event) {
         tracing::error!(error = %e, "webhook_retry: failed to insert timeline event");

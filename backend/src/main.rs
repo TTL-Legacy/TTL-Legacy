@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
@@ -325,3 +325,25 @@ async fn fetch_contract_version() -> Result<u32, String> {
     let client = reqwest::C
 
 /* … truncated 5813 chars — edit only what you need near the top … */
+
+// ── Application router (#2118) ────────────────────────────────────────────────
+//
+// Composes the four domain sub-routers exported from `routes.rs` into a single
+// `axum::Router`.  Any cross-cutting layers (CORS, auth middleware, rate
+// limiting, request-id, security headers) are applied here so they cover every
+// route uniformly.
+pub fn build_router(state: AppState) -> Router {
+    use crate::routes::{admin_router, auth_router, notifications_router, vault_router};
+
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
+        .route("/health/consensus", get(consensus_health_handler))
+        .route("/metrics", get(metrics_handler))
+        .merge(vault_router())
+        .merge(auth_router())
+        .merge(admin_router())
+        .merge(notifications_router())
+        .layer(build_cors_layer())
+        .with_state(state)
+}
