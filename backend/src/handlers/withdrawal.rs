@@ -191,3 +191,115 @@ pub fn enforce_withdrawal_whitelist(
 
     Ok(())
 }
+
+// --- Issue #2056: Withdrawal rate-limit enforcement --------------------------
+
+/// Enforce the per-vault withdrawal rate limit before a withdrawal proceeds.
+///
+/// Looks up the `WithdrawalRateLimitConfig` for `vault_id`. If no config is
+/// set the call succeeds immediately (no limit configured). If a config exists
+/// the function sums all withdrawals recorded in the rolling window; if adding
+/// `requested_amount` would exceed `max_amount_per_window` it returns
+/// `AppError::WithdrawalRateLimitExceeded`.
+///
+/// On success the caller **must** call `db.record_withdrawal_for_rate_limit`
+/// after the on-chain transaction confirms so the ledger stays accurate.
+pub fn enforce_withdrawal_rate_limit(
+    db: &Db,
+    vault_id: &str,
+    requested_amount: i128,
+) -> Result<(), AppError> {
+    let config = db
+        .get_withdrawal_rate_limit_config(vault_id)
+        .map_err(AppError::from)?;
+
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(()), // no limit configured for this vault
+    };
+
+    if requested_amount <= 0 {
+        return Err(AppError::InvalidInput(
+            "withdrawal amount must be positive".to_string(),
+        ));
+    }
+
+    let already_withdrawn = db
+        .sum_withdrawals_in_window(vault_id, config.window_seconds)
+        .map_err(AppError::from)?;
+
+    let new_total = already_withdrawn.saturating_add(requested_amount);
+    if new_total > config.max_amount_per_window {
+        let remaining = config
+            .max_amount_per_window
+            .saturating_sub(already_withdrawn)
+            .max(0);
+        return Err(AppError::WithdrawalRateLimitExceeded(format!(
+            "request of {} would exceed the per-window cap of {} (already withdrawn {} in the last {} s, {} remaining)",
+            requested_amount,
+            config.max_amount_per_window,
+            already_withdrawn,
+            config.window_seconds,
+            remaining,
+        )));
+    }
+
+    Ok(())
+}
+
+/// `trigger_withdrawal` submits a withdrawal transaction to Soroban after
+/// enforcing the per-vault rate limit and whitelist.
+///
+/// Steps:
+/// 1. Whitelist check (`enforce_withdrawal_whitelist`).
+/// 2. Rate-limit pre-check (`enforce_withdrawal_rate_limit`).
+/// 3. Submit the signed transaction via the Soroban RPC.
+/// 4. Record the amount in the rate-limit ledger so future calls see it.
+#[instrument(skip(db, headers, transaction_xdr), fields(vault_id = %vault_id, address = %address, amount = %amount))]
+pub async fn trigger_withdrawal(
+    db: Arc<Db>,
+    headers: axum::http::HeaderMap,
+    vault_id: &str,
+    address: &str,
+    amount: i128,
+    transaction_xdr: &str,
+    rpc_url: Option<&str>,
+) -> Result<crate::models::TriggerWithdrawalResponse, AppError> {
+    // 1. Whitelist check
+    enforce_withdrawal_whitelist(&db, vault_id, address)?;
+
+    // 2. Rate-limit pre-check
+    enforce_withdrawal_rate_limit(&db, vault_id, amount)?;
+
+    // 3. Submit to Soroban
+    let rpc_url = rpc_url
+        .filter(|url| !url.is_empty())
+        .ok_or(AppError::RpcUnavailable)?;
+    let tx_hash = submit_signed_transaction(rpc_url, transaction_xdr).await?;
+
+    // 4. Record in the rate-limit ledger
+    db.record_withdrawal_for_rate_limit(vault_id, amount)
+        .map_err(AppError::from)?;
+
+    crate::audit::log_state_modification(
+        &db,
+        "trigger_withdrawal",
+        &format!("/api/vaults/{}/withdraw", vault_id),
+        "success",
+        &headers,
+        Some(serde_json::json!({
+            "vault_id": vault_id,
+            "address": address,
+            "amount": amount,
+            "tx_hash": tx_hash,
+        })),
+    );
+
+    Ok(crate::models::TriggerWithdrawalResponse {
+        vault_id: vault_id.to_string(),
+        address: address.to_string(),
+        amount,
+        tx_hash,
+        withdrawn_at: Utc::now(),
+    })
+}

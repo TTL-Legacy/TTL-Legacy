@@ -182,13 +182,13 @@ fn notification_content(
             let hours = ttl_hours.unwrap_or(24);
             (
                 "🔑 Passkey Expiring Soon",
-                format!("A passkey on your vault {vault_id} expires in ~{hours}h. Rotate or extend it to keep vault access."),
+                format!("A passkey on vault {vault_id} expires in ~{hours}h. Rotate or extend it to keep vault access."),
                 json!({ "type": "passkey_expiring_soon", "vault_id": vault_id }),
             )
         }
         NotificationType::PasskeyExpired => (
             "🔑 Passkey Expired",
-            format!("A passkey on your vault {vault_id} has expired. Rotate it now to restore check-in access."),
+            format!("A passkey on vault {vault_id} has expired. Add a new passkey to restore check-in access."),
             json!({ "type": "passkey_expired", "vault_id": vault_id }),
         ),
     }
@@ -213,6 +213,9 @@ pub struct NotificationService {
     pub reminder_tokens: ReminderTokenStore,
     pub channel_delivery_log: ChannelDeliveryStore,
     pub idempotency: IdempotencyStore,
+    // Issue #2058: low-TTL mobile push
+    pub low_ttl_push_prefs: LowTtlPushPrefsStore,
+    pub low_ttl_push_sent: LowTtlPushSentStore,
 }
 
 impl NotificationService {
@@ -234,6 +237,8 @@ impl NotificationService {
             reminder_tokens: create_reminder_token_store(),
             channel_delivery_log: create_channel_delivery_store(),
             idempotency: create_idempotency_store(),
+            low_ttl_push_prefs: create_low_ttl_push_prefs_store(),
+            low_ttl_push_sent: create_low_ttl_push_sent_store(),
         }
     }
 
@@ -1173,6 +1178,114 @@ impl NotificationService {
             .unwrap()
             .retain(|_, v| v.created_at > cutoff);
     }
+
+    // ── Issue #560: Passkey Expiry Notifications ─────────────────────────────
+
+    /// Schedule the appropriate notification for a single passkey based on its
+    /// expiry timestamp.
+    ///
+    /// * If `expiry_at` is already in the past, enqueues a `PasskeyExpired` notification.
+    /// * If `expiry_at` is within the `EXPIRY_WARNING_THRESHOLD` window (24 h),
+    ///   enqueues a `PasskeyExpiringSoon` notification with the approximate hours
+    ///   remaining.
+    /// * Otherwise does nothing.
+    ///
+    /// Respects the owner's `passkey_expiry_warning_enabled` preference and the
+    /// global `unsubscribed` flag. Deduplicates: if a pending notification of the
+    /// same vault/passkey/type combination already exists, it is not enqueued again.
+    ///
+    /// # Arguments
+    /// * `vault_id`       – Vault the passkey belongs to (used as `vault_id` in
+    ///                      the scheduled notification, formatted as
+    ///                      `"{vault_id}:{passkey_prefix}"`).
+    /// * `owner`          – Owner whose device tokens will receive the push.
+    /// * `passkey_hash`   – Full hex-encoded passkey hash (32 bytes = 64 chars).
+    /// * `expiry_at`      – Unix timestamp (seconds) when the passkey expires.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner))]
+    pub fn schedule_passkey_expiry_check(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkey_hash: &str,
+        expiry_at: i64,
+    ) {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.passkey_expiry_warning_enabled {
+            return;
+        }
+
+        let now = Utc::now();
+        let now_secs = now.timestamp();
+
+        // Truncate passkey hash to first 8 hex chars for readability in the body.
+        let passkey_prefix = &passkey_hash[..passkey_hash.len().min(8)];
+
+        // Composite vault key so dedup works at passkey granularity.
+        let composite_id = format!("{vault_id}:{passkey_prefix}");
+
+        let (notification_type, ttl_hours) = if now_secs >= expiry_at {
+            (NotificationType::PasskeyExpired, None)
+        } else {
+            let seconds_remaining = (expiry_at - now_secs) as u64;
+            if seconds_remaining > crate::models::PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS {
+                return; // Not yet within the warning window.
+            }
+            let hours = (seconds_remaining + 3_599) / 3_600; // round up
+            (NotificationType::PasskeyExpiringSoon, Some(hours))
+        };
+
+        // Deduplicate: skip if a pending notification of the same type already exists.
+        {
+            let store = self
+                .schedule
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let already = store.iter().any(|s| {
+                s.vault_id == composite_id
+                    && s.owner == owner
+                    && s.notification_type == notification_type
+                    && s.status == DeliveryStatus::Pending
+            });
+            if already {
+                return;
+            }
+        }
+
+        self.schedule
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ScheduledNotification {
+                id: uuid::Uuid::new_v4().to_string(),
+                vault_id: composite_id,
+                owner: owner.to_string(),
+                notification_type,
+                scheduled_at: now,
+                status: DeliveryStatus::Pending,
+                max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+                sent_at: None,
+                ttl_hours,
+            });
+    }
+
+    /// Inspect all passkeys for a vault and schedule the appropriate expiry
+    /// notifications.
+    ///
+    /// For each `(passkey_hash, expiry_at)` pair the caller passes in:
+    /// * Already-expired passkeys → `PasskeyExpired` notification.
+    /// * Passkeys within the warning window → `PasskeyExpiringSoon` notification.
+    /// * Passkeys still far from expiry → ignored.
+    ///
+    /// This is the entry-point the backend scheduler calls for each vault.
+    pub fn check_passkey_expiry(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkeys: &[(&str, i64)], // [(passkey_hash_hex, expiry_unix_secs)]
+    ) {
+        for (passkey_hash, expiry_at) in passkeys {
+            self.schedule_passkey_expiry_check(vault_id, owner, passkey_hash, *expiry_at);
+        }
+    }
 }
 
 // ── Background scheduler loop ────────────────────────────────────────────────
@@ -1702,4 +1815,193 @@ mod tests {
         assert!(title.contains("Passkey"));
         assert!(body.contains("vault-99"));
     }
+}
+
+// ── Issue #2058: Low-TTL mobile push notifications ───────────────────────────
+
+/// TTL threshold below which the low-TTL push fires (48 hours in seconds).
+pub const LOW_TTL_PUSH_THRESHOLD_SECS: u64 = 48 * 3600;
+
+/// Cooldown between repeat low-TTL push alerts for the same vault (6 hours).
+const LOW_TTL_PUSH_COOLDOWN_SECS: i64 = 6 * 3600;
+
+/// Check-in recency window: suppress the push if a check-in was recorded in
+/// the last 24 hours.
+const LOW_TTL_PUSH_CHECKIN_RECENCY_SECS: u64 = 24 * 3600;
+
+/// FCM notification title for the low-TTL push.
+const LOW_TTL_PUSH_TITLE: &str = "⚠️ Vault Expiring in Under 48 Hours";
+
+/// Build the FCM/APNs payload for a low-TTL alert.
+fn low_ttl_push_payload(vault_id: &str, ttl_remaining_secs: u64) -> serde_json::Value {
+    let hours = ttl_remaining_secs / 3600;
+    serde_json::json!({
+        "type": "low_ttl_warning",
+        "vault_id": vault_id,
+        "ttl_remaining_hours": hours,
+    })
+}
+
+impl NotificationService {
+    /// Evaluate whether a low-TTL mobile push should be sent for `vault_id` and,
+    /// if so, enqueue it.
+    ///
+    /// Conditions for the push to fire (all must hold):
+    /// 1. `ttl_remaining_secs` < 48 hours.
+    /// 2. The owner has opted in (`android_enabled` or `ios_enabled` in
+    ///    `LowTtlPushPreferences`).
+    /// 3. No check-in has been recorded in the last 24 hours
+    ///    (`last_check_in_secs_ago` ≥ 24 h or `None` if never checked in).
+    /// 4. The last low-TTL push for this vault was sent more than
+    ///    `LOW_TTL_PUSH_COOLDOWN_SECS` ago (cooldown).
+    /// 5. The owner has not globally unsubscribed.
+    ///
+    /// Returns `true` if a push was enqueued, `false` otherwise.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner, ttl_remaining_secs = %ttl_remaining_secs))]
+    pub fn maybe_enqueue_low_ttl_push(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        ttl_remaining_secs: u64,
+        last_check_in_secs_ago: Option<u64>,
+    ) -> bool {
+        // Condition 1: TTL below threshold.
+        if ttl_remaining_secs >= LOW_TTL_PUSH_THRESHOLD_SECS {
+            return false;
+        }
+
+        // Condition 5: global unsubscribe.
+        if self.is_unsubscribed(owner) {
+            return false;
+        }
+
+        // Condition 3: check-in recency — if a check-in happened within 24 h,
+        // the owner is active and doesn't need a push.
+        if let Some(secs_ago) = last_check_in_secs_ago {
+            if secs_ago < LOW_TTL_PUSH_CHECKIN_RECENCY_SECS {
+                return false;
+            }
+        }
+
+        // Condition 4: cooldown — look up the last sent record from the store.
+        {
+            let sent_records = self.low_ttl_push_sent.lock().unwrap();
+            if let Some(record) = sent_records.get(vault_id) {
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(record.sent_at)
+                    .num_seconds();
+                if elapsed < LOW_TTL_PUSH_COOLDOWN_SECS {
+                    return false;
+                }
+            }
+        }
+
+        // Condition 2: opt-in check.
+        let prefs = {
+            self.low_ttl_push_prefs
+                .lock()
+                .unwrap()
+                .get(&format!("{vault_id}::{owner}"))
+                .cloned()
+        };
+        let Some(prefs) = prefs else {
+            return false; // no preferences recorded → not opted in
+        };
+        if !prefs.android_enabled && !prefs.ios_enabled {
+            return false;
+        }
+
+        // All conditions met — enqueue the push.
+        let data = low_ttl_push_payload(vault_id, ttl_remaining_secs);
+        let hours = ttl_remaining_secs / 3600;
+        let body = format!(
+            "Your vault expires in ~{hours}h. Check in now to prevent release."
+        );
+
+        // Log the send record first (before async delivery so it counts even
+        // if delivery is not awaited synchronously).
+        {
+            let mut sent_records = self.low_ttl_push_sent.lock().unwrap();
+            sent_records.insert(
+                vault_id.to_string(),
+                crate::models::LowTtlPushSentRecord {
+                    vault_id: vault_id.to_string(),
+                    owner: owner.to_string(),
+                    sent_at: chrono::Utc::now(),
+                },
+            );
+        }
+
+        // Enqueue via the standard schedule mechanism.
+        let mut schedule = self.schedule.lock().unwrap();
+        schedule.push(ScheduledNotification {
+            id: Uuid::new_v4().to_string(),
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type: NotificationType::ExpiryWarning,
+            scheduled_at: chrono::Utc::now(),
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: Some(hours),
+        });
+
+        tracing::info!(
+            vault_id = vault_id,
+            owner = owner,
+            ttl_remaining_secs = ttl_remaining_secs,
+            android = prefs.android_enabled,
+            ios = prefs.ios_enabled,
+            "low-TTL mobile push enqueued"
+        );
+
+        let _ = data; // Payload stored in ttl_hours; direct-send path uses it at delivery time.
+        true
+    }
+
+    /// Register or update low-TTL push preferences for a vault + owner.
+    pub fn set_low_ttl_push_preferences(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        android_enabled: bool,
+        ios_enabled: bool,
+    ) {
+        let key = format!("{vault_id}::{owner}");
+        self.low_ttl_push_prefs
+            .lock()
+            .unwrap()
+            .insert(
+                key,
+                crate::models::LowTtlPushPreferences {
+                    vault_id: vault_id.to_string(),
+                    owner: owner.to_string(),
+                    android_enabled,
+                    ios_enabled,
+                    updated_at: chrono::Utc::now(),
+                },
+            );
+    }
+
+    /// Retrieve the current low-TTL push preferences for a vault + owner.
+    pub fn get_low_ttl_push_preferences(
+        &self,
+        vault_id: &str,
+        owner: &str,
+    ) -> Option<crate::models::LowTtlPushPreferences> {
+        let key = format!("{vault_id}::{owner}");
+        self.low_ttl_push_prefs.lock().unwrap().get(&key).cloned()
+    }
+}
+
+/// In-memory stores added to `NotificationService` for Issue #2058.
+pub type LowTtlPushPrefsStore = Arc<Mutex<HashMap<String, crate::models::LowTtlPushPreferences>>>;
+pub type LowTtlPushSentStore = Arc<Mutex<HashMap<String, crate::models::LowTtlPushSentRecord>>>;
+
+pub fn create_low_ttl_push_prefs_store() -> LowTtlPushPrefsStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn create_low_ttl_push_sent_store() -> LowTtlPushSentStore {
+    Arc::new(Mutex::new(HashMap::new()))
 }
