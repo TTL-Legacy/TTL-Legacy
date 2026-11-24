@@ -70,6 +70,8 @@ pub enum AppError {
     SponsorInsufficientBalance(String),
     #[error("internal error: {0}")]
     Internal(String),
+    #[error("consensus data missing")]
+    ConsensusDataMissing,
 }
 
 impl IntoResponse for AppError {
@@ -89,6 +91,9 @@ impl IntoResponse for AppError {
                 (StatusCode::PAYMENT_REQUIRED, "sponsor_insufficient_balance")
             }
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            AppError::ConsensusDataMissing => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "consensus_data_missing")
+            }
         };
         ApiError::new(status, code, self.to_string()).into_response()
     }

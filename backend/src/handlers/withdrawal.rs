@@ -21,7 +21,7 @@ pub async fn claim_vesting_bonus_handler(
     req: crate::models::ClaimBonusRequest,
     rpc_url: Option<&str>,
 ) -> Result<crate::models::ClaimBonusResponse, AppError> {
-    let vault = db.get_vault(vault_id).ok_or(AppError::NotFound)?;
+    let vault = db.get_vault(vault_id, MissingVaultBehavior::ReturnError)?;
 
     if vault.beneficiary != req.beneficiary {
         return Err(AppError::Forbidden(
@@ -144,9 +144,7 @@ pub fn get_vesting_bonus_handler(
     db: Arc<Db>,
     vault_id: &str,
 ) -> Result<crate::models::VestingBonusResponse, AppError> {
-    let _vault = db
-        .get_vault(vault_id)
-        .ok_or(AppError::NotFound)?;
+    let _vault = db.get_vault(vault_id, MissingVaultBehavior::ReturnError)?;
 
     let bonus_config = db
         .get_vesting_bonus(vault_id)

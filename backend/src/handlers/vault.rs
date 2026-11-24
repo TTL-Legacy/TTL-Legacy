@@ -31,11 +31,7 @@ pub fn export_vaults_handler(
     to: Option<chrono::DateTime<chrono::Utc>>,
     user_id: Option<&str>,
 ) -> Result<String, String> {
-    let vaults = store.lock().unwrap();
-    let vault = vaults
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::ReturnError)?;
 
     if let Some(uid) = user_id {
         if vault.owner != uid {
@@ -216,10 +212,7 @@ pub fn get_vault_detail_analytics_handler(
     event_store: &EventStore,
     vault_id: &str,
 ) -> Result<VaultDetailAnalytics, String> {
-    let vaults = store.lock().unwrap();
-    let vault = vaults
-        .get(vault_id)
-        .ok_or_else(|| "Vault not found".to_string())?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::ReturnError)?;
 
     let history = get_vault_history(event_store, vault_id);
 
@@ -343,12 +336,7 @@ pub fn backup_vault_handler(
     backup_store: &BackupStore,
     vault_id: &str,
 ) -> Result<VaultBackup, String> {
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::ReturnError)?;
 
     let payload_json = serde_json::to_string(&vault).map_err(|e| e.to_string())?;
     // base64-encode as a stand-in for encryption
@@ -511,12 +499,7 @@ pub fn get_vault_health_handler(
         }
     }
 
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::ReturnError)?;
 
     // ── TTL buffer factor (0-30) ──────────────────────────────────────────
     let ttl_score: u8 = match vault.ttl_remaining {
@@ -642,11 +625,10 @@ pub fn bulk_vault_summary_handler(
         ));
     }
 
-    let vaults = store.lock().unwrap();
     let summaries = request
         .vault_ids
         .iter()
-        .map(|id| match vaults.get(id) {
+        .map(|id| match get_vault(store, id, MissingVaultBehavior::ReturnOption) {
             Some(v) => VaultSummaryEntry {
                 vault_id: id.clone(),
                 status: Some(v.status.clone()),

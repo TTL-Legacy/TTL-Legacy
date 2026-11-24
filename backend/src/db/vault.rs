@@ -226,6 +226,15 @@ pub fn revoke_share_token(store: &ShareTokenStore, token: &str) -> Option<ShareT
     }
 }
 
+/// Controls how a missing vault is reported by [`Db::get_vault`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingVaultBehavior {
+    /// Return `Ok(None)` when the vault does not exist.
+    ReturnOption,
+    /// Return `Err(AppError::NotFound)` when the vault does not exist.
+    ReturnError,
+}
+
 impl Db {
     /// Insert or replace a vault in the in-memory store.
     pub fn insert_vault(&self, vault: crate::models::Vault) {
@@ -236,8 +245,21 @@ impl Db {
     }
 
     /// Retrieve a vault from the in-memory store by string ID.
-    pub fn get_vault(&self, vault_id: &str) -> Option<crate::models::Vault> {
-        self.vault_store.lock().unwrap().get(vault_id).cloned()
+    ///
+    /// The `missing` parameter controls the behavior when the vault does not
+    /// exist: `MissingVaultBehavior::ReturnOption` yields `Ok(None)`, while
+    /// `MissingVaultBehavior::ReturnError` yields `Err(AppError::NotFound)`.
+    pub fn get_vault(
+        &self,
+        vault_id: &str,
+        missing: MissingVaultBehavior,
+    ) -> Result<Option<crate::models::Vault>, AppError> {
+        let vault = self.vault_store.lock().unwrap().get(vault_id).cloned();
+        match (vault, missing) {
+            (Some(v), _) => Ok(Some(v)),
+            (None, MissingVaultBehavior::ReturnOption) => Ok(None),
+            (None, MissingVaultBehavior::ReturnError) => Err(AppError::NotFound),
+        }
     }
 }
 

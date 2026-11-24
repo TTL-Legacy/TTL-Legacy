@@ -19,11 +19,7 @@ pub fn set_notification_preferences_handler(
     }
 
     // Verify vault exists
-    store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .ok_or_else(|| "Vault not found".to_string())?;
+    get_vault(store, vault_id, MissingVaultBehavior::ReturnError)?;
 
     // Map HTTP channels into legacy boolean flags.
     let preferred = request.channels.first().cloned();
