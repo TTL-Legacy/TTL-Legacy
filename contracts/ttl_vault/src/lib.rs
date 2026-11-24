@@ -82,6 +82,8 @@ mod vault_archiving_tests;
 mod beneficiary_owner_check_tests;
 #[cfg(test)]
 mod storage_key_collision_tests;
+#[cfg(test)]
+mod batch_check_in_stress_tests;
 // Issue #1263: structured VaultNotFound error on check-in for non-existent vault
 #[cfg(test)]
 mod batch_withdrawal_tests;
@@ -104,6 +106,16 @@ mod beneficiary_conflict_resolution_tests;
 // validation, vesting property tests, withdrawal whitelist expiry
 #[cfg(test)]
 mod issue_1525_1528_tests;
+
+// Issue #2074: beneficiary_swap on-chain event log
+#[cfg(test)]
+mod beneficiary_swap_event_tests;
+
+// Issue #2075: clone_vault field-propagation property tests
+#[cfg(test)]
+mod clone_vault_tests;
+#[cfg(test)]
+mod clone_vault_proptests;
 
 /// Minimum TTL (in ledgers) before a persistent entry is eligible for extension.
 /// At ~5 s/ledger this is ~83 minutes.
@@ -4177,6 +4189,86 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((SET_BENEFICIARIES_TOPIC, vault_id), beneficiaries);
+        Ok(())
+    }
+
+    /// Atomically swaps the BPS allocations of two beneficiaries in a vault.
+    ///
+    /// After the call, `address_a` holds `address_b`'s previous allocation and
+    /// vice-versa.  The total BPS sum is preserved.  Downstream services should
+    /// listen for [`BENEFICIARY_SWAPPED_TOPIC`] to update cached beneficiary
+    /// indexes without re-reading the vault.
+    ///
+    /// # Arguments
+    /// * `vault_id`   - Target vault (must be Locked, owned by `caller`)
+    /// * `caller`     - Must be the vault owner (requires auth)
+    /// * `address_a`  - First beneficiary in the swap pair
+    /// * `address_b`  - Second beneficiary in the swap pair
+    ///
+    /// # Errors
+    /// * [`ContractError::NotOwner`]           - `caller` is not the vault owner
+    /// * [`ContractError::VaultNotFound`]      - vault does not exist
+    /// * [`ContractError::InvalidBeneficiary`] - either address is not a registered beneficiary
+    /// * [`ContractError::AlreadyReleased`]    - vault is not Locked
+    pub fn swap_allocations(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address_a: Address,
+        address_b: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let mut vault = Self::load_vault(&env, vault_id);
+
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+
+        // Locate both entries — both must be present.
+        let mut idx_a: Option<u32> = None;
+        let mut idx_b: Option<u32> = None;
+        for (i, entry) in vault.beneficiaries.iter().enumerate() {
+            if entry.address == address_a {
+                idx_a = Some(i as u32);
+            }
+            if entry.address == address_b {
+                idx_b = Some(i as u32);
+            }
+        }
+        let idx_a = idx_a.ok_or(ContractError::InvalidBeneficiary)?;
+        let idx_b = idx_b.ok_or(ContractError::InvalidBeneficiary)?;
+
+        let bps_a = vault.beneficiaries.get(idx_a).unwrap().bps;
+        let bps_b = vault.beneficiaries.get(idx_b).unwrap().bps;
+
+        // Perform the swap.
+        let mut entry_a = vault.beneficiaries.get(idx_a).unwrap();
+        let mut entry_b = vault.beneficiaries.get(idx_b).unwrap();
+        entry_a.bps = bps_b;
+        entry_b.bps = bps_a;
+        vault.beneficiaries.set(idx_a, entry_a);
+        vault.beneficiaries.set(idx_b, entry_b);
+
+        Self::save_vault(&env, vault_id, &vault);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+
+        env.events().publish(
+            (BENEFICIARY_SWAPPED_TOPIC,),
+            BeneficiarySwappedEvent {
+                vault_id,
+                old_address: address_a,
+                new_address: address_b,
+                old_bps: bps_a,
+                new_bps: bps_b,
+            },
+        );
+
         Ok(())
     }
 
@@ -20037,6 +20129,632 @@ impl TtlVaultContract {
         );
 
         vault_id
+    }
+
+    // ── Issue #2060: BeneficiaryGroupConfig ──────────────────────────────────
+
+    /// Creates or replaces a named beneficiary group for a vault.
+    ///
+    /// The group is assigned `group_bps` basis points from the vault's total
+    /// allocation. At release time the contract distributes that share to all
+    /// members either equally (all weights zero) or proportionally to
+    /// `weight`.  Existing groups with the same `group_name` are overwritten.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::AlreadyReleased` – vault is not in `Locked` status.
+    /// * `ContractError::InvalidBps` – `group_bps` is 0 or the new allocation
+    ///   would push the vault's total above 10 000 BPS.
+    /// * `ContractError::InvalidBeneficiary` – `members` is empty.
+    pub fn set_beneficiary_group(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        group_name: String,
+        group_bps: u32,
+        members: Vec<BeneficiaryGroupMember>,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if group_bps == 0 || group_bps as i128 > BASIS_POINTS_100_PERCENT {
+            return Err(ContractError::InvalidBps);
+        }
+        if members.is_empty() {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        // Track existing group BPS allocation so we can allow updates.
+        let group_key = StorageKey::BeneficiaryGroup(vault_id, group_name.clone());
+        let existing_group_bps: u32 = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, BeneficiaryGroupConfig>(&group_key)
+            .map(|g| g.group_bps)
+            .unwrap_or(0);
+
+        // Sum all flat beneficiary BPS plus all *other* groups' BPS.
+        let flat_bps: u32 = vault.beneficiaries.iter().map(|e| e.bps).sum();
+        let names_key = StorageKey::BeneficiaryGroupNames(vault_id);
+        let group_names: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&names_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let other_groups_bps: u32 = group_names
+            .iter()
+            .filter(|n| *n != group_name)
+            .filter_map(|n| {
+                env.storage()
+                    .persistent()
+                    .get::<StorageKey, BeneficiaryGroupConfig>(
+                        &StorageKey::BeneficiaryGroup(vault_id, n.clone()),
+                    )
+            })
+            .map(|g| g.group_bps)
+            .sum();
+
+        let total_after = flat_bps as i128
+            + other_groups_bps as i128
+            + group_bps as i128;
+        if total_after > BASIS_POINTS_100_PERCENT {
+            return Err(ContractError::InvalidBps);
+        }
+
+        let _ = existing_group_bps; // acknowledged; guard above is sufficient
+
+        let config = BeneficiaryGroupConfig {
+            group_name: group_name.clone(),
+            group_bps,
+            members,
+        };
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&group_key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&group_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Update the group-name index if this is a new group.
+        let mut updated_names = group_names;
+        if !updated_names.iter().any(|n| n == group_name) {
+            updated_names.push_back(group_name.clone());
+            env.storage()
+                .persistent()
+                .set(&names_key, &updated_names);
+            env.storage()
+                .persistent()
+                .extend_ttl(&names_key, VAULT_TTL_THRESHOLD, ttl);
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((BENEFICIARY_GROUP_SET_TOPIC, vault_id), (group_name, group_bps));
+        Ok(())
+    }
+
+    /// Removes a named beneficiary group, freeing its BPS allocation.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::InvalidBeneficiary` – group not found.
+    pub fn remove_beneficiary_group(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        group_name: String,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let group_key = StorageKey::BeneficiaryGroup(vault_id, group_name.clone());
+        if !env.storage().persistent().has(&group_key) {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        env.storage().persistent().remove(&group_key);
+
+        // Remove from name index.
+        let names_key = StorageKey::BeneficiaryGroupNames(vault_id);
+        let group_names: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&names_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut updated = Vec::new(&env);
+        for n in group_names.iter() {
+            if n != group_name {
+                updated.push_back(n);
+            }
+        }
+        env.storage().persistent().set(&names_key, &updated);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((BENEFICIARY_GROUP_REMOVED_TOPIC, vault_id), group_name);
+        Ok(())
+    }
+
+    /// Returns the `BeneficiaryGroupConfig` for a vault group, or `None`.
+    pub fn get_beneficiary_group(
+        env: Env,
+        vault_id: u64,
+        group_name: String,
+    ) -> Option<BeneficiaryGroupConfig> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::BeneficiaryGroup(vault_id, group_name))
+    }
+
+    /// Returns all group names registered for a vault.
+    pub fn list_beneficiary_groups(env: Env, vault_id: u64) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::BeneficiaryGroupNames(vault_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Adds a single member to an existing beneficiary group.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::InvalidBeneficiary` – group not found.
+    /// * `ContractError::InvalidBeneficiary` – member already present in group.
+    pub fn add_beneficiary_group_member(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        group_name: String,
+        member: BeneficiaryGroupMember,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let group_key = StorageKey::BeneficiaryGroup(vault_id, group_name.clone());
+        let mut config: BeneficiaryGroupConfig = env
+            .storage()
+            .persistent()
+            .get(&group_key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+
+        if config.members.iter().any(|m| m.address == member.address) {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        let member_addr = member.address.clone();
+        config.members.push_back(member);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&group_key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&group_key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (BENEFICIARY_GROUP_MEMBER_ADDED_TOPIC, vault_id),
+            (group_name, member_addr),
+        );
+        Ok(())
+    }
+
+    /// Removes a single member from an existing beneficiary group.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::InvalidBeneficiary` – group or member not found.
+    pub fn remove_beneficiary_group_member(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        group_name: String,
+        member_address: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let group_key = StorageKey::BeneficiaryGroup(vault_id, group_name.clone());
+        let mut config: BeneficiaryGroupConfig = env
+            .storage()
+            .persistent()
+            .get(&group_key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+
+        let mut found = false;
+        let mut new_members: Vec<BeneficiaryGroupMember> = Vec::new(&env);
+        for m in config.members.iter() {
+            if m.address == member_address {
+                found = true;
+            } else {
+                new_members.push_back(m);
+            }
+        }
+        if !found {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        config.members = new_members;
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&group_key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&group_key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (BENEFICIARY_GROUP_MEMBER_REMOVED_TOPIC, vault_id),
+            (group_name, member_address),
+        );
+        Ok(())
+    }
+
+    // ── Issue #2061: pause_vesting / resume_vesting ───────────────────────────
+
+    /// Pauses the primary vesting schedule for a vault without discarding
+    /// already-accrued installments.
+    ///
+    /// While paused, the cliff and end counters are frozen: the schedule's
+    /// effective `start_time` will be shifted forward on resumption so that the
+    /// remaining installments play out from the resume point.
+    ///
+    /// Only the vault owner can pause vesting.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::VestingNotFound` – no primary vesting schedule exists.
+    /// * `ContractError::InvalidConfig` – vesting is already paused.
+    pub fn pause_vesting(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        // Ensure the primary schedule exists.
+        let schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::VestingSchedule(vault_id, 0))
+            .ok_or(ContractError::VestingNotFound)?;
+
+        let pause_key = StorageKey::VestingPause(vault_id);
+        // Check whether already paused.
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VestingPauseConfig>(&pause_key)
+        {
+            if existing.is_paused {
+                return Err(ContractError::InvalidConfig);
+            }
+        }
+
+        // Calculate installments elapsed so far.
+        let now = env.ledger().timestamp();
+        let accrued = if now >= schedule.start_time + schedule.cliff_period {
+            let elapsed = now.saturating_sub(schedule.start_time);
+            let installments = if schedule.interval > 0 {
+                elapsed / schedule.interval
+            } else {
+                schedule.num_installments as u64
+            };
+            (installments as u32).min(schedule.num_installments)
+        } else {
+            0
+        };
+
+        let config = VestingPauseConfig {
+            is_paused: true,
+            paused_at: now,
+            total_paused_duration: env
+                .storage()
+                .persistent()
+                .get::<StorageKey, VestingPauseConfig>(&pause_key)
+                .map(|p| p.total_paused_duration)
+                .unwrap_or(0),
+            accrued_at_pause: accrued,
+        };
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&pause_key, &config);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pause_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events()
+            .publish((VESTING_PAUSED_TOPIC, vault_id), (vault_id, now, accrued));
+        Ok(())
+    }
+
+    /// Resumes a previously paused vesting schedule.
+    ///
+    /// The schedule's `start_time` is shifted forward by the duration spent
+    /// paused so that the remaining installments are measured from the resume
+    /// point, preserving the accrued amount.
+    ///
+    /// Only the vault owner can resume vesting.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::VestingNotFound` – no primary vesting schedule exists.
+    /// * `ContractError::InvalidConfig` – vesting is not currently paused.
+    pub fn resume_vesting(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let pause_key = StorageKey::VestingPause(vault_id);
+        let mut pause_cfg: VestingPauseConfig = env
+            .storage()
+            .persistent()
+            .get(&pause_key)
+            .ok_or(ContractError::InvalidConfig)?;
+        if !pause_cfg.is_paused {
+            return Err(ContractError::InvalidConfig);
+        }
+
+        let now = env.ledger().timestamp();
+        let paused_duration = now.saturating_sub(pause_cfg.paused_at);
+
+        // Shift the schedule's start_time forward so remaining installments
+        // play out from the current wall time.
+        let sched_key = StorageKey::VestingSchedule(vault_id, 0);
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .persistent()
+            .get(&sched_key)
+            .ok_or(ContractError::VestingNotFound)?;
+        schedule.start_time = schedule.start_time.saturating_add(paused_duration);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&sched_key, &schedule);
+        env.storage()
+            .persistent()
+            .extend_ttl(&sched_key, VAULT_TTL_THRESHOLD, ttl);
+
+        // Update pause record.
+        pause_cfg.total_paused_duration =
+            pause_cfg.total_paused_duration.saturating_add(paused_duration);
+        pause_cfg.is_paused = false;
+        pause_cfg.paused_at = 0;
+        env.storage().persistent().set(&pause_key, &pause_cfg);
+        env.storage()
+            .persistent()
+            .extend_ttl(&pause_key, VAULT_TTL_THRESHOLD, ttl);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (VESTING_RESUMED_TOPIC, vault_id),
+            (vault_id, now, paused_duration),
+        );
+        Ok(())
+    }
+
+    /// Returns the `VestingPauseConfig` for a vault, if any.
+    pub fn get_vesting_pause_config(env: Env, vault_id: u64) -> Option<VestingPauseConfig> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::VestingPause(vault_id))
+    }
+
+    // ── Issue #2062: versioned event wrapper ──────────────────────────────────
+
+    /// Builds a `VersionedEvent` by serialising `payload_bytes` with the
+    /// current contract version.
+    ///
+    /// Callers that need a versioned wrapper should call this helper and then
+    /// publish the returned struct as the event payload.
+    pub fn build_versioned_event(env: Env, payload_bytes: Bytes) -> VersionedEvent {
+        let version = Self::get_contract_version(env.clone());
+        VersionedEvent {
+            contract_version: version,
+            payload: payload_bytes,
+        }
+    }
+
+    // ── Issue #2063: beneficiary confirmation deadline ─────────────────────────
+
+    /// Sets (or updates) a confirmation deadline for a pending beneficiary slot.
+    ///
+    /// After `deadline_days` days the slot can be auto-declined by any caller
+    /// via `expire_beneficiary_confirmation`, which returns the BPS to the
+    /// vault's unallocated pool.  Passing `deadline_days = 0` removes any
+    /// existing deadline without auto-declining the slot.
+    ///
+    /// Only the vault owner may set a deadline.
+    ///
+    /// # Errors
+    /// * `ContractError::NotOwner` – caller is not the vault owner.
+    /// * `ContractError::InvalidBeneficiary` – `beneficiary` is not in the
+    ///   vault's beneficiaries list.
+    pub fn set_beneficiary_confirmation_deadline(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        beneficiary: Address,
+        deadline_days: u32,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        // Find the beneficiary's BPS in the vault list.
+        let bps = vault
+            .beneficiaries
+            .iter()
+            .find(|e| e.address == beneficiary)
+            .map(|e| e.bps)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+
+        let dl_key =
+            StorageKey::BeneficiaryConfirmationDeadline(vault_id, beneficiary.clone());
+
+        if deadline_days == 0 {
+            // Remove any existing deadline without declining.
+            env.storage().persistent().remove(&dl_key);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            return Ok(());
+        }
+
+        let seconds_per_day: u64 = 86_400;
+        let deadline_timestamp = env
+            .ledger()
+            .timestamp()
+            .saturating_add(deadline_days as u64 * seconds_per_day);
+
+        let record = BeneficiaryConfirmationDeadline {
+            beneficiary: beneficiary.clone(),
+            deadline_timestamp,
+            bps,
+            expired: false,
+        };
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&dl_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dl_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (BENEFICIARY_DEADLINE_SET_TOPIC, vault_id),
+            (beneficiary, deadline_timestamp, deadline_days),
+        );
+        Ok(())
+    }
+
+    /// Enforces a beneficiary confirmation deadline.
+    ///
+    /// If `now > deadline_timestamp` and the beneficiary has not yet accepted
+    /// the slot, the beneficiary is auto-declined and the BPS is removed from
+    /// the vault's beneficiaries list (returned to unallocated).
+    ///
+    /// Any caller may invoke this function; it is designed to be called by
+    /// an off-chain scheduler or any third party once the deadline has passed.
+    ///
+    /// # Errors
+    /// * `ContractError::InvalidBeneficiary` – no deadline record found.
+    /// * `ContractError::InvalidDeadline` – deadline has not yet passed.
+    /// * `ContractError::InvalidConfig` – slot was already expired.
+    pub fn expire_beneficiary_confirmation(
+        env: Env,
+        vault_id: u64,
+        beneficiary: Address,
+    ) -> Result<(), ContractError> {
+        let dl_key =
+            StorageKey::BeneficiaryConfirmationDeadline(vault_id, beneficiary.clone());
+        let mut record: BeneficiaryConfirmationDeadline = env
+            .storage()
+            .persistent()
+            .get(&dl_key)
+            .ok_or(ContractError::InvalidBeneficiary)?;
+
+        if record.expired {
+            return Err(ContractError::InvalidConfig);
+        }
+
+        let now = env.ledger().timestamp();
+        if now <= record.deadline_timestamp {
+            return Err(ContractError::InvalidDeadline);
+        }
+
+        // Check whether the beneficiary already accepted — if so, skip decline.
+        let ben_status_key =
+            StorageKey::BeneficiaryStatusEntry(vault_id, beneficiary.clone());
+        let status: BeneficiaryStatus = env
+            .storage()
+            .persistent()
+            .get(&ben_status_key)
+            .unwrap_or(BeneficiaryStatus::Pending);
+
+        if status == BeneficiaryStatus::Accepted {
+            // Already confirmed; just mark the deadline record as expired.
+            record.expired = true;
+            env.storage().persistent().set(&dl_key, &record);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+            return Ok(());
+        }
+
+        // Auto-decline: remove from vault beneficiaries list.
+        let mut vault = Self::load_vault(&env, vault_id);
+        let mut new_beneficiaries: Vec<BeneficiaryEntry> = Vec::new(&env);
+        for entry in vault.beneficiaries.iter() {
+            if entry.address != beneficiary {
+                new_beneficiaries.push_back(entry);
+            }
+        }
+        vault.beneficiaries = new_beneficiaries;
+        Self::save_vault(&env, vault_id, &vault);
+
+        // Record the declined status.
+        env.storage()
+            .persistent()
+            .set(&ben_status_key, &BeneficiaryStatus::Declined);
+        env.storage().persistent().extend_ttl(
+            &ben_status_key,
+            VAULT_TTL_THRESHOLD,
+            VAULT_TTL_LEDGERS,
+        );
+
+        record.expired = true;
+        env.storage().persistent().set(&dl_key, &record);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (BENEFICIARY_DEADLINE_EXPIRED_TOPIC, vault_id),
+            (beneficiary, now, record.bps),
+        );
+        Ok(())
+    }
+
+    /// Returns the `BeneficiaryConfirmationDeadline` record for a vault +
+    /// beneficiary pair, or `None` if no deadline has been set.
+    pub fn get_beneficiary_confirmation_deadline(
+        env: Env,
+        vault_id: u64,
+        beneficiary: Address,
+    ) -> Option<BeneficiaryConfirmationDeadline> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::BeneficiaryConfirmationDeadline(
+                vault_id, beneficiary,
+            ))
     }
 }
 

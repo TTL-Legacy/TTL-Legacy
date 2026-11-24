@@ -20,10 +20,10 @@ function getStatus(remaining: number, warning: number, critical: number): Countd
 }
 
 const STATUS_COLORS: Record<CountdownStatus, string> = {
-  ok: '#2e7d32',
-  warning: '#ed6c02',
-  critical: '#d32f2f',
-  expired: '#757575',
+  ok: 'var(--color-success)',
+  warning: 'var(--color-warn)',
+  critical: 'var(--color-danger)',
+  expired: 'var(--color-text-muted)',
 };
 
 function formatDuration(seconds: number): string {

@@ -9,7 +9,7 @@
 /// Configuration (environment):
 ///   `TTL_ARCHIVAL_WARNING_THRESHOLD_SECS` — warn at or below this TTL (default 7 days)
 ///   `TTL_WATCH_POLL_INTERVAL_SECS`        — polling interval (default 5 minutes)
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -223,6 +223,132 @@ impl CountdownWatcher {
     }
 }
 
+/// Issue #2068: watches check-in delegation state transitions and writes
+/// grant/revoke events to `check_in_delegation_audit_log`.
+///
+/// Grant/revoke handlers only update the current-state row (`check_in_delegations`);
+/// this watcher diffs that row against the last-observed delegate per vault and
+/// appends an audit-log entry for every transition (grant, revoke, or a
+/// rotation = revoke + grant). The audit trail is then exposed via
+/// `GET /vaults/{id}/delegation-audit`.
+#[derive(Default)]
+pub struct CheckInDelegationWatcher {
+    /// Last-observed delegate per vault (`None` = no delegation observed yet).
+    last_seen: Mutex<HashMap<String, Option<String>>>,
+}
+
+impl CheckInDelegationWatcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Poll current delegation state once and append an audit entry for every
+    /// observed grant/revoke transition. Returns the number of entries written.
+    #[tracing::instrument(skip_all)]
+    pub fn poll_once(&self, db: &Db) -> usize {
+        let current = match db.list_check_in_delegations() {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "delegation audit poll failed to read state");
+                return 0;
+            }
+        };
+
+        let mut last_seen = self
+            .last_seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        // Drop state for vaults that no longer have a delegation row.
+        let current_ids: HashSet<&String> = current.iter().map(|(id, _, _)| id).collect();
+        last_seen.retain(|id, _| current_ids.contains(id));
+
+        let mut written = 0;
+        for (vault_id, owner, delegate) in &current {
+            let prev = last_seen.get(vault_id).cloned().flatten();
+            match (prev.as_deref(), delegate.as_deref()) {
+                (None, Some(d)) => {
+                    let _ = db.insert_check_in_delegation_audit(
+                        vault_id,
+                        crate::models::CheckInDelegationEventKind::Grant,
+                        Some(d),
+                        owner,
+                        Some(serde_json::json!({ "delegate": d })),
+                    );
+                    last_seen.insert(vault_id.clone(), delegate.clone());
+                    written += 1;
+                    tracing::info!(vault_id, delegate = d, "check-in delegation granted");
+                }
+                (Some(prev_d), None) => {
+                    let _ = db.insert_check_in_delegation_audit(
+                        vault_id,
+                        crate::models::CheckInDelegationEventKind::Revoke,
+                        Some(prev_d),
+                        owner,
+                        Some(serde_json::json!({})),
+                    );
+                    last_seen.insert(vault_id.clone(), None);
+                    written += 1;
+                    tracing::info!(vault_id, "check-in delegation revoked");
+                }
+                (Some(prev_d), Some(d)) if prev_d != d => {
+                    // Delegate rotation = revoke the old, grant the new.
+                    let _ = db.insert_check_in_delegation_audit(
+                        vault_id,
+                        crate::models::CheckInDelegationEventKind::Revoke,
+                        Some(prev_d),
+                        owner,
+                        Some(serde_json::json!({ "replaced_by": d })),
+                    );
+                    let _ = db.insert_check_in_delegation_audit(
+                        vault_id,
+                        crate::models::CheckInDelegationEventKind::Grant,
+                        Some(d),
+                        owner,
+                        Some(serde_json::json!({ "replaces": prev_d })),
+                    );
+                    last_seen.insert(vault_id.clone(), delegate.clone());
+                    written += 2;
+                    tracing::info!(vault_id, from = prev_d, to = d, "check-in delegation rotated");
+                }
+                _ => {
+                    // No change — keep last_seen in sync.
+                    last_seen.insert(vault_id.clone(), delegate.clone());
+                }
+            }
+        }
+        written
+    }
+}
+
+/// Issue #2070: sweeps pending withdrawal approval workflows whose approval
+/// TTL has elapsed, transitioning them to `expired` (auto-cancel). Read-time
+/// lazy expiry covers the common case; this watcher guarantees eventual
+/// cancellation even for workflows nobody reads again.
+pub struct WithdrawalApprovalExpiryWatcher;
+
+impl WithdrawalApprovalExpiryWatcher {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Sweep once. Returns the number of workflows transitioned to `expired`.
+    #[tracing::instrument(skip_all)]
+    pub fn poll_once(&self, db: &Db) -> u64 {
+        match db.sweep_expired_withdrawal_workflows() {
+            Ok(n) if n > 0 => {
+                tracing::info!(expired = n, "swept expired withdrawal approval workflows");
+                n
+            }
+            Ok(_) => 0,
+            Err(e) => {
+                tracing::warn!(error = %e, "withdrawal approval expiry sweep failed");
+                0
+            }
+        }
+    }
+}
+
 /// Spawn the background polling loop.
 pub fn spawn(
     db: Arc<Db>,
@@ -235,12 +361,18 @@ pub fn spawn(
         "starting TTL archival watcher"
     );
     let watcher = TtlArchivalWatcher::new(config);
+    let delegation_watcher = CheckInDelegationWatcher::new();
+    let withdrawal_expiry_watcher = WithdrawalApprovalExpiryWatcher::new();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             watcher.poll_once(&db, &notifications);
+            // Issue #2068: record observed check-in delegation transitions.
+            delegation_watcher.poll_once(&db);
+            // Issue #2070: auto-cancel approvals whose TTL has elapsed.
+            withdrawal_expiry_watcher.poll_once(&db);
         }
     })
 }
