@@ -10,10 +10,10 @@ const LABELS: Record<VaultHealth, string> = {
 };
 
 const COLORS: Record<VaultHealth, string> = {
-  healthy: '#2e7d32',
-  degraded: '#ed6c02',
-  down: '#d32f2f',
-  unknown: '#757575',
+  healthy: 'var(--color-success)',
+  degraded: 'var(--color-warn)',
+  down: 'var(--color-danger)',
+  unknown: 'var(--color-text-muted)',
 };
 
 export interface VaultHealthStatusProps {

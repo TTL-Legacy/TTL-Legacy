@@ -11,9 +11,9 @@ export interface PasskeyDeviceTypeChartProps {
 }
 
 const SEGMENTS: { key: keyof DeviceTypeCheckIns; label: string; color: string }[] = [
-  { key: 'platform', label: 'Platform', color: '#1565c0' },
-  { key: 'cross-platform', label: 'Cross-platform', color: '#6a1b9a' },
-  { key: 'hybrid', label: 'Hybrid', color: '#00838f' },
+  { key: 'platform', label: 'Platform', color: 'var(--color-chart-1)' },
+  { key: 'cross-platform', label: 'Cross-platform', color: 'var(--color-chart-2)' },
+  { key: 'hybrid', label: 'Hybrid', color: 'var(--color-chart-3)' },
 ];
 
 /**
@@ -35,7 +35,7 @@ export function PasskeyDeviceTypeChart({ checkIns }: PasskeyDeviceTypeChartProps
           display: 'flex',
           width: '100%',
           height: 24,
-          background: '#e0e0e0',
+          background: 'var(--color-grid)',
         }}
       >
         {SEGMENTS.map((segment) => {
