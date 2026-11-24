@@ -1,0 +1,19 @@
+soroban:
+  - changed-files:
+      - any-glob-to-any-file: 'contracts/**'
+
+backend:
+  - changed-files:
+      - any-glob-to-any-file: 'backend/**'
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file: 'frontend/**'
+
+mobile:
+  - changed-files:
+      - any-glob-to-any-file: 'mobile/**'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: 'docs/**'
