@@ -220,6 +220,11 @@ Publish the report as a GitHub Security Advisory or in the project's incident lo
 The manual steps in sections 1–4 are complemented by two automation scripts
 and a nightly CI/CD workflow that reduce human error during incidents.
 
+> **On-call engineers:** if a nightly backup or restore verification has failed,
+> jump straight to [Section 10 — Backup/Restore Failure Runbook](#10-backuprestore-failure-runbook).
+> For vault-level (per-vault) export/import recovery, see
+> [docs/disaster-recovery-vault-export-import.md](./disaster-recovery-vault-export-import.md).
+
 ### `scripts/dr_backup.sh`
 
 Snapshots the contract state and backend database to an S3-compatible bucket.
@@ -299,3 +304,206 @@ versioned, so the unversioned `releases/latest/download/` URL does not work.
 
 If the backup fails, the workflow automatically opens a GitHub issue labelled
 `disaster-recovery` and `bug` for visibility.
+
+### Restore Verification Workflow
+
+`.github/workflows/dr-restore-verification.yml` runs after each nightly backup
+and periodically on a schedule. It downloads the latest backup, verifies the
+manifest and artefact checksums, decrypts the artefacts with GPG, and performs a
+dry-run restore against a scratch environment. A failure here means the most
+recent backup **cannot be trusted** — treat it as a P1 until proven otherwise.
+
+---
+
+## 10. Backup/Restore Failure Runbook
+
+This section is the step-by-step procedure for an on-call engineer when a
+nightly backup (`dr-backup.yml`) or restore verification
+(`dr-restore-verification.yml`) fails.
+
+### 10.1 Identify the failure type
+
+1. Open the failed workflow run in GitHub Actions and read the **first** failing
+   step. Later failures are usually cascading.
+2. Read the run summary — the "Check required secrets" step lists missing
+   secret names there.
+3. Match the symptom against the decision table below.
+
+| Symptom (where it fails / what you see) | Likely cause | First action |
+|---|---|---|
+| "Check required secrets" step fails; summary lists missing names | Missing or renamed repository secret | Re-add the secret(s) listed (see the secrets table in §9). Re-run the workflow. |
+| Stellar CLI install step fails; 404 or checksum error on download | `STELLAR_CLI_VERSION` points at a non-existent release, or the unversioned `releases/latest/download/` URL was used | Pin `STELLAR_CLI_VERSION` to a real release tag; verify the asset URL is versioned. Re-run. |
+| `stellar: command not found` or version mismatch after install | CLI install succeeded but PATH/version not applied | Check the install step output and `stellar --version`; fix the workflow's PATH export. |
+| S3 upload fails (`AccessDenied`, `NoSuchBucket`, `403`, `SignatureDoesNotMatch`) | Bad/expired `DR_AWS_*` credentials, wrong `DR_S3_BUCKET`/`DR_S3_ENDPOINT`/region, or bucket policy | Validate credentials and bucket/endpoint/region. Confirm the key has `s3:PutObject`. Re-run. |
+| S3 download fails during restore/verification (`NoSuchKey`, `404`) | Wrong `--backup-prefix`, backup never uploaded, or replica/bucket mismatch | List `s3://<DR_S3_BUCKET>/backups/` and confirm the prefix exists. Use the correct prefix. |
+| GPG decrypt fails (`gpg: decryption failed: No secret key`, `Bad session key`) | `DR_GPG_PRIVATE_KEY`/`DR_GPG_KEY_ID` missing, wrong key, or key rotated since backup | Confirm the key ID matches the key that signed the artefact. Restore the correct private key secret. If the key is lost, the artefact is unrecoverable — escalate. |
+| Manifest checksum mismatch (`checksum mismatch`, `sha256` differs) | Artefact corrupted in transit/storage, or manifest and artefact from different runs | Do **not** restore this backup. Re-run backup; if it recurs, treat storage as suspect and escalate to infra lead. |
+| Invalid WASM magic bytes (`invalid wasm`, `magic` error) | Uploaded artefact is not a WASM (truncated download, wrong file, or HTML error page saved as `.wasm`) | Re-download and re-check size/hash. Re-run backup. Do not deploy this artefact. |
+| Cross-network restore warning (`network mismatch`, manifest network ≠ target) | Restoring a testnet backup onto mainnet (or vice versa) | Stop. Confirm `STELLAR_NETWORK` and the manifest's recorded network match. Use the correct backup. |
+| DB permission errors (`unable to open database file`, `readonly database`, `EACCES`) | `DR_DB_PATH` not writable by the runner, wrong path, or file owned by another user | Check path and ownership/permissions on the runner. Fix `DR_DB_PATH` or permissions. Re-run. |
+
+If the symptom is not in this table, capture the failing step's full log, open a
+`disaster-recovery` issue, and escalate (see §10.4).
+
+### 10.2 Manual restore procedure
+
+Use this when the automated restore/verification cannot proceed and you must
+restore by hand. **Always dry-run first.**
+
+**Step 1 — Pick the backup prefix.** List available backups and choose the most
+recent one whose manifest checksums verify:
+
+```bash
+aws s3 ls "s3://${DR_S3_BUCKET}/backups/" --endpoint-url "$DR_S3_ENDPOINT"
+# e.g. backups/20260727T020000Z
+export BACKUP_PREFIX=backups/20260727T020000Z
+```
+
+**Step 2 — Dry-run.** This downloads the manifest, confirms the target network,
+and prints every action without changing anything:
+
+```bash
+./scripts/dr_restore.sh --backup-prefix "$BACKUP_PREFIX" --dry-run
+```
+
+Confirm from the output:
+- the manifest's recorded network matches `STELLAR_NETWORK`;
+- the artefact checksums match;
+- the GPG decrypt succeeds;
+- the WASM magic bytes are valid.
+
+If any of these fail, **stop** and go back to §10.1.
+
+**Step 3 — Live restore.** Before overwriting the database, `dr_restore.sh`
+backs up the existing file. The pre-restore backup is written next to the
+target DB as:
+
+```
+<DR_DB_PATH>.pre-restore.<TIMESTAMP>
+# e.g. /var/lib/ttl-legacy/backend.db.pre-restore.20260727T021500Z
+```
+
+Note this filename — you will need it if the restore must be rolled back.
+
+```bash
+./scripts/dr_restore.sh --backup-prefix "$BACKUP_PREFIX"
+```
+
+The script then re-deploys the contract WASM via `stellar contract deploy` and
+verifies the restored database is readable.
+
+**Step 4 — Post-restore verification.** Run all of these and record the output
+in the incident issue:
+
+```bash
+# Database is readable and not corrupt
+sqlite3 "$DR_DB_PATH" "PRAGMA integrity_check;"
+# Expected: ok
+
+# Contract is live and not paused
+stellar contract invoke \
+  --id "$CONTRACT_TTL_VAULT" \
+  --network "$STELLAR_NETWORK" \
+  -- is_paused
+# Expected: false (or true if you intentionally re-paused)
+
+# Spot-check a known vault
+stellar contract invoke \
+  --id "$CONTRACT_TTL_VAULT" \
+  --network "$STELLAR_NETWORK" \
+  -- get_vault \
+  --vault_id <VAULT_ID>
+```
+
+**Rollback** (if verification fails): stop the contract if needed (§1), then
+restore the pre-restore copy:
+
+```bash
+cp "$DR_DB_PATH.pre-restore.<TIMESTAMP>" "$DR_DB_PATH"
+```
+
+For per-vault recovery (a single vault's data is wrong or missing), use the
+vault export/import procedure in
+[docs/disaster-recovery-vault-export-import.md](./disaster-recovery-vault-export-import.md)
+instead of a full restore.
+
+### 10.3 If the backup itself is unrecoverable
+
+If the latest backup fails checksum/GPG/WASM validation and no earlier verified
+backup exists:
+
+1. Do **not** deploy or restore the suspect artefact.
+2. Preserve the failed artefacts and logs (do not delete the S3 prefix).
+3. Escalate to the infra lead and security lead immediately (§10.4).
+4. Open a `disaster-recovery` + `bug` issue with the failing run link.
+
+### 10.4 Escalation contacts
+
+> **Placeholders — fill these in before this runbook goes live.** Replace every
+> `<...>` below with the real contact and keep this table current.
+
+| Role | Name | Contact | When to escalate |
+|---|---|---|---|
+| Primary on-call | `<PRIMARY_ONCALL_NAME>` | `<PRIMARY_ONCALL_PHONE>` / `<PRIMARY_ONCALL_EMAIL>` | First responder for any failed backup/restore |
+| Secondary on-call | `<SECONDARY_ONCALL_NAME>` | `<SECONDARY_ONCALL_PHONE>` / `<SECONDARY_ONCALL_EMAIL>` | Primary unresponsive within 15 min |
+| Security lead | `<SECURITY_LEAD_NAME>` | `<SECURITY_LEAD_PHONE>` / security@ttl-legacy.example.com | Suspected key compromise, GPG key loss, or data integrity doubt |
+| Infra lead | `<INFRA_LEAD_NAME>` | `<INFRA_LEAD_PHONE>` / `<INFRA_LEAD_EMAIL>` | S3/credentials/storage failures, repeated checksum mismatches |
+
+**How to page:**
+
+1. Post in the internal on-call channel with the failing run link and the
+   failure type from §10.1.
+2. If no acknowledgement within 15 minutes, page the secondary on-call via
+   `<PAGING_TOOL>` (e.g. PagerDuty/Opsgenie) using the "Disaster Recovery"
+   service.
+3. For P0/P1 or suspected compromise, page the security lead and infra lead
+   directly — do not wait for the on-call chain.
+
+### 10.5 Post-incident review template
+
+Complete within 72 hours of resolution. Copy the block below into the incident
+issue or a GitHub Security Advisory.
+
+```markdown
+## Post-Incident Review — <short title>
+
+**Incident ID:** <id>
+**Severity:** <P0/P1/P2/P3>
+**Date detected:** <YYYY-MM-DD HH:MM UTC>
+**Date resolved:** <YYYY-MM-DD HH:MM UTC>
+**Author:** <name>
+**Failing run(s):** <workflow run links>
+
+### Summary
+<2–3 sentences: what failed, what was affected, how it was resolved.>
+
+### Timeline
+| Time (UTC) | Event |
+|---|---|
+| <HH:MM> | Failure detected (workflow run / alert) |
+| <HH:MM> | On-call acknowledged |
+| <HH:MM> | Failure type identified (§10.1) |
+| <HH:MM> | Mitigation started |
+| <HH:MM> | Restore verified / service restored |
+| <HH:MM> | Incident closed |
+
+### Impact
+- Backups affected: <prefixes / none>
+- Data at risk: <description / none>
+- Vaults affected: <count / ids / none>
+- User impact: <description / none>
+
+### Response Actions
+<What was done, in order, and by whom. Include commands run and their results.>
+
+### Lessons Learned
+- What worked: <...>
+- What didn't: <...>
+- Detection gaps: <...>
+
+### Action Items
+| Action | Owner | Due date | Tracking issue |
+|---|---|---|---|
+| <action> | <owner> | <YYYY-MM-DD> | <link> |
+| <action> | <owner> | <YYYY-MM-DD> | <link> |
+```
