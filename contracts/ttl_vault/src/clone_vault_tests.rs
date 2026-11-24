@@ -559,6 +559,29 @@ fn test_clone_vault_adds_to_beneficiary_index() {
     assert_eq!(ben_vaults_after.get(0).unwrap(), cloned_vault_id);
 }
 
+// ========== Test: clone_vault_does_not_copy_custom_metadata ==========
+
+#[test]
+fn test_clone_vault_does_not_copy_custom_metadata() {
+    let (env, owner, beneficiary, _, source_vault_id, client) = setup_clone_vault_env();
+    let new_beneficiary = Address::generate(&env);
+
+    // Clone the vault
+    let new_vault_id = client.clone_vault_with_overrides(
+        &source_vault_id,
+        &owner,
+        &new_beneficiary,
+        &None,
+        &None,
+        &None,
+    );
+
+    let new_vault = client.get_vault(&new_vault_id);
+
+    // Custom metadata must be empty on a cloned vault
+    assert!(new_vault.custom_metadata.is_empty());
+}
+
 // ========== Test: clone_vault_basic_function (non-override variant) ==========
 
 #[test]

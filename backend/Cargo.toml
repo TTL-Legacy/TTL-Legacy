@@ -9,6 +9,10 @@ workspace = true
 [dependencies]
 actix-web = "4"
 actix-rt = "2"
+# axum is the web framework the backend is migrating toward (main.rs and the
+# newer handlers in routes.rs use `axum::extract::State`). Pinned to 0.6 to
+# match the locked version; routes use the `:param` path syntax.
+axum = "0.6"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 
@@ -45,6 +49,13 @@ once_cell = "1"
 # (Db::open/migrate/upsert/get/all) and the versioned schema migrations
 # (Issue #1176) both run through sqlx-sqlite, so rusqlite is no longer needed.
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+
+# rusqlite powers the Db helpers in db.rs (open/migrate/upsert/get) and the
+# FTS5 full-text search index introduced by issue #2069. The `bundled`
+# feature compiles SQLite from source with FTS5 enabled, so the
+# `vault_search_fts` virtual table works regardless of the system libsqlite3
+# build. Compatible with the libsqlite3-sys 0.27 already pulled in by sqlx.
+rusqlite = { version = "0.30", features = ["bundled"] }
 
 # Push notifications (FCM via HTTP v1 API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

@@ -1,7 +1,7 @@
 use crate::models::{
-    AuditEntry, AuditLogEntry, AuditLogQuery, Channel, Frequency, Passkey, RecoveryCode,
-    RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult, Subscription,
-    SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
+    AuditEntry, AuditLogEntry, AuditLogQuery, BeneficiaryPayoutAddress, Channel, Frequency,
+    Passkey, RecoveryCode, RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult,
+    Subscription, SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
     VaultNotificationPreferences, VaultShare, VaultStatus, WebhookSubscription,
 };
 
@@ -52,6 +52,12 @@ pub fn create_share_token_store() -> ShareTokenStore {
 }
 
 pub fn create_notification_store() -> NotificationStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub type PayoutAddressStore = Arc<Mutex<HashMap<String, BeneficiaryPayoutAddress>>>;
+
+pub fn create_payout_address_store() -> PayoutAddressStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
@@ -591,6 +597,84 @@ impl Db {
                 CREATE INDEX IF NOT EXISTS idx_state_transitions_triggered_by ON state_transitions(triggered_by);
                 "#,
             ),
+            // Issue #2069: vault full-text search index (FTS5). Mirrors
+            // migrations/0010_vault_search_fulltext.sql so db.migrate() creates
+            // the tables even when only the in-Rust runner is invoked.
+            (
+                "10",
+                r#"
+                CREATE TABLE IF NOT EXISTS vault_metadata (
+                    vault_id   TEXT PRIMARY KEY,
+                    owner      TEXT NOT NULL,
+                    tags       TEXT NOT NULL DEFAULT '[]',
+                    notes      TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_vault_metadata_owner ON vault_metadata(owner);
+                CREATE VIRTUAL TABLE IF NOT EXISTS vault_search_fts USING fts5(
+                    vault_id UNINDEXED,
+                    owner    UNINDEXED,
+                    tags,
+                    notes,
+                    tokenize = 'unicode61'
+                );
+                "#,
+            ),
+            // Issue #2068: check-in delegation audit log. Mirrors
+            // migrations/0011_check_in_delegation_audit.sql.
+            (
+                "11",
+                r#"
+                CREATE TABLE IF NOT EXISTS check_in_delegations (
+                    vault_id    TEXT PRIMARY KEY,
+                    owner       TEXT NOT NULL,
+                    delegate    TEXT,
+                    granted_at  TEXT,
+                    updated_at  TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_check_in_delegations_delegate ON check_in_delegations(delegate);
+                CREATE TABLE IF NOT EXISTS check_in_delegation_audit_log (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id   TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    delegate   TEXT,
+                    actor      TEXT NOT NULL DEFAULT '',
+                    timestamp  TEXT NOT NULL,
+                    details    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_check_in_delegation_audit_vault_id  ON check_in_delegation_audit_log(vault_id);
+                CREATE INDEX IF NOT EXISTS idx_check_in_delegation_audit_timestamp ON check_in_delegation_audit_log(timestamp);
+                "#,
+            ),
+            // Issue #2070: multi-party withdrawal approval workflow. Mirrors
+            // migrations/0012_withdrawal_approval_workflow.sql.
+            (
+                "12",
+                r#"
+                CREATE TABLE IF NOT EXISTS withdrawal_approval_workflows (
+                    withdrawal_id          TEXT PRIMARY KEY,
+                    vault_id               TEXT NOT NULL,
+                    amount                 INTEGER NOT NULL,
+                    requested_by           TEXT NOT NULL,
+                    required_approvers     TEXT NOT NULL DEFAULT '[]',
+                    approval_ttl_seconds   INTEGER NOT NULL,
+                    created_at              TEXT NOT NULL,
+                    expires_at              TEXT NOT NULL,
+                    status                  TEXT NOT NULL DEFAULT 'pending',
+                    executed_tx_hash        TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_withdrawal_approval_workflows_vault_id ON withdrawal_approval_workflows(vault_id);
+                CREATE INDEX IF NOT EXISTS idx_withdrawal_approval_workflows_status   ON withdrawal_approval_workflows(status);
+                CREATE INDEX IF NOT EXISTS idx_withdrawal_approval_workflows_expires  ON withdrawal_approval_workflows(expires_at);
+                CREATE TABLE IF NOT EXISTS withdrawal_approvals (
+                    withdrawal_id  TEXT NOT NULL,
+                    approver       TEXT NOT NULL,
+                    approved_at    TEXT NOT NULL,
+                    PRIMARY KEY (withdrawal_id, approver)
+                );
+                CREATE INDEX IF NOT EXISTS idx_withdrawal_approvals_approver ON withdrawal_approvals(approver);
+                "#,
+            ),
         ];
 
         for (version, sql) in MIGRATIONS {
@@ -981,10 +1065,86 @@ impl Db {
         })
     }
 
+    // ── Vault pause/resume history (Issue #2053) ─────────────────────────────
+
+    /// Record a vault pause or resume event emitted on-chain.
+    ///
+    /// `event_type` must be `"pause"` or `"resume"`.
+    pub fn insert_pause_event(
+        &self,
+        vault_id: &str,
+        actor: &str,
+        event_type: &str,
+        reason: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO vault_pause_history (vault_id, actor, event_type, reason, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                vault_id,
+                actor,
+                event_type,
+                reason,
+                timestamp.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return paginated pause/resume events for a vault, newest first.
+    ///
+    /// Returns `(events, total_count)`.
+    pub fn get_pause_history(
+        &self,
+        vault_id: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<(Vec<crate::models::PauseEvent>, u32), rusqlite::Error> {
+        let page_size = page_size.clamp(1, 100);
+        let offset = page * page_size;
+
+        let conn = self.conn.lock().unwrap();
+
+        let total: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM vault_pause_history WHERE vault_id = ?1",
+            params![vault_id],
+            |row| row.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, vault_id, actor, event_type, reason, timestamp
+               FROM vault_pause_history
+              WHERE vault_id = ?1
+              ORDER BY timestamp DESC
+              LIMIT ?2 OFFSET ?3",
+        )?;
+
+        let events = stmt
+            .query_map(params![vault_id, page_size, offset], |row| {
+                let ts_str: String = row.get(5)?;
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&ts_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                Ok(crate::models::PauseEvent {
+                    id: row.get(0)?,
+                    vault_id: row.get(1)?,
+                    actor: row.get(2)?,
+                    event_type: row.get(3)?,
+                    reason: row.get(4)?,
+                    timestamp,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok((events, total))
+    }
+
     // ── Refresh token rotation (Issue #1177) ─────────────────────────────────
 
-    pub fn insert_refresh_token(
-        &self,
+    pub fn insert_refresh_token(        &self,
         jti: &str,
         family_id: &str,
         sub: &str,
@@ -1572,5 +1732,497 @@ mod tests {
         let result3 = search_vaults(&store, &query3);
         assert_eq!(result3.vaults.len(), 5);
         assert!(result3.next_cursor.is_none());
+    }
+}
+
+// ── Issue #2069: vault full-text search over tags and notes ──────────────────
+//
+// `vault_metadata` holds owner-supplied tags/notes (JSON tags); `vault_search_fts`
+// is an FTS5 virtual table kept in sync by DELETE + INSERT on every upsert. The
+// `search_vaults_fulltext` query MATCHes the FTS index scoped to the caller's
+// owner address and returns highlighted snippets via FTS5 `snippet()`.
+
+/// Build a safe FTS5 MATCH expression from a free-text query.
+///
+/// Splits on whitespace, strips quotes, and emits each term as a quoted FTS5
+/// phrase, joined with implicit-AND (whitespace). This avoids the query syntax
+/// in FTS5 MATCH (`*`, `:`, `"`, `NEAR`, …) being interpreted from raw input,
+/// which would otherwise let a stray `*` or `:` produce surprising results or
+/// a parse error.
+fn fts5_query(q: &str) -> String {
+    q.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| c == '"'))
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"", t.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Parse an RFC3339 timestamp stored in SQLite back into a UTC `DateTime`.
+fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+impl Db {
+    /// Insert or replace a vault's searchable metadata and refresh the FTS5
+    /// index for it.
+    pub fn upsert_vault_metadata(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        tags: &[String],
+        notes: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        // The FTS `tags` column is tokenised, so join with whitespace so each
+        // tag is its own searchable token.
+        let tags_text = tags.join(" ");
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            r#"INSERT INTO vault_metadata (vault_id, owner, tags, notes, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5)
+               ON CONFLICT(vault_id) DO UPDATE SET
+                   owner = excluded.owner,
+                   tags = excluded.tags,
+                   notes = excluded.notes,
+                   updated_at = excluded.updated_at"#,
+            params![vault_id, owner, tags_json, notes, now],
+        )?;
+        // Keep the FTS index in sync: drop any prior entry for this vault, then
+        // insert the freshly indexed text.
+        tx.execute(
+            "DELETE FROM vault_search_fts WHERE vault_id = ?1",
+            params![vault_id],
+        )?;
+        tx.execute(
+            "INSERT INTO vault_search_fts (vault_id, owner, tags, notes) VALUES (?1, ?2, ?3, ?4)",
+            params![vault_id, owner, tags_text, notes],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Retrieve a vault's stored metadata, if any.
+    pub fn get_vault_metadata(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<crate::models::VaultMetadata>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let res = conn.query_row(
+            "SELECT vault_id, owner, tags, notes, updated_at FROM vault_metadata WHERE vault_id = ?1",
+            params![vault_id],
+            |r| {
+                let tags_json: String = r.get(2)?;
+                let notes: String = r.get(3)?;
+                let updated_str: String = r.get(4)?;
+                let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                Ok(crate::models::VaultMetadata {
+                    vault_id: r.get(0)?,
+                    owner: r.get(1)?,
+                    tags,
+                    notes,
+                    updated_at: parse_rfc3339(&updated_str).unwrap_or_else(chrono::Utc::now),
+                })
+            },
+        );
+        match res {
+            Ok(m) => Ok(Some(m)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Remove a vault's metadata and its FTS index entry.
+    pub fn delete_vault_metadata(&self, vault_id: &str) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM vault_search_fts WHERE vault_id = ?1",
+            params![vault_id],
+        )?;
+        tx.execute("DELETE FROM vault_metadata WHERE vault_id = ?1", params![vault_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Full-text search over a single owner's vault tags and notes.
+    ///
+    /// Returns up to `limit` hits starting at `offset`, ordered by FTS5 rank
+    /// (relevance). Each hit carries highlighted snippets from the matched
+    /// tags and notes columns.
+    pub fn search_vaults_fulltext(
+        &self,
+        owner: &str,
+        q: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<crate::models::VaultSearchHit>, rusqlite::Error> {
+        let fts = fts5_query(q);
+        if fts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"SELECT m.vault_id, m.owner, m.tags, m.notes,
+                      snippet(vault_search_fts, 2, '<mark>', '</mark>', ' … ', 8),
+                      snippet(vault_search_fts, 3, '<mark>', '</mark>', ' … ', 16)
+               FROM vault_search_fts f
+               JOIN vault_metadata m ON m.vault_id = f.vault_id
+               WHERE f.vault_search_fts MATCH ?1 AND f.owner = ?2
+               ORDER BY rank
+               LIMIT ?3 OFFSET ?4"#,
+        )?;
+        let rows = stmt.query_map(params![fts, owner, limit as i64, offset as i64], |r| {
+            let tags_json: String = r.get(2)?;
+            let notes: String = r.get(3)?;
+            let tag_snippet: Option<String> = r.get(4).ok();
+            let note_snippet: Option<String> = r.get(5).ok();
+            let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+            // Prefer the notes snippet; fall back to the tags snippet.
+            let snippet = note_snippet
+                .filter(|s| !s.is_empty())
+                .or(tag_snippet)
+                .filter(|s| !s.is_empty());
+            Ok(crate::models::VaultSearchHit {
+                vault_id: r.get(0)?,
+                owner: r.get(1)?,
+                tags,
+                notes,
+                snippet,
+                status: None,
+                balance: None,
+                ttl_remaining: None,
+            })
+        })?;
+        rows.collect()
+    }
+}
+
+// ── Issue #2068: check-in delegation audit log ───────────────────────────────
+
+impl Db {
+    /// Grant (or replace) the check-in delegate for a vault. Updates the
+    /// current-state row only; the TTL watcher observes the transition and
+    /// writes the audit-log entry.
+    pub fn upsert_check_in_delegation(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        delegate: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO check_in_delegations (vault_id, owner, delegate, granted_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?4)
+               ON CONFLICT(vault_id) DO UPDATE SET
+                   owner = excluded.owner,
+                   delegate = excluded.delegate,
+                   granted_at = excluded.granted_at,
+                   updated_at = excluded.updated_at"#,
+            params![vault_id, owner, delegate, now],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke the current check-in delegate for a vault (clears `delegate` and
+    /// `granted_at` but keeps the row, so the watcher can emit a revoke event).
+    pub fn clear_check_in_delegation(&self, vault_id: &str) -> Result<(), rusqlite::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.lock().unwrap().execute(
+            "UPDATE check_in_delegations SET delegate = NULL, granted_at = NULL, updated_at = ?2 WHERE vault_id = ?1",
+            params![vault_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Current check-in delegation state for a vault, if a row exists.
+    pub fn get_check_in_delegation(
+        &self,
+        vault_id: &str,
+    ) -> Result<Option<crate::models::CheckInDelegationState>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let res = conn.query_row(
+            "SELECT vault_id, owner, delegate, granted_at FROM check_in_delegations WHERE vault_id = ?1",
+            params![vault_id],
+            |r| {
+                let delegate: Option<String> = r.get(2)?;
+                let granted_str: Option<String> = r.get(3)?;
+                let granted_at = granted_str.and_then(|s| parse_rfc3339(&s));
+                Ok(crate::models::CheckInDelegationState {
+                    vault_id: r.get(0)?,
+                    owner: r.get(1)?,
+                    delegate,
+                    granted_at,
+                })
+            },
+        );
+        match res {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Snapshot of every vault's current delegation state, used by the watcher
+    /// to diff against its last-seen state.
+    pub fn list_check_in_delegations(
+        &self,
+    ) -> Result<Vec<(String, String, Option<String>)>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT vault_id, owner, delegate FROM check_in_delegations")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Append a check-in delegation grant/revoke event to the audit log.
+    pub fn insert_check_in_delegation_audit(
+        &self,
+        vault_id: &str,
+        event_kind: crate::models::CheckInDelegationEventKind,
+        delegate: Option<&str>,
+        actor: &str,
+        details: Option<serde_json::Value>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO check_in_delegation_audit_log
+                   (vault_id, event_kind, delegate, actor, timestamp, details)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+            params![
+                vault_id,
+                event_kind.as_str(),
+                delegate,
+                actor,
+                chrono::Utc::now().to_rfc3339(),
+                details.as_ref().map(serde_json::Value::to_string),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Full audit trail of check-in delegation grant/revoke events for a vault
+    /// (oldest first).
+    pub fn get_check_in_delegation_audit(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<crate::models::CheckInDelegationAuditEntry>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, vault_id, event_kind, delegate, actor, timestamp, details
+             FROM check_in_delegation_audit_log WHERE vault_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![vault_id], |r| {
+            let event_kind_str: String = r.get(2)?;
+            let ts: String = r.get(5)?;
+            let details_str: Option<String> = r.get(6)?;
+            let details = details_str.and_then(|s| serde_json::from_str(&s).ok());
+            Ok(crate::models::CheckInDelegationAuditEntry {
+                id: r.get(0)?,
+                vault_id: r.get(1)?,
+                event_kind: crate::models::CheckInDelegationEventKind::from_str(&event_kind_str),
+                delegate: r.get(3)?,
+                actor: r.get(4)?,
+                timestamp: parse_rfc3339(&ts).unwrap_or_else(chrono::Utc::now),
+                details,
+            })
+        })?;
+        rows.collect()
+    }
+}
+
+// ── Issue #2070: multi-party withdrawal approval workflow ───────────────────
+
+impl Db {
+    /// Persist a new pending withdrawal approval workflow.
+    pub fn create_withdrawal_workflow(
+        &self,
+        w: &crate::models::WithdrawalApprovalWorkflow,
+    ) -> Result<(), rusqlite::Error> {
+        let approvers_json =
+            serde_json::to_string(&w.required_approvers).unwrap_or_else(|_| "[]".to_string());
+        self.conn.lock().unwrap().execute(
+            r#"INSERT INTO withdrawal_approval_workflows
+                   (withdrawal_id, vault_id, amount, requested_by, required_approvers,
+                    approval_ttl_seconds, created_at, expires_at, status, executed_tx_hash)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
+            params![
+                w.withdrawal_id,
+                w.vault_id,
+                w.amount,
+                w.requested_by,
+                approvers_json,
+                w.approval_ttl_seconds as i64,
+                w.created_at.to_rfc3339(),
+                w.expires_at.to_rfc3339(),
+                w.status.as_str(),
+                w.executed_tx_hash,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load a withdrawal workflow by id, lazily expiring it if its TTL has
+    /// elapsed, and attaching its recorded approvals.
+    pub fn get_withdrawal_workflow(
+        &self,
+        withdrawal_id: &str,
+    ) -> Result<Option<crate::models::WithdrawalApprovalWorkflow>, rusqlite::Error> {
+        let wf_opt = {
+            let conn = self.conn.lock().unwrap();
+            let res = conn.query_row(
+                r#"SELECT withdrawal_id, vault_id, amount, requested_by, required_approvers,
+                          approval_ttl_seconds, created_at, expires_at, status, executed_tx_hash
+                   FROM withdrawal_approval_workflows WHERE withdrawal_id = ?1"#,
+                params![withdrawal_id],
+                |r| {
+                    let approvers_json: String = r.get(4)?;
+                    let required: Vec<String> = serde_json::from_str(&approvers_json).unwrap_or_default();
+                    let created = parse_rfc3339(&r.get::<_, String>(6)?).unwrap_or_else(chrono::Utc::now);
+                    let expires = parse_rfc3339(&r.get::<_, String>(7)?).unwrap_or_else(chrono::Utc::now);
+                    let status_str: String = r.get(8)?;
+                    Ok(crate::models::WithdrawalApprovalWorkflow {
+                        withdrawal_id: r.get(0)?,
+                        vault_id: r.get(1)?,
+                        amount: r.get(2)?,
+                        requested_by: r.get(3)?,
+                        required_approvers: required,
+                        approval_ttl_seconds: r.get::<_, i64>(5)? as u64,
+                        created_at: created,
+                        expires_at: expires,
+                        status: crate::models::WithdrawalApprovalStatus::from_str(&status_str),
+                        approvals: Vec::new(),
+                        executed_tx_hash: r.get(9)?,
+                    })
+                },
+            );
+            match res {
+                Ok(w) => Some(w),
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        };
+
+        let mut wf = wf_opt.unwrap();
+
+        // Lazy expiry: a pending request whose TTL has elapsed auto-cancels.
+        if wf.status == crate::models::WithdrawalApprovalStatus::Pending
+            && wf.expires_at < chrono::Utc::now()
+        {
+            self.set_withdrawal_workflow_status(
+                withdrawal_id,
+                crate::models::WithdrawalApprovalStatus::Expired,
+            )?;
+            wf.status = crate::models::WithdrawalApprovalStatus::Expired;
+        }
+
+        wf.approvals = self.get_withdrawal_approvals(withdrawal_id)?;
+        Ok(Some(wf))
+    }
+
+    /// Recorded approvals for a workflow, oldest first.
+    pub fn get_withdrawal_approvals(
+        &self,
+        withdrawal_id: &str,
+    ) -> Result<Vec<crate::models::WithdrawalApproval>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT withdrawal_id, approver, approved_at FROM withdrawal_approvals
+             WHERE withdrawal_id = ?1 ORDER BY approved_at ASC",
+        )?;
+        let rows = stmt.query_map(params![withdrawal_id], |r| {
+            let ts: String = r.get(2)?;
+            Ok(crate::models::WithdrawalApproval {
+                withdrawal_id: r.get(0)?,
+                approver: r.get(1)?,
+                approved_at: parse_rfc3339(&ts).unwrap_or_else(chrono::Utc::now),
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Record an approval. Returns `true` if a new approval row was inserted,
+    /// `false` if this approver had already approved (idempotent).
+    pub fn add_withdrawal_approval(
+        &self,
+        withdrawal_id: &str,
+        approver: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO withdrawal_approvals (withdrawal_id, approver, approved_at) VALUES (?1, ?2, ?3)",
+            params![withdrawal_id, approver, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(conn.changes() > 0)
+    }
+
+    /// Transition a workflow's status.
+    pub fn set_withdrawal_workflow_status(
+        &self,
+        withdrawal_id: &str,
+        status: crate::models::WithdrawalApprovalStatus,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE withdrawal_approval_workflows SET status = ?2 WHERE withdrawal_id = ?1",
+            params![withdrawal_id, status.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a workflow as executed, optionally recording the on-chain tx hash.
+    pub fn record_withdrawal_execution(
+        &self,
+        withdrawal_id: &str,
+        tx_hash: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE withdrawal_approval_workflows SET status = 'executed', executed_tx_hash = ?2 WHERE withdrawal_id = ?1",
+            params![withdrawal_id, tx_hash],
+        )?;
+        Ok(())
+    }
+
+    /// All workflows for a vault (lazily expired on read).
+    pub fn list_withdrawal_workflows(
+        &self,
+        vault_id: &str,
+    ) -> Result<Vec<crate::models::WithdrawalApprovalWorkflow>, rusqlite::Error> {
+        let ids: Vec<String> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT withdrawal_id FROM withdrawal_approval_workflows WHERE vault_id = ?1 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![vault_id], |r| r.get::<_, String>(0))?;
+            rows.filter_map(Result::ok).collect()
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(wf) = self.get_withdrawal_workflow(&id)? {
+                out.push(wf);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Cancel every pending workflow whose TTL has elapsed. Returns the number
+    /// of workflows transitioned to `expired`. Intended to be called by a
+    /// background watcher (see `ttl_watch::WithdrawalApprovalExpiryWatcher`).
+    pub fn sweep_expired_withdrawal_workflows(&self) -> Result<u64, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE withdrawal_approval_workflows SET status = 'expired' WHERE status = 'pending' AND expires_at < ?1",
+            params![chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(conn.changes() as u64)
     }
 }
