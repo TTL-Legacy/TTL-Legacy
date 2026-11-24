@@ -47,6 +47,9 @@ pub async fn register_passkey_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterPasskeyRequest>,
 ) -> Result<(StatusCode, Json<RegisterPasskeyResponse>), AppError> {
+    // Issue #2133: enforce MFA for high-value vaults
+    crate::two_factor::check_vault_mfa_enforcement(&body.vault_id, &state.db)?;
+
     let passkey_id = uuid::Uuid::new_v4().to_string();
     let passkey = Passkey {
         passkey_id: passkey_id.clone(),
