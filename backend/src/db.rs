@@ -1,7 +1,7 @@
 use crate::models::{
-    AuditEntry, AuditLogEntry, AuditLogQuery, Channel, Frequency, Passkey, RecoveryCode,
-    RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult, Subscription,
-    SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
+    AuditEntry, AuditLogEntry, AuditLogQuery, BeneficiaryPayoutAddress, Channel, Frequency,
+    Passkey, RecoveryCode, RecoveryCodeSet, ReminderPreferences, SearchQuery, SearchResult,
+    Subscription, SubscriptionChannel, SubscriptionFrequency, Vault, VaultBackup, VaultEvent,
     VaultNotificationPreferences, VaultShare, VaultStatus, WebhookSubscription,
 };
 
@@ -52,6 +52,12 @@ pub fn create_share_token_store() -> ShareTokenStore {
 }
 
 pub fn create_notification_store() -> NotificationStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub type PayoutAddressStore = Arc<Mutex<HashMap<String, BeneficiaryPayoutAddress>>>;
+
+pub fn create_payout_address_store() -> PayoutAddressStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 

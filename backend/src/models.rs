@@ -317,6 +317,9 @@ pub enum VaultStatus {
     Expired,
     Released,
     Paused,
+    /// Vault has been archived — data is frozen and the entry removed from the
+    /// active store (Issue #2048).
+    Archived,
 }
 
 // ── TTL Insurance models ───────────────────────────────────────────────────
@@ -1333,6 +1336,28 @@ pub struct BeneficiaryArchivalNotification {
     pub status: DeliveryStatus,
     /// Error message if delivery failed.
     pub error: Option<String>,
+}
+
+// ── Vault clone config (Issue #2050) ────────────────────────────────────────
+
+/// Controls which optional fields are copied when cloning a vault.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VaultCloneConfig {
+    /// Copy the beneficiary field (default: always copied).
+    /// Optional fields below default to false.
+    pub include_tags: bool,
+    pub include_notes: bool,
+    pub include_beneficiaries: bool,
+    pub include_vesting_schedule: bool,
+    pub include_release_conditions: bool,
+}
+
+/// Response from clone_vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloneVaultResponse {
+    pub original_vault_id: String,
+    pub cloned_vault_id: String,
+    pub cloned_vault: Vault,
 }
 
 // ── Vault summary / bulk summary ────────────────────────────────────────────
