@@ -381,6 +381,21 @@ pub const LOW_TTL_WARNING_TOPIC: Symbol = symbol_short!("low_ttl");
 /// Warning threshold in seconds. If TTL remaining < this value, ping_expiry emits an event.
 pub const EXPIRY_WARNING_THRESHOLD: u64 = 86_400; // 24 hours
 
+// Issue #557: Passkey Delegation
+pub const PASSKEY_DELEGATION_TOPIC: Symbol = symbol_short!("pk_del");
+pub const PASSKEY_DELEGATION_REVOKED_TOPIC: Symbol = symbol_short!("pk_del_rev");
+
+// Issue #558: Passkey Audit Trail
+pub const PASSKEY_AUDIT_TOPIC: Symbol = symbol_short!("pk_audit");
+
+// Issue #559: Passkey Escrow
+pub const PASSKEY_ESCROW_TOPIC: Symbol = symbol_short!("pk_esc");
+pub const PASSKEY_ESCROW_RELEASED_TOPIC: Symbol = symbol_short!("pk_esc_rel");
+pub const PASSKEY_ESCROW_CANCELLED_TOPIC: Symbol = symbol_short!("pk_esc_can");
+
+// Issue #560: Passkey Expiry Warning
+pub const PASSKEY_EXPIRY_WARNING_TOPIC: Symbol = symbol_short!("pk_exp_warn");
+
 /// Recovery extension duration in seconds (30 days)
 #[allow(dead_code)]
 pub const RECOVERY_EXTENSION_DURATION: u64 = 2_592_000;

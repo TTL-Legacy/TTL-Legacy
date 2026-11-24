@@ -1913,7 +1913,22 @@ impl TtlVaultContract {
         }
         let is_delegate =
             caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
-        if caller != vault.owner && !is_delegate {
+        // Issue #557: also permit callers who hold a valid, non-expired passkey delegation.
+        let is_passkey_delegate = if !is_delegate && caller != vault.owner {
+            let now_ts = env.ledger().timestamp();
+            let del_key = StorageKey::PasskeyDelegation(vault_id, passkey_hash.clone());
+            match env
+                .storage()
+                .persistent()
+                .get::<StorageKey, PasskeyDelegationRecord>(&del_key)
+            {
+                Some(d) if d.delegate == caller && now_ts < d.expires_at => true,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if caller != vault.owner && !is_delegate && !is_passkey_delegate {
             return Err(ContractError::NotOwner);
         }
         // Enforce per-delegation nonce to prevent replay attacks
@@ -2062,6 +2077,17 @@ impl TtlVaultContract {
 
         // Log passkey usage - Issue #395
         Self::log_passkey_usage(&env, vault_id, &passkey_hash, now);
+
+        // Issue #559: reject check-in if the passkey is currently in escrow.
+        {
+            let escrow_key = StorageKey::PasskeyEscrow(vault_id, passkey_hash.clone());
+            if env.storage().persistent().has(&escrow_key) {
+                return Err(ContractError::InvalidPasskey);
+            }
+        }
+
+        // Issue #558: append "use" entry to passkey audit log
+        Self::append_passkey_audit(&env, vault_id, "use", &caller, passkey_hash.clone(), vault.check_in_interval);
 
         // Persist last check-in time for rate limiting
         let lci_key = StorageKey::LastCheckInTime(vault_id);
@@ -4019,6 +4045,10 @@ impl TtlVaultContract {
     /// If the remaining TTL is less than `EXPIRY_WARNING_THRESHOLD` (24 hours),
     /// a warning event is emitted. No event is emitted for Released or Cancelled vaults.
     ///
+    /// Issue #560: also checks each passkey's remaining time until its configured
+    /// expiry and emits a `pk_exp_warn` event for any passkey whose remaining
+    /// time is at or below `EXPIRY_WARNING_THRESHOLD`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment
     /// * `vault_id` - The unique identifier of the vault
@@ -4038,6 +4068,32 @@ impl TtlVaultContract {
         if ttl < EXPIRY_WARNING_THRESHOLD {
             env.events().publish((PING_EXPIRY_TOPIC, vault_id), ttl);
         }
+
+        // Issue #560: emit pk_exp_warn for each passkey nearing its expiry.
+        let now = env.ledger().timestamp();
+        let pk_key = StorageKey::VaultPasskeys(vault_id);
+        let passkeys: Vec<PasskeyHash> = env
+            .storage()
+            .persistent()
+            .get(&pk_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        for pk in passkeys.iter() {
+            let exp_key = StorageKey::PasskeyExpiry(vault_id, pk.hash.clone());
+            if let Some(expiry) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, u64>(&exp_key)
+            {
+                let seconds_remaining = if now >= expiry { 0 } else { expiry - now };
+                if seconds_remaining <= EXPIRY_WARNING_THRESHOLD {
+                    env.events().publish(
+                        (PASSKEY_EXPIRY_WARNING_TOPIC, vault_id),
+                        (pk.hash.clone(), seconds_remaining),
+                    );
+                }
+            }
+        }
+
         ttl
     }
 
@@ -10930,6 +10986,14 @@ impl TtlVaultContract {
             }
         }
 
+        // Issue #559: reject check-in if the passkey is currently in escrow.
+        {
+            let escrow_key = StorageKey::PasskeyEscrow(vault_id, passkey_hash.clone());
+            if env.storage().persistent().has(&escrow_key) {
+                return Err(ContractError::InvalidPasskey);
+            }
+        }
+
         Ok(())
     }
 
@@ -11750,8 +11814,11 @@ impl TtlVaultContract {
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events().publish(
             (ROTATE_PASSKEY_TOPIC, vault_id),
-            (old_passkey_hash, new_passkey_hash),
+            (old_passkey_hash.clone(), new_passkey_hash.clone()),
         );
+        // Issue #558: append two audit entries — remove for old, add for new
+        Self::append_passkey_audit(&env, vault_id, "rotate_remove", &caller, old_passkey_hash, vault.check_in_interval);
+        Self::append_passkey_audit(&env, vault_id, "rotate_add", &caller, new_passkey_hash, vault.check_in_interval);
         Ok(())
     }
 
@@ -11956,7 +12023,9 @@ impl TtlVaultContract {
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
-            .publish((ADD_PASSKEY_TOPIC, vault_id), (passkey_hash, backup_eligible));
+            .publish((ADD_PASSKEY_TOPIC, vault_id), (passkey_hash.clone(), backup_eligible));
+        // Issue #558: append to passkey audit log
+        Self::append_passkey_audit(&env, vault_id, "add", &caller, passkey_hash, vault.check_in_interval);
         Ok(())
     }
 
@@ -12258,8 +12327,10 @@ impl TtlVaultContract {
         // Issue #1525: passkey_revoked event with credential ID hash and timestamp
         env.events().publish(
             (PASSKEY_REVOKED_TOPIC, vault_id),
-            (passkey_hash, env.ledger().timestamp()),
+            (passkey_hash.clone(), env.ledger().timestamp()),
         );
+        // Issue #558: append to passkey audit log
+        Self::append_passkey_audit(&env, vault_id, "remove", &caller, passkey_hash, vault.check_in_interval);
         Ok(())
     }
 
