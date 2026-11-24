@@ -152,6 +152,69 @@ fn test_full_lifecycle_multi_beneficiary_bps_split() {
     assert_eq!(b2_received, 3_000); // 30% of 10_000
 }
 
+/// Maximum-beneficiary release: varying BPS allocations and exact per-account payouts.
+#[test]
+fn test_full_lifecycle_twenty_beneficiary_varying_bps_split() {
+    let (env, owner, b1, token_address, client) = setup_lifecycle();
+    let interval = 1_000u64;
+    let deposit_amount = 10_000_000i128;
+
+    let vault_id = client.create_vault(&owner, &b1, &interval, &None);
+
+    let mut beneficiaries = vec![&env];
+    let mut addresses = vec![&env];
+    beneficiaries.push_back(BeneficiaryEntry {
+        address: b1.clone(),
+        bps: 25,
+        minimum_threshold: 0,
+    });
+    addresses.push_back(b1.clone());
+
+    for i in 2..=20u32 {
+        let address = Address::generate(&env);
+        let bps = if i == 20 { 5_250 } else { i * 25 };
+        beneficiaries.push_back(BeneficiaryEntry {
+            address: address.clone(),
+            bps,
+            minimum_threshold: 0,
+        });
+        addresses.push_back(address);
+    }
+
+    let stored_bps: u32 = beneficiaries.iter().map(|entry| entry.bps).sum();
+    assert_eq!(stored_bps, 10_000);
+    client.set_beneficiaries(&vault_id, &owner, &beneficiaries);
+
+    client.deposit(&vault_id, &owner, &deposit_amount);
+    env.ledger().with_mut(|ledger| ledger.timestamp = interval + 1);
+    assert!(client.is_expired(&vault_id));
+
+    let token_client = token::Client::new(&env, &token_address);
+    let mut balances_before = Vec::new(&env);
+    for address in addresses.iter() {
+        balances_before.push_back(token_client.balance(&address));
+    }
+
+    client.trigger_release(&vault_id);
+
+    let mut distributed = 0i128;
+    for i in 0..20usize {
+        let address = addresses.get(i as u32).expect("beneficiary address");
+        let expected = if i == 19 {
+            deposit_amount - distributed
+        } else {
+            deposit_amount * beneficiaries.get(i as u32).expect("beneficiary entry").bps as i128
+                / 10_000i128
+        };
+        let received = token_client.balance(&address)
+            - balances_before.get(i as u32).expect("starting balance");
+        assert_eq!(received, expected, "unexpected payout for beneficiary {i}");
+        distributed += expected;
+    }
+    assert_eq!(distributed, deposit_amount);
+    assert_eq!(client.get_vault(&vault_id).balance, 0);
+}
+
 /// Full lifecycle with hibernation: vault survives interval during hibernation, expires after
 #[test]
 fn test_full_lifecycle_with_hibernation() {

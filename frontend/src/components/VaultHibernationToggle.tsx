@@ -103,9 +103,9 @@ const STATUS_LABEL: Record<HibernationStatus, string> = {
 };
 
 const STATUS_COLOR: Record<HibernationStatus, string> = {
-  active: '#2e7d32',
-  hibernating: '#1565c0',
-  unknown: '#757575',
+  active: 'var(--color-success)',
+  hibernating: 'var(--color-accent)',
+  unknown: 'var(--color-text-muted)',
 };
 
 /**
@@ -294,8 +294,8 @@ export function VaultHibernationToggle({
             data-testid="vault-hibernation-dialog"
             onKeyDown={handleDialogKeyDown}
             style={{
-              background: '#fff',
-              color: '#111',
+              background: 'var(--color-surface)',
+              color: 'var(--color-text-primary)',
               borderRadius: 8,
               padding: 20,
               width: 'min(420px, 100%)',
@@ -336,7 +336,7 @@ export function VaultHibernationToggle({
               <p
                 role="alert"
                 data-testid="vault-hibernation-error"
-                style={{ margin: 0, color: '#d32f2f' }}
+                style={{ margin: 0, color: 'var(--color-danger)' }}
               >
                 {error}
               </p>

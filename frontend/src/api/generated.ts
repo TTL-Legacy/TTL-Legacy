@@ -90,57 +90,34 @@ export interface AdminAddressResponse {
   admin_address: string;
 }
 
-/** Placeholder symbol re-exported for compatibility (see index.ts). */
-export const PROTOCOL_CONFIG_PROPOSED_TOPIC = "protocol_config_proposed";
+// ── Issue #2066: Token price oracle types ────────────────────────────────────
 
-// ── Vault notes (Issue #2055) ────────────────────────────────────────────────
+export type OracleProvider = "redstone" | "pyth";
 
-/** Request body for `set_vault_notes`. */
-export interface SetVaultNotesRequest {
-  caller: string;
-  name: string;
-  description: string;
-  notes: string;
+export interface TokenPriceOracleConfig {
+  provider: OracleProvider;
+  endpoint_url: string;
+  refresh_interval_seconds: number;
+  xlm_feed_id: string;
+  enabled: boolean;
+  updated_at: string;
 }
 
-/** Response returned by `get_vault_notes`. */
-export interface GetVaultNotesResponse {
+export interface SetOracleConfigRequest {
+  provider: OracleProvider;
+  endpoint_url: string;
+  refresh_interval_seconds: number;
+  xlm_feed_id: string;
+  enabled: boolean;
+}
+
+export interface EstimatedVaultValue {
   vault_id: string;
-  notes: string;
-}
-
-/** Vault check-in record (Issue #2052). */
-export interface CheckInRecord {
-  timestamp: number;
-  ledger_sequence: number;
-  /** 0 = owner passkey, 1 = delegate, 2 = batch. */
-  method: number;
-}
-
-/** Paginated check-in history response (Issue #2052). */
-export interface CheckInHistoryResponse {
-  vault_id: string;
-  records: CheckInRecord[];
-  page: number;
-  page_size: number;
-}
-
-/** Vault pause/resume event (Issue #2053). */
-export interface PauseEvent {
-  id: number;
-  vault_id: string;
-  actor: string;
-  /** `"pause"` or `"resume"`. */
-  event_type: string;
-  reason: string;
-  timestamp: string;
-}
-
-/** Paginated pause history response (Issue #2053). */
-export interface PauseHistoryResponse {
-  vault_id: string;
-  events: PauseEvent[];
-  page: number;
-  page_size: number;
-  total: number;
+  balance_stroops: number;
+  estimated_value_usd: number | null;
+  token_symbol: string;
+  price_per_token_usd: number | null;
+  price_fetched_at: string | null;
+  is_stale: boolean;
+  estimated_at: string;
 }

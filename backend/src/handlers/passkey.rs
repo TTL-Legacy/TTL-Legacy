@@ -216,6 +216,116 @@ pub async fn recover_with_credential_handler(
     }))
 }
 
+// ── Check-in delegation and passkey check-in (#2049) ───────────────────────
+
+/// Updates `last_used` on the passkey and `last_check_in` on the vault when a
+/// passkey is used for check-in delegation.  Returns `Err` if the passkey is
+/// not found.
+pub fn check_in_delegation(
+    passkey_store: &PasskeyStore,
+    vault_store: &VaultStore,
+    audit_store: &AuditStore,
+    passkey_id: &str,
+    vault_id: &str,
+) -> Result<(), String> {
+    let now = Utc::now();
+
+    // Find the passkey and capture its owner before releasing the lock.
+    let owner = {
+        let store = passkey_store.lock().unwrap();
+        store
+            .iter()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+            .map(|pk| pk.owner.clone())
+            .ok_or_else(|| "Passkey not found".to_string())?
+    };
+
+    // Update last_used on the passkey.
+    {
+        let mut store = passkey_store.lock().unwrap();
+        if let Some(pk) = store
+            .iter_mut()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+        {
+            pk.last_used = Some(now);
+        }
+    }
+
+    // Update last_check_in on the vault.
+    {
+        let mut vaults = vault_store.lock().unwrap();
+        if let Some(vault) = vaults.get_mut(vault_id) {
+            vault.last_check_in = now;
+        }
+    }
+
+    append_audit_entry(
+        audit_store,
+        "check_in_delegation",
+        &owner,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "passkey_id": passkey_id,
+        }),
+    );
+
+    Ok(())
+}
+
+/// Updates `last_used` on the passkey and `last_check_in` on the vault when a
+/// passkey is used directly for a check-in.  Returns `Err` if the passkey is
+/// not found.
+pub fn check_in_with_passkey(
+    passkey_store: &PasskeyStore,
+    vault_store: &VaultStore,
+    audit_store: &AuditStore,
+    passkey_id: &str,
+    vault_id: &str,
+) -> Result<(), String> {
+    let now = Utc::now();
+
+    // Find the passkey and capture its owner before releasing the lock.
+    let owner = {
+        let store = passkey_store.lock().unwrap();
+        store
+            .iter()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+            .map(|pk| pk.owner.clone())
+            .ok_or_else(|| "Passkey not found".to_string())?
+    };
+
+    // Update last_used on the passkey.
+    {
+        let mut store = passkey_store.lock().unwrap();
+        if let Some(pk) = store
+            .iter_mut()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+        {
+            pk.last_used = Some(now);
+        }
+    }
+
+    // Update last_check_in on the vault.
+    {
+        let mut vaults = vault_store.lock().unwrap();
+        if let Some(vault) = vaults.get_mut(vault_id) {
+            vault.last_check_in = now;
+        }
+    }
+
+    append_audit_entry(
+        audit_store,
+        "check_in_with_passkey",
+        &owner,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "passkey_id": passkey_id,
+        }),
+    );
+
+    Ok(())
+}
+
 pub async fn list_passkeys_handler(
     State(state): State<Arc<AppState>>,
     Path((vault_id, owner)): Path<(String, String)>,
