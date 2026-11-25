@@ -280,7 +280,6 @@ with an optional dry-run flag.
 |---|---|
 | `DR_AWS_ACCESS_KEY_ID` | AWS access key with S3 write permissions |
 | `DR_AWS_SECRET_ACCESS_KEY` | AWS secret key |
-| `DR_AWS_REGION` | AWS region (e.g. `us-east-1`) |
 | `DR_S3_BUCKET` | S3 bucket name |
 | `DR_S3_ENDPOINT` | S3 endpoint URL |
 | `CONTRACT_TTL_VAULT` | Deployed contract address |
@@ -289,11 +288,20 @@ with an optional dry-run flag.
 | `DR_GPG_KEY_ID` | Key ID or fingerprint of that signing key |
 | `DR_STELLAR_RPC_URL` | Soroban RPC URL for mainnet. The Stellar CLI ships no default mainnet RPC (see https://developers.stellar.org/docs/data/rpc/rpc-providers) |
 
-**Optional secrets:** `DR_REPLICA_BUCKET` + `DR_REPLICA_REGION` (cross-region
-replica), `DR_VAULT_SNAPSHOTS` (comma-separated `vault_id:timestamp` pairs).
+**Optional secrets:** `DR_AWS_REGION` (AWS region; defaults to `us-east-1`),
+`DR_REPLICA_BUCKET` + `DR_REPLICA_REGION` (cross-region replica),
+`DR_VAULT_SNAPSHOTS` (comma-separated `vault_id:timestamp` pairs).
 
 The first step, "Check required secrets", fails before anything else runs if any
 required secret is missing. It lists the missing names in the run summary.
+To resolve that failure, add each named value as a repository secret under
+**Settings → Secrets and variables → Actions → Repository secrets**, using the
+exact names shown in the summary. This workflow does not select a GitHub Actions
+environment, so environment-scoped secrets are not available to it. Re-run the
+workflow after adding the secrets; `dry_run: true` does not bypass the required
+secrets check. Do not put secret values in the repository, workflow inputs, or
+issue comments.
+
 The workflow pins the Stellar CLI with `STELLAR_CLI_VERSION`. Release assets are
 versioned, so the unversioned `releases/latest/download/` URL does not work.
 
