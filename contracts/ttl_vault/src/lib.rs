@@ -155,6 +155,9 @@ pub const INSTANCE_TTL_LEDGERS: u32 = 200_000;
 /// Basis points representing 100%.
 pub const BASIS_POINTS_100_PERCENT: i128 = 10_000;
 
+/// Maximum number of addresses that may sit on a vault's beneficiary waitlist.
+pub const MAX_WAITLIST_ENTRIES: u32 = 3;
+
 /// Two-step ownership transfer constants - Issue #1119
 /// 24-hour time-lock before new owner can accept the transfer (in seconds)
 pub const OWNERSHIP_TRANSFER_TIMELOCK: u64 = 86_400;
@@ -4753,12 +4756,14 @@ impl TtlVaultContract {
         }
 
         let mut found = false;
+        let mut removed_bps = 0u32;
         let mut new_beneficiaries = Vec::new(&env);
         for entry in vault.beneficiaries.iter() {
             if entry.address != address {
                 new_beneficiaries.push_back(entry);
             } else {
                 found = true;
+                removed_bps = entry.bps;
             }
         }
 
@@ -4767,12 +4772,129 @@ impl TtlVaultContract {
         }
 
         vault.beneficiaries = new_beneficiaries;
+
+        // A confirmed beneficiary vacated a slot: promote the head of the
+        // waitlist into it, preserving the removed entry's allocation.
+        let mut promoted: Option<Address> = None;
+        if let Some(next) = Self::pop_waitlist_front(&env, vault_id) {
+            vault.beneficiaries.push_back(BeneficiaryEntry {
+                address: next.clone(),
+                bps: removed_bps,
+                minimum_threshold: 0,
+            });
+            promoted = Some(next);
+        }
+
         Self::save_vault(&env, vault_id, &vault);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
         env.events()
             .publish((BENEFICIARY_UPDATED_TOPIC, vault_id), address);
+        if let Some(promoted_address) = promoted {
+            env.events().publish(
+                (BENEFICIARY_PROMOTED_FROM_WAITLIST_TOPIC, vault_id),
+                promoted_address,
+            );
+        }
+        Ok(())
+    }
+
+    // --- Beneficiary waitlist ---
+
+    /// Adds an address to the vault's beneficiary waitlist.
+    ///
+    /// The waitlist is an ordered queue (max [`MAX_WAITLIST_ENTRIES`]). When a
+    /// confirmed beneficiary is later removed via [`Self::remove_beneficiary`],
+    /// the entry at the head of the queue is automatically promoted into the
+    /// vacated slot and a [`BENEFICIARY_PROMOTED_FROM_WAITLIST_TOPIC`] event is
+    /// emitted.
+    pub fn add_waitlist_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Locked {
+            return Err(ContractError::AlreadyReleased);
+        }
+        if address == vault.owner || address == vault.beneficiary {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        if vault.beneficiaries.iter().any(|e| e.address == address) {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        let mut waitlist: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&StorageKey::BeneficiaryWaitlist(vault_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if waitlist.iter().any(|a| a == address) {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        if waitlist.len() >= MAX_WAITLIST_ENTRIES {
+            return Err(ContractError::BeneficiaryCapacityExceeded);
+        }
+
+        waitlist.push_back(address.clone());
+        let key = StorageKey::BeneficiaryWaitlist(vault_id);
+        env.storage().persistent().set(&key, &waitlist);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+
+        env.events()
+            .publish((BENEFICIARY_WAITLIST_UPDATED_TOPIC, vault_id), address);
+        Ok(())
+    }
+
+    /// Removes an address from the vault's beneficiary waitlist while
+    /// preserving the relative order of the remaining entries.
+    pub fn remove_waitlist_beneficiary(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        address: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+
+        let key = StorageKey::BeneficiaryWaitlist(vault_id);
+        let waitlist: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut found = false;
+        let mut remaining = Vec::new(&env);
+        for entry in waitlist.iter() {
+            if entry == address {
+                found = true;
+            } else {
+                remaining.push_back(entry);
+            }
+        }
+        if !found {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+
+        env.storage().persistent().set(&key, &remaining);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, VAULT_TTL_THRESHOLD, VAULT_TTL_LEDGERS);
+        env.events()
+            .publish((BENEFICIARY_WAITLIST_UPDATED_TOPIC, vault_id), address);
         Ok(())
     }
 

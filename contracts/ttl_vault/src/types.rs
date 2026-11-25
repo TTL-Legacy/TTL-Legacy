@@ -65,6 +65,10 @@ pub const PASSKEY_AUDIT_TOPIC: Symbol = symbol_short!("pk_audit");
 pub const PASSKEY_ESCROW_TOPIC: Symbol = symbol_short!("pk_esc");
 pub const BENEFICIARY_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_acc");
 pub const BENEFICIARY_DECLINED_TOPIC: Symbol = symbol_short!("ben_dec");
+/// Emitted when the first waitlist entry is promoted into a vacated slot.
+pub const BENEFICIARY_PROMOTED_FROM_WAITLIST_TOPIC: Symbol = symbol_short!("ben_prom");
+/// Emitted when an address is added to or removed from a vault's waitlist.
+pub const BENEFICIARY_WAITLIST_UPDATED_TOPIC: Symbol = symbol_short!("wl_upd");
 pub const BENEFICIARY_CONDITION_ACCEPTED_TOPIC: Symbol = symbol_short!("ben_cond");
 pub const BENEFICIARY_IDENTITY_ORACLE_SET_TOPIC: Symbol = symbol_short!("ben_id_or");
 pub const BENEFICIARY_IDENTITY_VERIFIED_TOPIC: Symbol = symbol_short!("ben_id_vf");
@@ -508,6 +512,8 @@ pub enum StorageKey {
     BeneficiaryReleaseTriggers(u64),
     BeneficiaryTierThreshold(u64, Address),
     BeneficiaryStatusEntry(u64, Address),
+    /// Ordered queue of addresses waiting for a beneficiary slot to open.
+    BeneficiaryWaitlist(u64),
     // Issue: beneficiary veto of owner-defined release conditions before expiry
     BeneficiaryReleaseConditionVeto(u64),
     // Issue #1291: multi-condition release triggers
