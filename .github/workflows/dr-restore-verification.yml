@@ -34,43 +34,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      # Fail fast, naming every missing secret, instead of failing later
-      # with a vague error from aws-actions/configure-aws-credentials or aws s3.
-      - name: Check required secrets
-        env:
-          DR_AWS_ACCESS_KEY_ID: ${{ secrets.DR_AWS_ACCESS_KEY_ID }}
-          DR_AWS_SECRET_ACCESS_KEY: ${{ secrets.DR_AWS_SECRET_ACCESS_KEY }}
-          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
-          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
-        run: |
-          required=(
-            DR_AWS_ACCESS_KEY_ID
-            DR_AWS_SECRET_ACCESS_KEY
-            DR_S3_BUCKET
-            DR_S3_ENDPOINT
-          )
-
-          missing=()
-          for name in "${required[@]}"; do
-            [[ -n "${!name:-}" ]] || missing+=("${name}")
-          done
-
-          if (( ${#missing[@]} > 0 )); then
-            {
-              echo "## DR restore verification not run: missing repository secrets"
-              echo
-              echo "Set these under Settings → Secrets and variables → Actions:"
-              echo
-              for name in "${missing[@]}"; do echo "- \`${name}\`"; done
-              echo
-              echo "See docs/disaster-recovery-runbook.md (Nightly Backup Workflow)."
-            } >> "${GITHUB_STEP_SUMMARY}"
-            echo "::error title=DR restore verification misconfigured::Missing required secrets: ${missing[*]}. See docs/disaster-recovery-runbook.md."
-            exit 1
-          fi
-          echo "All required secrets are set."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Stellar CLI
         run: |
@@ -83,7 +47,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y sqlite3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           aws-access-key-id: ${{ secrets.DR_AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.DR_AWS_SECRET_ACCESS_KEY }}
@@ -319,9 +283,7 @@ jobs:
 
       - name: Notify on failure
         if: failure()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
-        env:
-          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const prefix = process.env.BACKUP_PREFIX || '(not determined)';

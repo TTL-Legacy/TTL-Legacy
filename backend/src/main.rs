@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderValue, Method, StatusCode},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use tokio_util::sync::CancellationToken;
@@ -295,6 +295,64 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         )],
         body,
     )
+}
+
+/// Build the production axum router (issue #2070/#2069/#2068 wiring).
+///
+/// Wires the health/readiness/metrics probes plus the axum-style endpoints:
+/// the vesting bonus handlers, the FTS5 vault search (#2069), the check-in
+/// delegation audit log (#2068), and the multi-party withdrawal approval
+/// workflow (#2070). Older actix-style handlers (reminder preferences,
+/// subscriptions, proof-of-life, audit export) still live in `routes.rs` and
+/// are not registered here; this router holds the endpoints migrated to axum
+/// `State` extraction.
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
+        .route("/health/consensus", get(consensus_health_handler))
+        .route("/metrics", get(metrics_handler))
+        // Vesting bonus (already axum-style).
+        .route(
+            "/api/vaults/:vault_id/vesting/claim-bonus",
+            post(routes::claim_vesting_bonus),
+        )
+        .route(
+            "/api/vaults/:vault_id/vesting/bonus",
+            get(routes::get_vesting_bonus),
+        )
+        // Issue #2069 — full-text search over vault tags and notes.
+        .route("/api/vaults/search", get(routes::search_vaults_fulltext_handler))
+        .route(
+            "/api/vaults/:vault_id/metadata",
+            put(routes::set_vault_metadata_handler).get(routes::get_vault_metadata_handler),
+        )
+        // Issue #2068 — check-in delegation grant/revoke + audit trail.
+        .route(
+            "/api/vaults/:vault_id/delegation",
+            post(routes::grant_check_in_delegation_handler)
+                .delete(routes::revoke_check_in_delegation_handler),
+        )
+        .route(
+            "/api/vaults/:vault_id/delegation-audit",
+            get(routes::get_check_in_delegation_audit_handler),
+        )
+        // Issue #2070 — multi-party withdrawal approval workflow.
+        .route(
+            "/api/vaults/:vault_id/withdrawal-approvals",
+            post(routes::create_withdrawal_workflow_handler)
+                .get(routes::list_withdrawal_workflows_handler),
+        )
+        .route(
+            "/api/vaults/:vault_id/withdrawal-approvals/:withdrawal_id",
+            get(routes::get_withdrawal_workflow_handler)
+                .delete(routes::cancel_withdrawal_workflow_handler),
+        )
+        .route(
+            "/api/vaults/:vault_id/withdrawal-approvals/:withdrawal_id/approvals",
+            post(routes::submit_withdrawal_approval_handler),
+        )
+        .with_state(state)
 }
 
 /// Default timeout applied to the Soroban RPC `get_contract_version` call.

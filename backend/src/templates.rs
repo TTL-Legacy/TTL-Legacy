@@ -1,6 +1,9 @@
 use crate::db::*;
 use crate::models::*;
+use crate::security_headers::CspNonce;
 use chrono::Utc;
+use std::fs;
+use std::path::Path;
 
 pub fn get_vault_templates() -> VaultTemplateList {
     VaultTemplateList {
@@ -107,6 +110,11 @@ pub fn email_subject(
         (Locale::De, NotificationType::WithdrawalAlert) => {
             "Abhebungsversuch auf Ihrem Tresor erkannt"
         }
+        // Passkey expiry — all locales (no locale-specific translations yet)
+        (_, NotificationType::PasskeyExpiringSoon) => "Passkey expiring soon",
+        (_, NotificationType::PasskeyExpired) => "Passkey has expired",
+        // Fallback
+        _ => "Notification from TTL-Legacy",
     }
 }
 
@@ -169,6 +177,16 @@ pub fn email_body(
             "Ihr Tresor wurde an den designierten Begünstigten freigegeben.".to_string()
         }
         (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert.".to_string(),
+        // Passkey expiry — all locales
+        (_, NotificationType::PasskeyExpiringSoon) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!("A passkey on your vault expires in approximately {h} hours. Rotate or extend it to keep vault access.")
+        }
+        (_, NotificationType::PasskeyExpired) => {
+            "A passkey on your vault has expired. Rotate it now to restore check-in access.".to_string()
+        }
+        // Fallback for notification types without locale-specific email body templates.
+        _ => String::new(),
     }
 }
 
@@ -395,4 +413,15 @@ mod tests {
             }
         }
     }
+}
+
+/// Render the simulator HTML with the CSP nonce injected into inline
+/// `<script>` tags.  The `{{csp_nonce}}` placeholder in the raw HTML
+/// is replaced with the actual nonce value so that the browser allows
+/// the inline scripts to execute under the nonce-based CSP.
+pub fn render_simulator_html(nonce: &CspNonce) -> String {
+    let path = Path::new("backend/simulator.html");
+    let html = fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("simulator.html not found at {:?}", path));
+    html.replace("{{csp_nonce}}", &nonce.value)
 }

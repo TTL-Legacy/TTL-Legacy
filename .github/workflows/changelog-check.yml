@@ -1,0 +1,102 @@
+name: Changelog Format Check
+
+# Verifies that CHANGELOG.md matches the output git-cliff would generate,
+# catching hand-edits that diverge from the cliff.toml template.
+#
+# Because the repo has no release tags yet (all content lives under
+# [Unreleased]), this job checks the structural format rather than a
+# byte-for-byte regeneration, which is only possible once real version
+# tags exist.  Once tags are present, switch the git-cliff invocation to
+# `--latest` and compare directly against the committed file.
+
+on:
+  pull_request:
+    paths:
+      - "CHANGELOG.md"
+      - "cliff.toml"
+  push:
+    branches:
+      - main
+    paths:
+      - "CHANGELOG.md"
+      - "cliff.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  changelog-check:
+    name: Validate CHANGELOG.md against cliff.toml
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
+        with:
+          tool: git-cliff
+
+      - name: Generate CHANGELOG from git history
+        run: |
+          git cliff --output CHANGELOG.generated.md
+          echo "Generated CHANGELOG:"
+          cat CHANGELOG.generated.md
+
+      - name: Diff generated vs committed CHANGELOG
+        run: |
+          if ! diff --unified CHANGELOG.generated.md CHANGELOG.md; then
+            echo ""
+            echo "❌ CHANGELOG.md does not match the output of 'git cliff'."
+            echo "   Run 'git cliff --output CHANGELOG.md' locally,"
+            echo "   review the diff, and commit the updated file."
+            exit 1
+          fi
+          echo "✅ CHANGELOG.md matches git-cliff output."
+
+      - name: Validate CHANGELOG structure matches cliff.toml groups
+        run: |
+          set -euo pipefail
+
+          # Allowed section headings derived from cliff.toml commit_parsers groups.
+          # HTML sort tags (<!-- N -->) are stripped by cliff before rendering.
+          ALLOWED_GROUPS=(
+            "Features"
+            "Bug Fixes"
+            "Refactor"
+            "Security"
+            "Documentation"
+            "Performance"
+            "Testing"
+            "CI/CD"
+          )
+
+          INVALID=0
+
+          # Extract every ### heading from CHANGELOG.md
+          while IFS= read -r heading; do
+            group="${heading### }"   # strip leading "### "
+            match=0
+            for allowed in "${ALLOWED_GROUPS[@]}"; do
+              if [[ "$group" == "$allowed" ]]; then
+                match=1
+                break
+              fi
+            done
+            if [[ $match -eq 0 ]]; then
+              echo "❌ Disallowed section heading '### $group' found in CHANGELOG.md."
+              echo "   Allowed headings: ${ALLOWED_GROUPS[*]}"
+              INVALID=1
+            fi
+          done < <(grep "^### " CHANGELOG.md)
+
+          if [[ $INVALID -eq 1 ]]; then
+            echo ""
+            echo "Fix the headings above to match the groups defined in cliff.toml."
+            exit 1
+          fi
+
+          echo "✅ All section headings match cliff.toml groups."
