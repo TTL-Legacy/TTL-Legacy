@@ -23,7 +23,12 @@ pub async fn audit_middleware(
     let path = uri.path().to_string();
 
     // Skip internal routes to reduce noise and avoid recursion
-    if path == "/health" || path == "/ready" || path.starts_with("/api/audit-logs") {
+    if path == "/health"
+        || path == "/healthz"
+        || path == "/ready"
+        || path == "/readyz"
+        || path.starts_with("/api/audit-logs")
+    {
         return next.run(req).await;
     }
 

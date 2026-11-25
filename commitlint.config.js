@@ -1,4 +1,4 @@
-module.exports = {
+export default {
   // Extend the conventional commits ruleset
   extends: ["@commitlint/config-conventional"],
   rules: {

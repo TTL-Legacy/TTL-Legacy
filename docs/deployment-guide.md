@@ -113,6 +113,15 @@ For native XLM, use the standard Stellar asset contract address.
 - [ ] Monitoring alerts set up for contract errors
 - [ ] Transaction fee monitoring enabled
 - [ ] Unusual activity alerts configured
+- [ ] Backend rate limiting uses the shared Redis store when running more than one replica (see below)
+
+**Backend rate-limit configuration**
+
+| Variable | Values | Behaviour |
+|---|---|---|
+| `RATE_LIMIT_STORE` | `redis`, `memory` | `redis` shares counters across all replicas. When unset, Redis is used automatically if `REDIS_URL` is set, otherwise counters are per-process. |
+| `REDIS_URL` | e.g. `redis://redis:6379` | Redis instance used for the shared counters. |
+| `RATE_LIMIT_FAIL_MODE` | `local` (default), `deny` | What to do when Redis is unreachable: fall back to the per-process counter, or reject the request with HTTP 429. |
 
 ### Audit Logging
 
@@ -332,7 +341,7 @@ Do not put them in `values.yaml`, a ConfigMap, or the Helm release history.
 | `TOTP_ENCRYPTION_KEY` | Encrypts TOTP seeds at rest |
 | `TOTP_ENCRYPTION_KEY_PREVIOUS` | Previous key, kept during rotation (optional) |
 | `ADMIN_API_KEY` | Authenticates admin endpoints |
-| `REDIS_URL` | Rate-limit store, if `RATE_LIMIT_STORE=redis` (may embed credentials) |
+| `REDIS_URL` | Shared rate-limit store and consensus cache (may embed credentials) |
 
 Create the Secret out-of-band, from a secret manager or a sealed/encrypted source
 (e.g. External Secrets Operator, Sealed Secrets, or SOPS):

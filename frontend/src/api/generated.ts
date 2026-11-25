@@ -89,3 +89,35 @@ export interface UpgradeProposalActionResponse {
 export interface AdminAddressResponse {
   admin_address: string;
 }
+
+// ── Issue #2066: Token price oracle types ────────────────────────────────────
+
+export type OracleProvider = "redstone" | "pyth";
+
+export interface TokenPriceOracleConfig {
+  provider: OracleProvider;
+  endpoint_url: string;
+  refresh_interval_seconds: number;
+  xlm_feed_id: string;
+  enabled: boolean;
+  updated_at: string;
+}
+
+export interface SetOracleConfigRequest {
+  provider: OracleProvider;
+  endpoint_url: string;
+  refresh_interval_seconds: number;
+  xlm_feed_id: string;
+  enabled: boolean;
+}
+
+export interface EstimatedVaultValue {
+  vault_id: string;
+  balance_stroops: number;
+  estimated_value_usd: number | null;
+  token_symbol: string;
+  price_per_token_usd: number | null;
+  price_fetched_at: string | null;
+  is_stale: boolean;
+  estimated_at: string;
+}

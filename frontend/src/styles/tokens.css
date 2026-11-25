@@ -1,0 +1,98 @@
+/**
+ * Design-system colour tokens for the React frontend (#2071).
+ *
+ * The dark-mode toggle added in #1860 previously relied on ad-hoc CSS overrides.
+ * This file formalises the palette as CSS custom properties using the --color-*
+ * naming convention so components can reference theme colours via
+ * var(--color-*) instead of hard-coded hex values. The required tokens mirror
+ * the exact values used by the standalone simulator (backend/simulator.html)
+ * so the React app and the simulator stay visually consistent.
+ *
+ * How themes are resolved (mirrors backend/simulator.html):
+ *   1. An explicit choice stored in localStorage under the "ttl-theme" key
+ *      ("light" | "dark") is applied by setting data-theme on <html>.
+ *   2. When no data-theme attribute is present, the OS preference is honoured
+ *      through the prefers-color-scheme media query below.
+ *   3. Otherwise the :root defaults (dark) apply.
+ *
+ * Toggle the theme from the React app with the useTheme() hook
+ * (frontend/src/theme.ts) and the <ThemeToggle /> button; both read and write
+ * the same "ttl-theme" localStorage key used by the simulator.
+ */
+
+/* ── Default theme (dark) ─────────────────────────────────────────────── */
+:root {
+  /* Surfaces & text */
+  --color-bg: #0f1117;
+  --color-surface: #1a1d27;
+  --color-bg-elevated: #15171f;   /* floating UI: popovers, menus */
+  --color-surface-hover: #232634; /* hover state for surface elements */
+  --color-text-primary: #e2e8f0;
+  --color-text-muted: #9aa3b2;
+  --color-border: #2a2e3f;
+
+  /* Brand / status */
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-on-accent: #ffffff;     /* foreground text on accent surfaces */
+  --color-danger: #ef4444;
+  --color-danger-bg: #2a1717;     /* tinted backdrop for danger panels */
+  --color-danger-border: #6b2a2a;
+  --color-warn: #f59e0b;
+  --color-success: #22c55e;
+
+  /* Data-viz palette (constant across themes for consistent identity) */
+  --color-chart-1: #1565c0;
+  --color-chart-2: #6a1b9a;
+  --color-chart-3: #00838f;
+  --color-grid: #2a2e3f;          /* chart track / gridline backdrop */
+
+  --radius: 0.75rem;
+}
+
+/* ── Light theme — explicit manual override ───────────────────────────── */
+:root[data-theme="light"] {
+  --color-bg: #f8f9fc;
+  --color-surface: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-surface-hover: #eef0f6;
+  --color-text-primary: #1a1d27;
+  --color-text-muted: #5a6478;
+  --color-border: #d1d5e0;
+
+  --color-accent: #4f46e5;
+  --color-accent-hover: #6366f1;
+  /* --color-on-accent stays #ffffff: white reads well on both accent shades. */
+  --color-danger: #dc2626;
+  --color-danger-bg: #fef2f2;
+  --color-danger-border: #fca5a5;
+  --color-warn: #d97706;
+  --color-success: #16a34a;
+
+  --color-grid: #e0e0e0;
+
+  /* --radius and the chart-* palette are unchanged in light mode. */
+}
+
+/* ── Respect the OS preference when no manual override is set ──────────── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --color-bg: #f8f9fc;
+    --color-surface: #ffffff;
+    --color-bg-elevated: #ffffff;
+    --color-surface-hover: #eef0f6;
+    --color-text-primary: #1a1d27;
+    --color-text-muted: #5a6478;
+    --color-border: #d1d5e0;
+
+    --color-accent: #4f46e5;
+    --color-accent-hover: #6366f1;
+    --color-danger: #dc2626;
+    --color-danger-bg: #fef2f2;
+    --color-danger-border: #fca5a5;
+    --color-warn: #d97706;
+    --color-success: #16a34a;
+
+    --color-grid: #e0e0e0;
+  }
+}

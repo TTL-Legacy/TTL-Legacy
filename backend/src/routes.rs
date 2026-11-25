@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use std::sync::Arc;
+
 use actix_web::{
     http::StatusCode,
     web::{Data, Json, Path, Query},
@@ -18,9 +20,9 @@ use crate::{
         simulate_release_handler,
     },
     models::{
-        AuditLogEntry, ClaimBonusRequest, ReminderPreferences, SetPreferencesRequest,
-        SetSubscriptionRequest, SimulateReleaseQuery, SimulateReleaseResponse, Subscription,
-        VaultReleaseHistory,
+        AuditLogEntry, ClaimBonusRequest, PauseHistoryResponse, ReminderPreferences,
+        SetPreferencesRequest, SetSubscriptionRequest, SimulateReleaseQuery,
+        SimulateReleaseResponse, Subscription, VaultReleaseHistory,
     },
 };
 
@@ -97,9 +99,9 @@ impl CorsConfig {
     }
 }
 
-// ── Health & readiness probes (#1489) ────────────────────────────────────────
+// ── Health & readiness probes (#1489, #2126) ────────────────────────────────
 
-/// GET /health
+/// GET /health or GET /healthz
 ///
 /// Cheap liveness probe: confirms the process is up and serving requests.
 /// Intentionally performs no dependency checks so it stays fast and cannot
@@ -107,6 +109,14 @@ impl CorsConfig {
 #[instrument]
 pub async fn health() -> StatusCode {
     StatusCode::OK
+}
+
+/// GET /healthz
+///
+/// Kubernetes liveness probe alias for [`health`].
+#[instrument]
+pub async fn healthz() -> StatusCode {
+    health().await
 }
 
 #[derive(serde::Serialize)]
@@ -121,7 +131,7 @@ pub struct ReadinessChecks {
     pub rpc: &'static str,
 }
 
-/// GET /ready
+/// GET /ready or GET /readyz
 ///
 /// Readiness probe: verifies that dependencies (DB connection and Soroban RPC)
 /// are reachable before the instance is considered ready to serve traffic.
@@ -148,6 +158,16 @@ pub async fn ready(
             checks,
         })))
     }
+}
+
+/// GET /readyz
+///
+/// Kubernetes readiness probe alias for [`ready`].
+#[instrument(skip(state))]
+pub async fn readyz(
+    state: Data<Arc<AppState>>,
+) -> Result<Json<ReadinessResponse>, AppError> {
+    ready(state).await
 }
 
 #[derive(Deserialize)]
@@ -432,4 +452,339 @@ pub async fn submit_proof_of_life(
         "vault_id": vault_id,
         "beneficiary": body.beneficiary,
     })))
+}
+
+// ── Issue #2069: vault full-text search over tags and notes ─────────────────
+//
+// `GET /api/vaults/search?q=<query>` searches an owner's vault tags and notes
+// using SQLite FTS5 (the SQLite equivalent of PostgreSQL tsvector/tsquery; the
+// codebase runs on SQLite, not PostgreSQL). The existing POST
+// /api/vaults/search is the filter-based owner/beneficiary/status search and
+// is left untouched.
+
+/// PUT /api/vaults/{vault_id}/metadata — set searchable tags and notes for a
+/// vault (owned by `body.owner`).
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn set_vault_metadata_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<crate::models::SetVaultMetadataRequest>,
+) -> Result<axum::Json<crate::models::VaultMetadata>, AppError> {
+    db.upsert_vault_metadata(
+        &vault_id,
+        &body.owner,
+        &body.tags,
+        body.notes.as_deref().unwrap_or(""),
+    )
+    .map_err(AppError::from)?;
+    let meta = db
+        .get_vault_metadata(&vault_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    Ok(axum::Json(meta))
+}
+
+/// GET /api/vaults/{vault_id}/metadata — retrieve a vault's tags and notes.
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn get_vault_metadata_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+) -> Result<axum::Json<crate::models::VaultMetadata>, AppError> {
+    Ok(axum::Json(
+        db.get_vault_metadata(&vault_id)
+            .map_err(AppError::from)?
+            .ok_or(AppError::NotFound)?,
+    ))
+}
+
+/// GET /api/vaults/search?q=<query>&owner=<owner>&limit=&cursor=
+///
+/// Full-text search over the authenticated owner's vault tags and notes.
+/// Returns paginated vault summaries with highlighted match snippets.
+#[instrument(skip(db))]
+pub async fn search_vaults_fulltext_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Query(params): axum::extract::Query<crate::models::VaultSearchQueryParams>,
+) -> Result<axum::Json<crate::models::VaultSearchResponse>, AppError> {
+    let q = params.q.trim();
+    if q.is_empty() {
+        return Err(AppError::InvalidInput("q must not be empty".into()));
+    }
+    // Owner scoping is mandatory: a search must never leak another owner's
+    // vaults. (When auth middleware lands, `owner` would be derived from the
+    // authenticated principal rather than a query parameter.)
+    let owner = params.owner.ok_or_else(|| {
+        AppError::InvalidInput("owner query parameter is required".into())
+    })?;
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let offset = params
+        .cursor
+        .and_then(|c| c.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let mut hits = db
+        .search_vaults_fulltext(&owner, q, limit, offset)
+        .map_err(AppError::from)?;
+
+    // Enrich hits with live vault state where the vault is in-memory.
+    for hit in hits.iter_mut() {
+        if let Some(vault) = db.get_vault(&hit.vault_id) {
+            hit.status = Some(vault.status);
+            hit.balance = Some(vault.balance);
+            hit.ttl_remaining = vault.ttl_remaining;
+        }
+    }
+
+    let next_cursor = if hits.len() as u32 == limit {
+        Some((offset + limit).to_string())
+    } else {
+        None
+    };
+
+    Ok(axum::Json(crate::models::VaultSearchResponse {
+        query: params.q,
+        vaults: hits,
+        next_cursor,
+        limit,
+    }))
+}
+
+// ── Issue #2068: check-in delegation audit log ───────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct RevokeDelegationQuery {
+    /// Vault owner requesting the revoke (auth would normally supply this).
+    pub owner: String,
+}
+
+/// POST /api/vaults/{vault_id}/delegation — grant check-in delegation to
+/// `body.delegate`. Only updates the current-state row; the TTL watcher
+/// observes the transition and writes the audit-log entry.
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn grant_check_in_delegation_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<crate::models::GrantCheckInDelegationRequest>,
+) -> Result<axum::Json<crate::models::CheckInDelegationState>, AppError> {
+    if body.delegate.trim().is_empty() {
+        return Err(AppError::InvalidInput("delegate must not be empty".into()));
+    }
+    db.upsert_check_in_delegation(&vault_id, &body.owner, &body.delegate)
+        .map_err(AppError::from)?;
+    let state = db
+        .get_check_in_delegation(&vault_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    Ok(axum::Json(state))
+}
+
+/// DELETE /api/vaults/{vault_id}/delegation?owner=<owner> — revoke the current
+/// check-in delegation. Only the vault owner may revoke.
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn revoke_check_in_delegation_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<RevokeDelegationQuery>,
+) -> Result<axum::Json<crate::models::CheckInDelegationState>, AppError> {
+    let existing = db
+        .get_check_in_delegation(&vault_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    if existing.delegate.is_none() {
+        return Err(AppError::InvalidInput("no active delegation to revoke".into()));
+    }
+    if existing.owner != q.owner {
+        return Err(AppError::Forbidden(
+            "only the vault owner may revoke check-in delegation".into(),
+        ));
+    }
+    db.clear_check_in_delegation(&vault_id).map_err(AppError::from)?;
+    let state = db
+        .get_check_in_delegation(&vault_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    Ok(axum::Json(state))
+}
+
+/// GET /api/vaults/{vault_id}/delegation-audit — the check-in delegation
+/// grant/revoke audit trail. Entries are populated by the TTL watcher.
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn get_check_in_delegation_audit_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+) -> Result<axum::Json<crate::models::CheckInDelegationAuditResponse>, AppError> {
+    let entries = db
+        .get_check_in_delegation_audit(&vault_id)
+        .map_err(AppError::from)?;
+    Ok(axum::Json(crate::models::CheckInDelegationAuditResponse {
+        vault_id,
+        entries,
+    }))
+}
+
+// ── Issue #2070: multi-party withdrawal approval workflow ───────────────────
+
+/// POST /api/vaults/{vault_id}/withdrawal-approvals — request a withdrawal that
+/// requires multi-party approval before it may execute.
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn create_withdrawal_workflow_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<crate::models::CreateWithdrawalApprovalRequest>,
+) -> Result<(axum::http::StatusCode, axum::Json<crate::models::WithdrawalApprovalWorkflow>), AppError> {
+    if body.amount <= 0 {
+        return Err(AppError::InvalidInput("amount must be positive".into()));
+    }
+    if body.required_approvers.is_empty() {
+        return Err(AppError::InvalidInput(
+            "required_approvers must not be empty".into(),
+        ));
+    }
+
+    let ttl = body
+        .approval_ttl_seconds
+        .unwrap_or(crate::models::DEFAULT_WITHDRAWAL_APPROVAL_TTL_SECS)
+        .max(1);
+    let now = chrono::Utc::now();
+    let expires_at = now + chrono::Duration::seconds(ttl as i64);
+    let withdrawal_id = uuid::Uuid::new_v4().to_string();
+
+    let workflow = crate::models::WithdrawalApprovalWorkflow {
+        vault_id: vault_id.clone(),
+        withdrawal_id: withdrawal_id.clone(),
+        amount: body.amount,
+        requested_by: body.requested_by,
+        required_approvers: body.required_approvers,
+        approval_ttl_seconds: ttl,
+        created_at: now,
+        expires_at,
+        status: crate::models::WithdrawalApprovalStatus::Pending,
+        approvals: Vec::new(),
+        executed_tx_hash: None,
+    };
+    db.create_withdrawal_workflow(&workflow)
+        .map_err(AppError::from)?;
+    Ok((axum::http::StatusCode::CREATED, axum::Json(workflow)))
+}
+
+/// GET /api/vaults/{vault_id}/withdrawal-approvals — list every withdrawal
+/// approval workflow for a vault (each lazily expired on read).
+#[instrument(skip(db), fields(vault_id = %vault_id))]
+pub async fn list_withdrawal_workflows_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path(vault_id): axum::extract::Path<String>,
+) -> Result<axum::Json<crate::models::WithdrawalApprovalListResponse>, AppError> {
+    let workflows = db
+        .list_withdrawal_workflows(&vault_id)
+        .map_err(AppError::from)?;
+    Ok(axum::Json(crate::models::WithdrawalApprovalListResponse {
+        vault_id,
+        workflows,
+    }))
+}
+
+/// GET /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id} — fetch a
+/// single workflow's status (and recorded approvals). Lazily expires a pending
+/// workflow whose TTL has elapsed.
+#[instrument(skip(db), fields(vault_id = %vault_id, withdrawal_id = %withdrawal_id))]
+pub async fn get_withdrawal_workflow_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path((vault_id, withdrawal_id)): axum::extract::Path<(String, String)>,
+) -> Result<axum::Json<crate::models::WithdrawalApprovalWorkflow>, AppError> {
+    let workflow = db
+        .get_withdrawal_workflow(&withdrawal_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    if workflow.vault_id != vault_id {
+        return Err(AppError::NotFound);
+    }
+    Ok(axum::Json(workflow))
+}
+
+/// POST /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id}/approvals —
+/// submit an approval from `body.approver`. Only addresses listed in the
+/// workflow's `required_approvers` may approve; once all of them have approved,
+/// the workflow transitions to `approved`.
+#[instrument(skip(db), fields(vault_id = %vault_id, withdrawal_id = %withdrawal_id))]
+pub async fn submit_withdrawal_approval_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path((vault_id, withdrawal_id)): axum::extract::Path<(String, String)>,
+    axum::Json(body): axum::Json<crate::models::SubmitWithdrawalApprovalRequest>,
+) -> Result<axum::Json<crate::models::WithdrawalApprovalWorkflow>, AppError> {
+    let mut workflow = db
+        .get_withdrawal_workflow(&withdrawal_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    if workflow.vault_id != vault_id {
+        return Err(AppError::NotFound);
+    }
+    if workflow.status != crate::models::WithdrawalApprovalStatus::Pending {
+        return Err(AppError::InvalidInput(format!(
+            "withdrawal is not pending (status={workflow})"
+        )));
+    }
+    if !workflow
+        .required_approvers
+        .iter()
+        .any(|a| a == &body.approver)
+    {
+        return Err(AppError::Forbidden(
+            "approver is not in the required approvers list".into(),
+        ));
+    }
+
+    let inserted = db
+        .add_withdrawal_approval(&withdrawal_id, &body.approver)
+        .map_err(AppError::from)?;
+    if !inserted {
+        return Err(AppError::InvalidInput(
+            "approver has already approved this withdrawal".into(),
+        ));
+    }
+
+    // All required approvers must approve before the withdrawal may execute.
+    workflow.approvals = db
+        .get_withdrawal_approvals(&withdrawal_id)
+        .map_err(AppError::from)?;
+    if workflow.approvals.len() >= workflow.required_approvers.len() {
+        db.set_withdrawal_workflow_status(
+            &withdrawal_id,
+            crate::models::WithdrawalApprovalStatus::Approved,
+        )
+        .map_err(AppError::from)?;
+        workflow.status = crate::models::WithdrawalApprovalStatus::Approved;
+    }
+    Ok(axum::Json(workflow))
+}
+
+/// DELETE /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id} — cancel a
+/// pending withdrawal request.
+#[instrument(skip(db), fields(vault_id = %vault_id, withdrawal_id = %withdrawal_id))]
+pub async fn cancel_withdrawal_workflow_handler(
+    axum::extract::State(db): axum::extract::State<std::sync::Arc<Db>>,
+    axum::extract::Path((vault_id, withdrawal_id)): axum::extract::Path<(String, String)>,
+) -> Result<axum::Json<crate::models::WithdrawalApprovalWorkflow>, AppError> {
+    let workflow = db
+        .get_withdrawal_workflow(&withdrawal_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    if workflow.vault_id != vault_id {
+        return Err(AppError::NotFound);
+    }
+    if workflow.status != crate::models::WithdrawalApprovalStatus::Pending {
+        return Err(AppError::InvalidInput(format!(
+            "only pending withdrawals can be cancelled (status={workflow})"
+        )));
+    }
+    db.set_withdrawal_workflow_status(
+        &withdrawal_id,
+        crate::models::WithdrawalApprovalStatus::Cancelled,
+    )
+    .map_err(AppError::from)?;
+    let updated = db
+        .get_withdrawal_workflow(&withdrawal_id)
+        .map_err(AppError::from)?
+        .ok_or(AppError::NotFound)?;
+    Ok(axum::Json(updated))
 }

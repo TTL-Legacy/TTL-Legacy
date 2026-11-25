@@ -121,6 +121,11 @@ fn test_storage_key_no_collisions() {
         StorageKey::PendingMultiSigOpNonce(0),
         StorageKey::PendingUpgrade,
         StorageKey::AllowedTokens,
+        // Issue #2044: VaultTag and VaultNote must not collide even when their
+        // inner (vault_id, id) tuples share the same values, because they carry
+        // different enum discriminants.
+        StorageKey::VaultTag(0, 42),
+        StorageKey::VaultNote(0, 42),
     ];
 
     for (i, key) in keys.iter().enumerate() {
@@ -135,4 +140,29 @@ fn test_storage_key_no_collisions() {
             i
         );
     }
+}
+
+/// Issue #2044 — VaultTag and VaultNote must not collide when both use the
+/// same (vault_id, id) pair, because they differ only in enum discriminant.
+#[test]
+fn test_vault_tag_and_vault_note_no_collision() {
+    let env = Env::default();
+
+    let vault_id: u64 = 1;
+    let shared_id: u64 = 99;
+
+    let tag_key = StorageKey::VaultTag(vault_id, shared_id);
+    let note_key = StorageKey::VaultNote(vault_id, shared_id);
+
+    env.storage().persistent().set(&tag_key, &100u32);
+    env.storage().persistent().set(&note_key, &200u32);
+
+    let tag_val: u32 = env.storage().persistent().get(&tag_key).unwrap_or(0);
+    let note_val: u32 = env.storage().persistent().get(&note_key).unwrap_or(0);
+
+    assert_eq!(tag_val, 100u32, "VaultTag value was overwritten by VaultNote");
+    assert_ne!(
+        tag_val, note_val,
+        "VaultTag and VaultNote collide when vault_id and inner id are identical"
+    );
 }
