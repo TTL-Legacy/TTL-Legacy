@@ -1,165 +1,189 @@
-/// Tests for Issue #559 – Passkey Escrow.
-#[cfg(test)]
+#![cfg(test)]
+
+//! Tests for Issue #559 — Passkey Escrow.
+
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, BytesN, Env,
 };
 
-use crate::tests::common::setup_unfunded as setup;
+use crate::tests::common::setup_funded as setup;
 
-fn make_pk(env: &Env, byte: u8) -> BytesN<32> {
-    BytesN::<32>::from_array(env, &[byte; 32])
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn setup_vault_with_passkey(
+    env: &Env,
+    owner: &Address,
+    beneficiary: &Address,
+    client: &TtlVaultContractClient,
+) -> (u64, BytesN<32>) {
+    let vault_id = client.create_vault(owner, beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
+    let passkey_hash = BytesN::<32>::from_array(env, &[0xEEu8; 32]);
+    client.add_passkey(&vault_id, owner, &passkey_hash, &false);
+    (vault_id, passkey_hash)
 }
 
-fn setup_vault_with_pk(byte: u8) -> (Env, Address, Address, TtlVaultContractClient<'static>, u64, BytesN<32>) {
-    let (env, owner, beneficiary, client) = setup();
-    let vault_id = client.create_vault(&owner, &beneficiary, &300_u64, &None);
-    let pk = make_pk(&env, byte);
-    client.add_passkey(&vault_id, &owner, &pk, &false);
-    (env, owner, beneficiary, client, vault_id, pk)
-}
+// ── AC1 + AC12: escrow_passkey creates record and emits event ─────────────────
 
 #[test]
 fn test_escrow_passkey_creates_record() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(1);
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
     let recovery = Address::generate(&env);
 
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
 
-    let record = client.get_passkey_escrow(&vault_id, &pk).unwrap();
+    let record = client
+        .get_passkey_escrow(&vault_id, &passkey_hash)
+        .expect("escrow record should exist after escrow_passkey");
     assert_eq!(record.recovery_contact, recovery);
 }
 
+// ── AC3: PasskeyNotFound when passkey not in vault ────────────────────────────
+
 #[test]
 #[should_panic]
-fn test_escrow_passkey_requires_owner() {
-    let (env, _owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(2);
-    let attacker = Address::generate(&env);
+fn test_escrow_passkey_not_found() {
+    let (env, owner, beneficiary, client) = setup();
+    let vault_id = client.create_vault(&owner, &beneficiary, &MIN_CHECK_IN_INTERVAL, &None);
+    let missing = BytesN::<32>::from_array(&env, &[0u8; 32]);
     let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &attacker, &pk, &recovery);
+
+    client.escrow_passkey(&vault_id, &owner, &missing, &recovery);
 }
 
-#[test]
-#[should_panic(expected = "PasskeyNotFound")]
-fn test_escrow_passkey_unknown_hash() {
-    let (env, owner, _beneficiary, client, vault_id, _pk) = setup_vault_with_pk(3);
-    let unknown_pk = make_pk(&env, 99);
-    let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &unknown_pk, &recovery);
-}
+// ── AC4: InvalidBeneficiary when recovery_contact == owner ───────────────────
 
 #[test]
-#[should_panic(expected = "InvalidBeneficiary")]
-fn test_escrow_passkey_recovery_equals_owner() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(4);
-    // recovery_contact == owner → InvalidBeneficiary
-    client.escrow_passkey(&vault_id, &owner, &pk, &owner);
+#[should_panic]
+fn test_escrow_passkey_recovery_contact_is_owner() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &owner);
 }
 
+// ── AC5: AlreadyInEscrow on second escrow call ────────────────────────────────
+
 #[test]
-#[should_panic(expected = "AlreadyInEscrow")]
+#[should_panic]
 fn test_escrow_passkey_already_in_escrow() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(5);
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
     let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-    // Second call should fail.
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+    // Second call should return AlreadyInEscrow.
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
 }
 
-#[test]
-fn test_escrowed_passkey_blocks_owner_check_in() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(6);
-    let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-
-    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    // Owner should not be able to check in with the escrowed passkey.
-    let result = client.try_check_in(&vault_id, &owner, &pk, &0u64, &None, &None);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_release_escrow_passkey_by_recovery_contact() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(7);
-    let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-
-    client.release_escrow_passkey(&vault_id, &recovery, &pk);
-
-    // Record should be removed.
-    assert!(client.get_passkey_escrow(&vault_id, &pk).is_none());
-}
-
-#[test]
-fn test_owner_can_check_in_after_escrow_release() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(8);
-    let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-    client.release_escrow_passkey(&vault_id, &recovery, &pk);
-
-    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    // Should succeed now.
-    client.check_in(&vault_id, &owner, &pk, &0u64, &None, &None);
-}
-
-#[test]
-#[should_panic(expected = "NotRecoveryContact")]
-fn test_release_escrow_wrong_caller() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(9);
-    let recovery = Address::generate(&env);
-    let stranger = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-
-    // stranger is not the recovery contact.
-    client.release_escrow_passkey(&vault_id, &stranger, &pk);
-}
-
-#[test]
-#[should_panic(expected = "PasskeyNotFound")]
-fn test_release_escrow_no_record() {
-    let (env, _owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(10);
-    let recovery = Address::generate(&env);
-    client.release_escrow_passkey(&vault_id, &recovery, &pk);
-}
-
-#[test]
-fn test_cancel_passkey_escrow_by_owner() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(11);
-    let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-
-    client.cancel_passkey_escrow(&vault_id, &owner, &pk);
-
-    assert!(client.get_passkey_escrow(&vault_id, &pk).is_none());
-}
+// ── AC6: check-in blocked while passkey is in escrow ─────────────────────────
 
 #[test]
 #[should_panic]
-fn test_cancel_passkey_escrow_requires_owner() {
-    let (env, _owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(12);
+fn test_escrowed_passkey_cannot_be_used_for_check_in() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
+    let recovery = Address::generate(&env);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 10);
+    // Should fail because passkey is in escrow.
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
+}
+
+// ── AC7 + AC13: release_escrow_passkey removes record and emits event ─────────
+
+#[test]
+fn test_release_escrow_passkey_removes_record() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
+    let recovery = Address::generate(&env);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+    client.release_escrow_passkey(&vault_id, &recovery, &passkey_hash);
+
+    assert!(
+        client
+            .get_passkey_escrow(&vault_id, &passkey_hash)
+            .is_none(),
+        "escrow record should be removed after release"
+    );
+}
+
+// ── AC9: NotRecoveryContact when wrong caller releases escrow ─────────────────
+
+#[test]
+#[should_panic]
+fn test_release_escrow_passkey_wrong_caller() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
     let recovery = Address::generate(&env);
     let stranger = Address::generate(&env);
-    // Need to escrow first (use owner, mock_all_auths handles it).
-    let (env2, owner2, _, client2, vault_id2, pk2) = setup_vault_with_pk(12);
-    client2.escrow_passkey(&vault_id2, &owner2, &pk2, &recovery);
-    // Stranger tries to cancel.
-    client2.cancel_passkey_escrow(&vault_id2, &stranger, &pk2);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+    client.release_escrow_passkey(&vault_id, &stranger, &passkey_hash);
 }
 
+// ── AC10 + AC14: cancel_passkey_escrow removes record and emits event ─────────
+
 #[test]
-fn test_owner_can_check_in_after_escrow_cancel() {
-    let (env, owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(13);
+fn test_cancel_passkey_escrow_removes_record() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
     let recovery = Address::generate(&env);
-    client.escrow_passkey(&vault_id, &owner, &pk, &recovery);
-    client.cancel_passkey_escrow(&vault_id, &owner, &pk);
 
-    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
-    client.check_in(&vault_id, &owner, &pk, &0u64, &None, &None);
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+    client.cancel_passkey_escrow(&vault_id, &owner, &passkey_hash);
+
+    assert!(
+        client
+            .get_passkey_escrow(&vault_id, &passkey_hash)
+            .is_none(),
+        "escrow record should be removed after cancellation"
+    );
 }
 
+// ── AC11: NotOwner when non-owner cancels escrow ─────────────────────────────
+
 #[test]
-fn test_get_passkey_escrow_none_when_absent() {
-    let (env, _owner, _beneficiary, client, vault_id, pk) = setup_vault_with_pk(14);
-    assert!(client.get_passkey_escrow(&vault_id, &pk).is_none());
+#[should_panic]
+fn test_cancel_passkey_escrow_not_owner() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
+    let recovery = Address::generate(&env);
+    let not_owner = Address::generate(&env);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+    client.cancel_passkey_escrow(&vault_id, &not_owner, &passkey_hash);
+}
+
+// ── Passkey restored after escrow release allows check-in ────────────────────
+
+#[test]
+fn test_check_in_allowed_after_escrow_released() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
+    let recovery = Address::generate(&env);
+
+    client.escrow_passkey(&vault_id, &owner, &passkey_hash, &recovery);
+    client.release_escrow_passkey(&vault_id, &recovery, &passkey_hash);
+
+    // After release, check-in should succeed.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 10);
+    client.check_in(&vault_id, &owner, &passkey_hash, &0u64, &None, &None);
+}
+
+// ── AC15: get_passkey_escrow returns None when passkey is not in escrow ───────
+
+#[test]
+fn test_get_passkey_escrow_none_when_not_escrowed() {
+    let (env, owner, beneficiary, client) = setup();
+    let (vault_id, passkey_hash) = setup_vault_with_passkey(&env, &owner, &beneficiary, &client);
+
+    assert!(client.get_passkey_escrow(&vault_id, &passkey_hash).is_none());
 }

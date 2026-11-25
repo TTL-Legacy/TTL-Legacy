@@ -88,9 +88,9 @@ pub const MAX_CHECK_IN_INTERVAL: u64 = 315_360_000;
 /// Oracle attestation freshness window in seconds (5 minutes) - Issue #1832.
 pub const ORACLE_FRESHNESS_WINDOW: u64 = 300;
 
-/// Maximum absolute release grace period in seconds (7 days) — Issue #2029.
+/// Default minimum deposit amount in stroops (Issue #2054).
 ///
-/// `extend_grace_period` rejects any extension whose resulting deadline would
-/// exceed `ledger.timestamp() + MAX_GRACE_PERIOD_SECONDS`, preventing a series
-/// of small incremental extensions from accumulating past this ceiling.
-pub const MAX_GRACE_PERIOD_SECONDS: u64 = 604_800; // 7 days
+/// 1 XLM = 10_000_000 stroops; the default is 0.1 XLM.  Very small deposits
+/// cost more in TTL-extension fees than they are worth and would bloat
+/// on-chain storage.  Admins may override this via `set_min_deposit_amount`.
+pub const DEFAULT_MIN_DEPOSIT_AMOUNT: i128 = 1_000_000; // 0.1 XLM

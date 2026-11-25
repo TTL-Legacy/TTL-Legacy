@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::error::{ApiError, ApiErrorKind};
 use crate::models::*;
 use tracing::instrument;
 
@@ -13,9 +14,12 @@ pub fn set_notification_preferences_handler(
     notif_store: &NotificationStore,
     vault_id: &str,
     request: NotificationPreferencesRequest,
-) -> Result<VaultNotificationPreferences, String> {
+) -> Result<VaultNotificationPreferences, ApiError> {
     if request.channels.is_empty() {
-        return Err("At least one notification channel is required".to_string());
+        return Err(ApiError::from_kind(
+            ApiErrorKind::InvalidInput,
+            "At least one notification channel is required",
+        ));
     }
 
     // Verify vault exists
@@ -23,7 +27,7 @@ pub fn set_notification_preferences_handler(
         .lock()
         .unwrap()
         .get(vault_id)
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::from_kind(ApiErrorKind::VaultNotFound, "Vault not found"))?;
 
     // Map HTTP channels into legacy boolean flags.
     let preferred = request.channels.first().cloned();

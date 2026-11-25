@@ -5,6 +5,84 @@ use soroban_sdk::{
     Address, Env, Vec,
 };
 
+/// Issue #2046 — the integer-division remainder after splitting BPS across
+/// beneficiaries must be assigned to the FIRST beneficiary, not silently dropped.
+///
+/// Example: 10 stroops split 3-ways with equal BPS (3333/3333/3334).
+/// Floor-division gives 3+3+3 = 9; the missing 1 stroop must go to beneficiary[0].
+#[test]
+fn test_bps_remainder_assigned_to_first_beneficiary() {
+    use super::*;
+    use soroban_sdk::{token::StellarAssetClient, Address, Bytes, Env};
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let owner = Address::generate(&env);
+    let ben1 = Address::generate(&env);
+    let ben2 = Address::generate(&env);
+    let ben3 = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_address = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    // Mint enough for the deposit.
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &100_000_000i128);
+
+    let contract_address = env.register_contract(None, TtlVaultContract);
+    let client = TtlVaultContractClient::new(&env, &contract_address);
+    client.initialize(&token_address, &admin);
+    let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
+
+    // Create vault with owner as beneficiary placeholder; we override below.
+    let vault_id = client.create_vault(&owner, &ben1, &100u64, &None);
+
+    // Deposit an amount that does NOT divide evenly by 3 (e.g. 10 stroops).
+    // With 3 equal BPS splits each beneficiary would get 3 via floor-division,
+    // leaving a remainder of 1 that must go to beneficiary[0].
+    let deposit: i128 = 10;
+    client.deposit(&owner, &vault_id, &deposit);
+
+    // Set three equal-split beneficiaries.
+    let addresses = soroban_sdk::vec![&env, ben1.clone(), ben2.clone(), ben3.clone()];
+    client
+        .set_equal_split_beneficiaries(&vault_id, &owner, &addresses)
+        .unwrap();
+
+    // Expire the vault so trigger_release can fire.
+    env.ledger().set_timestamp(1_000u64);
+    // Advance time beyond the check-in interval so the vault is expired.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 200u64);
+
+    client.trigger_release(&vault_id);
+
+    // Verify that the total released equals the deposit (no stroop was lost).
+    let token_client = soroban_sdk::token::TokenClient::new(&env, &token_address);
+    let b1 = token_client.balance(&ben1);
+    let b2 = token_client.balance(&ben2);
+    let b3 = token_client.balance(&ben3);
+
+    assert_eq!(
+        b1 + b2 + b3,
+        deposit,
+        "total distributed must equal the deposit — no stroops dropped"
+    );
+
+    // The first beneficiary must hold at least as many stroops as the others
+    // (they receive the remainder).
+    assert!(
+        b1 >= b2,
+        "first beneficiary must receive the BPS remainder: b1={b1}, b2={b2}"
+    );
+    assert!(
+        b1 >= b3,
+        "first beneficiary must receive the BPS remainder: b1={b1}, b3={b3}"
+    );
+}
+
 #[test]
 fn test_batch_withdraw_single_destination() {
     let env = Env::new();

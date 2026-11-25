@@ -209,6 +209,47 @@ All allowlist operations are logged with:
 - Transparent history of allowlist changes
 - Forensic capability
 
+## Token Addition Review Process
+
+Adding a new SEP-41 token to the allowlist follows a structured review and approval workflow to protect vault users from malicious, non-standard, or high-risk assets.
+
+### 1. Submission Criteria
+To be considered for inclusion in the allowlist, a token proposal must meet the following baseline requirements:
+- **SEP-41 Compliance**: The token must strictly implement the Stellar SEP-41 token interface (`allowance`, `approve`, `balance`, `transfer`, `transfer_from`, `burn`, `burn_from`, `decimals`, `name`, `symbol`).
+- **Source & Build Transparency**: Custom SEP-41 token contracts must have publicly verifiable source code and reproducible WASM builds; Stellar Asset Contracts (SACs) must reference a verifiable classic Stellar asset and `stellar.toml`.
+- **Ecosystem Maturity**: The asset should demonstrate active usage, sufficient liquidity on Stellar, and clear utility for TTL-Legacy vault users.
+- **Required Proposal Details**: Submissions must be opened via a GitHub issue or pull request using the `token-management` label and include:
+  - Token name, symbol, and decimals
+  - Stellar Mainnet (and Testnet, if applicable) contract address
+  - Contract type (canonical SAC vs. custom SEP-41 contract)
+  - Official project documentation, repository links, and security contact
+  - Links to third-party security audits (required for custom SEP-41 contracts)
+  - Rationale for adding the token to vault operations
+
+### 2. Security Review Steps
+Before a candidate token can advance to voting, security reviewers perform the following checks:
+- **Audit & Code Review**: Review third-party audit reports and inspect contract code (for custom SEP-41 implementations) or confirm canonical SAC deployment.
+- **Accounting & Behavioral Safety**: Verify the token does not exhibit behaviors that break vault accounting, including:
+  - Fee-on-transfer or hidden transfer taxes
+  - Rebasing or elastic supply mechanics that mutate balances outside transfers
+  - Unexpected panics, unbounded loops, or reentrancy callbacks during `transfer` / `transfer_from`
+- **Privilege & Upgradeability Assessment**: Inspect privileged roles (admin, mint, burn, freeze, clawback, pause, and contract upgradeability) to evaluate centralization and key-compromise risks.
+- **Testnet Integration Testing**: Simulate `add_allowed_token`, `deposit_token`, and vault withdrawal/recovery flows on Stellar Testnet to confirm end-to-end compatibility.
+
+### 3. On-Chain Verification
+Prior to execution, reviewers independently verify the token's on-chain state on Stellar Mainnet:
+- **Contract & Bytecode Verification**: Confirm the submitted contract address exists on-chain and that its deployed WASM hash matches the audited, reproducible build (or canonical SAC).
+- **SEP-41 Interface & Metadata Check**: Query `name()`, `symbol()`, and `decimals()` via Soroban RPC / Stellar CLI to confirm they match the proposal and behave consistently.
+- **Issuer & Asset Flags (for SACs)**: Inspect the underlying Stellar issuer account flags (`AUTH_REQUIRED`, `AUTH_REVOCABLE`, `AUTH_CLAWBACK_ENABLED`, `AUTH_IMMUTABLE`) and verify the issuer's `stellar.toml` domain metadata.
+- **Transaction Simulation**: Dry-run `add_allowed_token(env, token)` and `is_token_allowed(env, token)` against the target vault contract to verify gas/footprint bounds and expected state changes.
+
+### 4. Voting & Approval Process
+Once security review and on-chain verification pass, the proposal moves to approval:
+1. **Review Window**: The verified proposal is opened for a minimum 72-hour review period so maintainers and community stakeholders can raise objections or additional risk findings.
+2. **Approval & Quorum**: Approval requires sign-off from designated security reviewers and a majority (or configured multi-sig threshold) of protocol maintainers/admins with no unresolved security blockers.
+3. **On-Chain Execution**: Upon approval, the contract admin executes `add_allowed_token(env, token)` on Mainnet, emitting `TOKEN_ALLOWLIST_ADDED_TOPIC` and recording an audit trail entry.
+4. **Documentation & Ongoing Monitoring**: The allowlist documentation is updated with the approved token details. Approved tokens remain subject to ongoing monitoring; if a token is compromised, upgraded maliciously, or violates listing criteria, the admin may immediately delist it via `remove_allowed_token(env, token)` (existing vault balances remain unaffected).
+
 ## Use Cases
 
 ### Adding Trusted Tokens

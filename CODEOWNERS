@@ -1,0 +1,56 @@
+# CODEOWNERS — TTL-Legacy
+#
+# GitHub automatically requests a review from the listed owners whenever a
+# pull request modifies a matching file or directory.
+#
+# Syntax: <pattern>  <owner> [<owner> ...]
+# Patterns follow the same rules as .gitignore.
+# More specific patterns take precedence over less specific ones.
+# Lines beginning with # are comments.
+#
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# -------------------------------------------------------------------------
+# Default: repository owner reviews everything not covered by a more
+# specific rule below.
+# -------------------------------------------------------------------------
+*  @OxDev-max
+
+# -------------------------------------------------------------------------
+# Backend — security-critical modules
+#
+# auth.rs     Passkey / WebAuthn authentication logic
+# consensus.rs Multi-party consensus for high-value operations
+# db.rs       Database access layer (SQL queries, connection pooling)
+# -------------------------------------------------------------------------
+backend/src/auth.rs       @OxDev-max
+backend/src/consensus.rs  @OxDev-max
+backend/src/db.rs         @OxDev-max
+backend/src/db/           @OxDev-max
+
+# -------------------------------------------------------------------------
+# Contract source files
+#
+# All Rust source files under any contracts/ subdirectory, including the
+# primary ttl_vault contract, the zk_verifier contract, and shared types.
+# Fuzz targets and integration tests are included because they define the
+# security boundary of the contract surface.
+# -------------------------------------------------------------------------
+contracts/**/*.rs  @OxDev-max
+
+# -------------------------------------------------------------------------
+# Release and CI pipeline
+#
+# Changes to release automation, the changelog template, and CI workflows
+# can affect every downstream consumer of the project.
+# -------------------------------------------------------------------------
+.github/workflows/release.yml    @OxDev-max
+.github/workflows/ci.yml         @OxDev-max
+cliff.toml                       @OxDev-max
+CHANGELOG.md                     @OxDev-max
+
+# -------------------------------------------------------------------------
+# Security and governance documents
+# -------------------------------------------------------------------------
+SECURITY.md        @OxDev-max
+CODEOWNERS         @OxDev-max
