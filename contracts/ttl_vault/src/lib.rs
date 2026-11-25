@@ -2046,7 +2046,7 @@ impl TtlVaultContract {
         let is_checkin_delegate =
             caller != vault.owner && Self::is_check_in_delegate(&env, vault_id, &caller);
         // Issue #557: also permit callers who hold a valid, non-expired passkey delegation.
-        let is_passkey_delegate = if !is_delegate && caller != vault.owner {
+        let is_passkey_delegate = if !is_checkin_delegate && caller != vault.owner {
             let now_ts = env.ledger().timestamp();
             let del_key = StorageKey::PasskeyDelegation(vault_id, passkey_hash.clone());
             match env
@@ -2060,11 +2060,11 @@ impl TtlVaultContract {
         } else {
             false
         };
-        if caller != vault.owner && !is_delegate && !is_passkey_delegate {
+        if caller != vault.owner && !is_checkin_delegate && !is_passkey_delegate {
             return Err(ContractError::NotOwner);
         }
         // Enforce per-delegation nonce to prevent replay attacks (vault-level delegates only)
-        if is_delegate {
+        if is_checkin_delegate {
             let nonce_key = StorageKey::DelegateNonce(vault_id, caller.clone());
             let expected: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
             if nonce != expected {
