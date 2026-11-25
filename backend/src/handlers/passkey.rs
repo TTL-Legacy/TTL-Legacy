@@ -1,5 +1,5 @@
 use crate::db::*;
-use crate::error::AppError;
+use crate::error::{ApiError, ApiErrorKind, AppError};
 use crate::models::*;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -160,7 +160,12 @@ pub async fn recover_with_credential_handler(
                         && pk.is_backup
                         && pk.credential_id == body.recovery_credential
                 })
-                .ok_or(AppError::NotFound("Backup passkey not found".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::Api(ApiError::new(
+                        ApiErrorKind::NotFound,
+                        "Backup passkey not found",
+                    ))
+                })?;
 
             let passkey_id = passkey.passkey_id.clone();
             drop(store);
@@ -191,9 +196,12 @@ pub async fn recover_with_credential_handler(
                         && verify_code(&body.recovery_credential, &rc.code_hash)
                         && rc.used_at.is_none()
                 })
-                .ok_or(AppError::NotFound(
-                    "Invalid or expired recovery code".to_string(),
-                ))?;
+                .ok_or_else(|| {
+                    AppError::Api(ApiError::new(
+                        ApiErrorKind::InvalidInput,
+                        "Invalid or expired recovery code",
+                    ))
+                })?;
 
             code_entry.used_at = Some(Utc::now());
 

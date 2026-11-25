@@ -31,16 +31,16 @@ pub fn export_vaults_handler(
     from: Option<chrono::DateTime<chrono::Utc>>,
     to: Option<chrono::DateTime<chrono::Utc>>,
     user_id: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, ApiError> {
     let vaults = store.lock().unwrap();
     let vault = vaults
         .get(vault_id)
         .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+        .ok_or_else(|| ApiError::new(ApiErrorKind::VaultNotFound))?;
 
     if let Some(uid) = user_id {
         if vault.owner != uid {
-            return Err("Forbidden: not vault owner".to_string());
+            return Err(ApiError::new(ApiErrorKind::Forbidden));
         }
     }
 
@@ -88,13 +88,14 @@ pub fn export_vaults_handler(
     };
 
     match format {
-        "json" => Ok(serde_json::to_string_pretty(&export_data).map_err(|e| e.to_string())?),
+        "json" => Ok(serde_json::to_string_pretty(&export_data)
+            .map_err(|e| ApiError::internal(e.to_string()))?),
         "csv" => export_to_csv(&export_data),
-        _ => Err("Unsupported format".to_string()),
+        _ => Err(ApiError::new(ApiErrorKind::UnsupportedFormat)),
     }
 }
 
-fn export_to_csv(data: &ExportData) -> Result<String, String> {
+fn export_to_csv(data: &ExportData) -> Result<String, ApiError> {
     let mut wtr = csv::Writer::from_writer(vec![]);
 
     // Write vault info
@@ -107,7 +108,7 @@ fn export_to_csv(data: &ExportData) -> Result<String, String> {
         "Status",
         "Created",
     ])
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     wtr.write_record(&[
         "Vault",
@@ -118,13 +119,13 @@ fn export_to_csv(data: &ExportData) -> Result<String, String> {
         &format!("{:?}", data.vault.status),
         &data.vault.created_at.to_rfc3339(),
     ])
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
 
     // Write events
     wtr.write_record(&["", "", "", "", "", "", ""])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     wtr.write_record(&["Event", "Type", "Timestamp", "Data", "", "", ""])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     for event in &data.history {
         wtr.write_record(&[
@@ -136,11 +137,13 @@ fn export_to_csv(data: &ExportData) -> Result<String, String> {
             "",
             "",
         ])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     }
 
-    let buffer = wtr.into_inner().map_err(|e| e.to_string())?;
-    String::from_utf8(buffer).map_err(|e| e.to_string())
+    let buffer = wtr
+        .into_inner()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    String::from_utf8(buffer).map_err(|e| ApiError::internal(e.to_string()))
 }
 
 pub fn get_vault_templates() -> VaultTemplateList {
@@ -869,6 +872,96 @@ mod tests {
         assert!(result.is_ok());
         let json_str = result.unwrap();
         assert!(json_str.contains("v1"));
+    }
+
+    #[test]
+    fn test_export_vaults_handler_not_found_returns_typed_error() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+        let audit_store = create_audit_store();
+
+        let result = export_vaults_handler(
+            &store,
+            &event_store,
+            &audit_store,
+            "missing",
+            "json",
+            None,
+            None,
+            None,
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::VaultNotFound);
+    }
+
+    #[test]
+    fn test_export_vaults_handler_forbidden_returns_typed_error() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+        let audit_store = create_audit_store();
+
+        store.lock().unwrap().insert(
+            "v1".to_string(),
+            Vault {
+                id: "v1".to_string(),
+                owner: "owner1".to_string(),
+                beneficiary: "ben1".to_string(),
+                balance: 1000,
+                check_in_interval: 86400,
+                last_check_in: Utc::now(),
+                created_at: Utc::now(),
+                status: VaultStatus::Active,
+                ttl_remaining: Some(100000),
+            },
+        );
+
+        let result = export_vaults_handler(
+            &store,
+            &event_store,
+            &audit_store,
+            "v1",
+            "json",
+            None,
+            None,
+            Some("someone-else"),
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::Forbidden);
+    }
+
+    #[test]
+    fn test_export_vaults_handler_unsupported_format_returns_typed_error() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+        let audit_store = create_audit_store();
+
+        store.lock().unwrap().insert(
+            "v1".to_string(),
+            Vault {
+                id: "v1".to_string(),
+                owner: "owner1".to_string(),
+                beneficiary: "ben1".to_string(),
+                balance: 1000,
+                check_in_interval: 86400,
+                last_check_in: Utc::now(),
+                created_at: Utc::now(),
+                status: VaultStatus::Active,
+                ttl_remaining: Some(100000),
+            },
+        );
+
+        let result = export_vaults_handler(
+            &store,
+            &event_store,
+            &audit_store,
+            "v1",
+            "xml",
+            None,
+            None,
+            None,
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, ApiErrorKind::UnsupportedFormat);
     }
 
     #[test]

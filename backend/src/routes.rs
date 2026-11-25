@@ -14,7 +14,7 @@ use tracing::instrument;
 use crate::{
     audit,
     db::{AppState, Db},
-    error::AppError,
+    error::{ApiError, AppError},
     handlers::{
         claim_vesting_bonus_handler, get_vesting_bonus_handler, parse_scenario_types,
         simulate_release_handler,

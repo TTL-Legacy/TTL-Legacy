@@ -6,6 +6,7 @@ mod passkey;
 mod vault;
 mod withdrawal;
 
+pub use crate::error::{ApiError, ApiErrorKind};
 pub use admin::*;
 pub use beneficiary::*;
 pub use notifications::*;
