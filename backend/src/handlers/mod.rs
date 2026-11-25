@@ -1,5 +1,6 @@
 mod admin;
 mod beneficiary;
+pub mod dead_letter;
 mod notifications;
 mod passkey;
 mod vault;

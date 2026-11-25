@@ -28,6 +28,10 @@
 
 set -euo pipefail
 
+# Repository root (the parent of scripts/), used to locate backend/migrations
+# for schema-version validation.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -90,6 +94,99 @@ run() {
 }
 
 # ---------------------------------------------------------------------------
+# Schema version verification (Issue #2149)
+# ---------------------------------------------------------------------------
+
+# Query the restored database for the latest applied migration version
+# (sqlx's _sqlx_migrations.version column). Prints the version, or nothing
+# when it cannot be read (e.g. missing migration table or invalid database).
+latest_applied_migration_version() {
+    local db_path="$1"
+    local version=""
+
+    [[ -f "${db_path}" ]] || return 0
+    version=$(sqlite3 "${db_path}" "SELECT MAX(version) FROM _sqlx_migrations;" 2>/dev/null) || true
+    [[ "${version}" =~ ^[0-9]+$ ]] || version=""
+    printf '%s\n' "${version}"
+}
+
+# Resolve the migration version the current backend binary expects: the
+# highest version among the migration files in backend/migrations. sqlx parses
+# the leading number of each file name (e.g. 0009_... -> 9) and records it as
+# the applied version in _sqlx_migrations, so the highest migration file
+# version is the expected version.
+expected_migration_version() {
+    local migrations_dir="${REPO_ROOT}/backend/migrations"
+    local expected=""
+    local f base ver
+
+    if [[ -d "${migrations_dir}" ]]; then
+        for f in "${migrations_dir}"/*.sql; do
+            [[ -f "${f}" ]] || continue
+            base="${f##*/}"
+            if [[ "${base}" =~ ^([0-9]+)_.*\.sql$ ]]; then
+                ver=$((10#${BASH_REMATCH[1]}))
+                if [[ -z "${expected}" ]] || [[ "${ver}" -gt "${expected}" ]]; then
+                    expected="${ver}"
+                fi
+            fi
+        done
+    fi
+
+    printf '%s\n' "${expected}"
+}
+
+# Verify that the restored database's applied migration version matches the
+# migration version expected by the current backend binary (Issue #2149).
+#
+# Usage: verify_schema_version <db_path> [expected_version]
+#
+# Fails closed (non-zero exit) when either version is unreadable or the two
+# diverge. Logs a confirmation when the versions match.
+verify_schema_version() {
+    local db_path="$1"
+    local expected_version="${2:-}"
+    local restored_version=""
+
+    if ! command -v sqlite3 &>/dev/null; then
+        die "Schema version verification failed: sqlite3 is not available in PATH."
+    fi
+
+    restored_version=$(latest_applied_migration_version "${db_path}")
+
+    if [[ -z "${expected_version}" ]]; then
+        expected_version=$(expected_migration_version)
+    fi
+    expected_version="${expected_version//[[:space:]]/}"
+
+    if [[ -z "${restored_version}" ]]; then
+        die "Schema version verification failed: could not read the applied migration version from the restored database (${db_path}). Missing _sqlx_migrations table or unreadable database."
+    fi
+
+    if [[ -z "${expected_version}" ]]; then
+        die "Schema version verification failed: could not determine the migration version expected by the current backend (missing or unreadable backend/migrations)."
+    fi
+
+    if ! [[ "${restored_version}" =~ ^[0-9]+$ ]]; then
+        die "Schema version verification failed: unreadable restored migration version ('${restored_version}')."
+    fi
+    if ! [[ "${expected_version}" =~ ^[0-9]+$ ]]; then
+        die "Schema version verification failed: unreadable expected migration version ('${expected_version}')."
+    fi
+
+    # Normalize away leading zeros: [[ 08 -eq 8 ]] is invalid bash arithmetic,
+    # so strip leading zeros through base-10 arithmetic instead.
+    restored_version=$((10#${restored_version}))
+    expected_version=$((10#${expected_version}))
+
+    if [[ "${restored_version}" != "${expected_version}" ]]; then
+        die "Schema version mismatch after restore (restored DB: ${restored_version}, expected backend: ${expected_version}). Aborting."
+    fi
+
+    log "Schema version verified: restored database version ${restored_version} matches the backend expectation (${expected_version})."
+}
+
+# ---------------------------------------------------------------------------
 # 1. Download backup manifest
 # ---------------------------------------------------------------------------
 
@@ -102,7 +199,8 @@ trap 'rm -f "${MANIFEST_FILE}" "${WASM_FILE:-}" "${DB_FILE:-}"; rm -rf "${SIG_DI
 download_verified() {
     local s3_key="$1"
     local local_path="$2"
-    local sig_path="${SIG_DIR}/$(basename "${local_path}").sig"
+    local sig_path
+    sig_path="${SIG_DIR}/$(basename "${local_path}").sig"
 
     aws s3 cp \
         "s3://${DR_S3_BUCKET}/${s3_key}" \
@@ -163,6 +261,12 @@ else
     # Restore
     cp "${DB_FILE}" "${DR_DB_PATH}"
     log "Database restored to ${DR_DB_PATH}"
+
+    # Verify the restored database's applied migration version matches the
+    # version the current backend binary expects (Issue #2149).
+    if ! $DRY_RUN; then
+        verify_schema_version "${DR_DB_PATH}"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

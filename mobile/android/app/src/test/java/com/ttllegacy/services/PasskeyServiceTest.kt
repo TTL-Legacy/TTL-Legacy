@@ -11,6 +11,9 @@ import com.ttllegacy.models.AuthToken
 import io.mockk.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -120,6 +123,18 @@ class PasskeyServiceTest {
     }
 
     // ── register: API error propagation ─────────────────────────────────────
+
+    @Test
+    fun `registration request allows cross-platform authenticators`() {
+        val request = Json.parseToJsonElement(
+            buildPasskeyRegistrationRequestJson("challenge", "username")
+        ).jsonObject
+        val selection = request.getValue("authenticatorSelection").jsonObject
+
+        assertFalse(selection.containsKey("authenticatorAttachment"))
+        assertEquals(JsonPrimitive(true), selection["requireResidentKey"])
+        assertEquals(JsonPrimitive("required"), selection["userVerification"])
+    }
 
     @Test
     fun `register fails when challenge fetch returns error`() = runTest {
