@@ -1,7 +1,50 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::{Arc, Mutex};
+
+/// Errors surfaced by the consensus layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContractError {
+    /// A storage lookup returned no data where an entry was required.
+    ConsensusDataMissing,
+    /// The underlying cache backend failed.
+    Backend(String),
+    /// A shared lock was poisoned by a panicking thread.
+    LockPoisoned,
+}
+
+impl fmt::Display for ContractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContractError::ConsensusDataMissing => {
+                write!(f, "consensus data missing")
+            }
+            ContractError::Backend(msg) => write!(f, "cache backend error: {msg}"),
+            ContractError::LockPoisoned => write!(f, "cache lock poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for ContractError {}
+
+impl From<String> for ContractError {
+    fn from(msg: String) -> Self {
+        ContractError::Backend(msg)
+    }
+}
+
+impl From<&str> for ContractError {
+    fn from(msg: &str) -> Self {
+        ContractError::Backend(msg.to_string())
+    }
+}
+
+/// Helper for acquiring a mutex without `unwrap()`.
+fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, ContractError> {
+    mutex.lock().map_err(|_| ContractError::LockPoisoned)
+}
 
 /// A versioned cache entry shared across backend nodes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,19 +101,25 @@ impl InMemoryBackend {
 
 impl CacheBackend for InMemoryBackend {
     fn get_entry(&self, key: &str) -> Result<Option<CacheEntry>, String> {
-        Ok(self.entries.lock().unwrap().get(key).cloned())
+        Ok(lock(&self.entries)
+            .map_err(|e| e.to_string())?
+            .get(key)
+            .cloned())
     }
 
     fn set_entry(&self, entry: &CacheEntry) -> Result<(), String> {
-        self.entries
-            .lock()
-            .unwrap()
+        lock(&self.entries)
+            .map_err(|e| e.to_string())?
             .insert(entry.key.clone(), entry.clone());
         Ok(())
     }
 
     fn all_entries(&self) -> Result<Vec<CacheEntry>, String> {
-        Ok(self.entries.lock().unwrap().values().cloned().collect())
+        Ok(lock(&self.entries)
+            .map_err(|e| e.to_string())?
+            .values()
+            .cloned()
+            .collect())
     }
 }
 
@@ -189,23 +238,20 @@ impl NodeCache {
         Arc::new(Self::new(node_id, backend, strategy))
     }
 
-    pub fn put(&self, key: &str, value: &str) -> Result<CacheEntry, String> {
+    pub fn put(&self, key: &str, value: &str) -> Result<CacheEntry, ContractError> {
         let entry = self.make_entry(key, value);
         self.backend.set_entry(&entry)?;
-        self.local
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), entry.clone());
+        lock(&self.local)?.insert(key.to_string(), entry.clone());
         Ok(entry)
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<CacheEntry>, String> {
-        self.backend.get_entry(key)
+    pub fn get(&self, key: &str) -> Result<Option<CacheEntry>, ContractError> {
+        self.backend.get_entry(key).map_err(ContractError::from)
     }
 
-    pub fn sync_local_from_remote(&self) -> Result<(), String> {
+    pub fn sync_local_from_remote(&self) -> Result<(), ContractError> {
         let entries = self.backend.all_entries()?;
-        let mut local = self.local.lock().unwrap();
+        let mut local = lock(&self.local)?;
         local.clear();
         for entry in entries {
             local.insert(entry.key.clone(), entry);
@@ -214,7 +260,7 @@ impl NodeCache {
     }
 
     /// Compare local cache against the distributed backend and resolve conflicts.
-    pub fn check_and_resolve(&self) -> Result<ConsensusReport, String> {
+    pub fn check_and_resolve(&self) -> Result<ConsensusReport, ContractError> {
         let remote_entries: HashMap<String, CacheEntry> = self
             .backend
             .all_entries()?
@@ -222,7 +268,7 @@ impl NodeCache {
             .map(|entry| (entry.key.clone(), entry))
             .collect();
 
-        let local_snapshot = self.local.lock().unwrap().clone();
+        let local_snapshot = lock(&self.local)?.clone();
         let all_keys: HashSet<String> = local_snapshot
             .keys()
             .chain(remote_entries.keys())
@@ -240,7 +286,7 @@ impl NodeCache {
                 continue;
             }
 
-            let winner = resolve_conflict(local_entry, remote_entry, self.strategy);
+            let winner = resolve_conflict(local_entry, remote_entry, self.strategy)?;
             conflicts.push(ConflictDetail {
                 key: key.clone(),
                 local: local_entry.cloned(),
@@ -250,7 +296,7 @@ impl NodeCache {
 
             if let Some(resolved) = winner {
                 self.backend.set_entry(&resolved)?;
-                self.local.lock().unwrap().insert(key.clone(), resolved);
+                lock(&self.local)?.insert(key.clone(), resolved);
                 conflicts_resolved += 1;
             }
         }
@@ -279,7 +325,9 @@ impl NodeCache {
 
     #[cfg(test)]
     pub fn set_local_entry(&self, entry: CacheEntry) {
-        self.local.lock().unwrap().insert(entry.key.clone(), entry);
+        lock(&self.local)
+            .expect("local cache lock poisoned")
+            .insert(entry.key.clone(), entry);
     }
 }
 
@@ -295,14 +343,14 @@ pub fn resolve_conflict(
     local: Option<&CacheEntry>,
     remote: Option<&CacheEntry>,
     strategy: ConflictStrategy,
-) -> Option<CacheEntry> {
+) -> Result<Option<CacheEntry>, ContractError> {
     match (local, remote) {
-        (None, None) => None,
-        (None, Some(remote)) => Some(remote.clone()),
-        (Some(local), None) => Some(local.clone()),
+        (None, None) => Ok(None),
+        (None, Some(remote)) => Ok(Some(remote.clone())),
+        (Some(local), None) => Ok(Some(local.clone())),
         (Some(local), Some(remote)) => match strategy {
-            ConflictStrategy::LastWriteWins => Some(pick_latest_by_timestamp(local, remote)),
-            ConflictStrategy::Voting => Some(pick_by_voting(local, remote)),
+            ConflictStrategy::LastWriteWins => Ok(Some(pick_latest_by_timestamp(local, remote))),
+            ConflictStrategy::Voting => Ok(Some(pick_by_voting(local, remote))),
         },
     }
 }
@@ -375,7 +423,9 @@ mod tests {
         let older = sample_entry("k", "old", "node-a", 1_000);
         let newer = sample_entry("k", "new", "node-b", 2_000);
         let winner =
-            resolve_conflict(Some(&older), Some(&newer), ConflictStrategy::LastWriteWins).unwrap();
+            resolve_conflict(Some(&older), Some(&newer), ConflictStrategy::LastWriteWins)
+                .unwrap()
+                .unwrap();
         assert_eq!(winner.value, "new");
     }
 
@@ -383,7 +433,9 @@ mod tests {
     fn voting_prefers_higher_version() {
         let low = sample_entry("k", "low", "node-a", 1_000);
         let high = sample_entry("k", "high", "node-b", 2_000);
-        let winner = resolve_conflict(Some(&low), Some(&high), ConflictStrategy::Voting).unwrap();
+        let winner = resolve_conflict(Some(&low), Some(&high), ConflictStrategy::Voting)
+            .unwrap()
+            .unwrap();
         assert_eq!(winner.value, "high");
     }
 

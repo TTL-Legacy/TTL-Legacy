@@ -143,6 +143,8 @@ pub enum AppError {
     SponsorInsufficientBalance(String),
     #[error("internal error: {0}")]
     Internal(String),
+    #[error("consensus data missing")]
+    ConsensusDataMissing,
     // Issue #2056: withdrawal rate limit
     #[error("withdrawal rate limit exceeded: {0}")]
     WithdrawalRateLimitExceeded(String),
@@ -168,6 +170,9 @@ impl IntoResponse for AppError {
                 (StatusCode::PAYMENT_REQUIRED, "sponsor_insufficient_balance")
             }
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            AppError::ConsensusDataMissing => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "consensus_data_missing")
+            }
             AppError::WithdrawalRateLimitExceeded(_) => {
                 (StatusCode::TOO_MANY_REQUESTS, "withdrawal_rate_limit_exceeded")
             }

@@ -17,12 +17,7 @@ pub fn share_vault_handler(
     request: ShareRequest,
 ) -> Result<VaultShare, ApiError> {
     // Verify vault exists
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::Error)?;
 
     let share = VaultShare {
         share_id: uuid::Uuid::new_v4().to_string(),
@@ -59,12 +54,7 @@ pub fn generate_share_token_handler(
     vault_id: &str,
     request: GenerateTokenRequest,
 ) -> Result<ShareTokenResponse, ApiError> {
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::Error)?;
 
     let permission = request.permission.unwrap_or(SharePermission::ViewOnly);
     let expires_at = Utc::now()
@@ -127,12 +117,7 @@ pub fn revoke_share_token_handler(
     vault_id: &str,
     request: RevokeTokenRequest,
 ) -> Result<ShareToken, ApiError> {
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
+    let vault = get_vault(store, vault_id, MissingVaultBehavior::Error)?;
 
     let token = revoke_share_token(token_store, &request.token)
         .ok_or_else(|| ApiError::from(ApiErrorKind::ShareTokenNotFound))?;
@@ -171,12 +156,7 @@ pub fn access_vault_via_share_handler(
 ) -> Result<Vault, ApiError> {
     let share_token = validate_share_token(token_store, token)?;
 
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(&share_token.vault_id)
-        .cloned()
-        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
+    let vault = get_vault(store, &share_token.vault_id, MissingVaultBehavior::Error)?;
 
     append_audit_entry(
         audit_store,
@@ -202,12 +182,7 @@ pub fn access_vault_export_via_share_handler(
 ) -> Result<String, ApiError> {
     let share_token = validate_share_token(token_store, token)?;
 
-    let vault = store
-        .lock()
-        .unwrap()
-        .get(&share_token.vault_id)
-        .cloned()
-        .ok_or_else(|| ApiError::from(ApiErrorKind::VaultNotFound))?;
+    let vault = get_vault(store, &share_token.vault_id, MissingVaultBehavior::Error)?;
 
     let history = get_vault_history(event_store, &share_token.vault_id);
     let audit_log = get_vault_audit_log(audit_store, &share_token.vault_id);
@@ -697,11 +672,7 @@ pub fn submit_proof_of_life_handler(
     vault_id: u64,
     request: SubmitProofOfLifeRequest,
 ) -> Result<(), String> {
-    let vaults = store.lock().unwrap();
-    let vault = vaults
-        .get(&vault_id.to_string())
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+    let vault = get_vault(store, &vault_id.to_string(), MissingVaultBehavior::Error)?;
 
     if vault.beneficiary != request.beneficiary {
         return Err("Only the beneficiary can submit proof of life".to_string());
