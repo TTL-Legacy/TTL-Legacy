@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    Address, Env,
+    Address, BytesN, Env,
 };
 
 use crate::tests::common::setup_with_roles as setup;
@@ -122,4 +122,34 @@ fn test_email_token_backup_check_in_method() {
     // Email token should serve as backup if owner loses passkey device access
     let vault = client.get_vault(&vault_id);
     assert!(!vault.id.is_empty());
+}
+
+/// Issue #2045 — email token must be deleted on use, not merely flagged.
+///
+/// If the token were only flagged (used = true) a mid-transaction failure
+/// could leave the flag unset and make the token reusable. By removing the
+/// storage entry the token is consumed atomically with the transaction.
+#[test]
+fn test_email_token_delete_on_use() {
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    // A fresh 32-byte token hash representing the hashed OTP.
+    let token_hash = BytesN::from_array(&env, &[0xABu8; 32]);
+
+    // Store the token.
+    client.store_checkin_email_token(&vault_id, &owner, &token_hash);
+
+    // First consume: must return true (token existed).
+    let first = client.consume_checkin_email_token(&vault_id, &token_hash);
+    assert!(first, "first consume should succeed and return true");
+
+    // Second consume: storage entry was deleted, so must return false.
+    let second = client.consume_checkin_email_token(&vault_id, &token_hash);
+    assert!(
+        !second,
+        "second consume must fail — token must be deleted, not flagged"
+    );
 }

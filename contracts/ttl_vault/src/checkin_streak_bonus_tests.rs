@@ -182,9 +182,68 @@ fn test_streak_bonus_incentivizes_engagement() {
     for _ in 0..3 {
         env.ledger()
             .set_timestamp(env.ledger().timestamp() + interval);
-        client.check_in(&vault_id, &owner, &None);
+        client.check_in(&vault_id, &owner, &None, &None, &None);
     }
 
     let vault = client.get_vault(&vault_id);
     assert_eq!(vault.status, ReleaseStatus::Active);
+}
+
+#[test]
+fn test_streak_not_applied_after_grace_period() {
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    let deposit_amount = 100_000i128;
+    client.deposit(&owner, &vault_id, &deposit_amount);
+
+    // Initial check-in just after creation
+    let t0 = env.ledger().timestamp() + 10;
+    env.ledger().set_timestamp(t0);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    // Second check-in exactly on time (at t0 + interval) — streak grows to 2
+    let t1 = t0 + interval;
+    env.ledger().set_timestamp(t1);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    // Third check-in one second past the deadline — streak must reset to 1
+    let t2 = t1 + interval + 1;
+    env.ledger().set_timestamp(t2);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    let streak = client.get_check_in_streak(&vault_id);
+    assert_eq!(streak.current, 1);
+}
+
+#[test]
+fn test_streak_bonus_not_earned_in_grace_window() {
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    let deposit_amount = 100_000i128;
+    client.deposit(&owner, &vault_id, &deposit_amount);
+
+    // Build a streak of 3 by checking in exactly on time
+    let mut now = env.ledger().timestamp() + 10;
+    env.ledger().set_timestamp(now);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    for _ in 0..2 {
+        now += interval;
+        env.ledger().set_timestamp(now);
+        client.check_in(&vault_id, &owner, &None, &None, &None);
+    }
+
+    // Check-in one second late — streak must reset to 1
+    now += interval + 1;
+    env.ledger().set_timestamp(now);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    let streak = client.get_check_in_streak(&vault_id);
+    assert_eq!(streak.current, 1);
 }

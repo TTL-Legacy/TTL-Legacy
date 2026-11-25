@@ -127,7 +127,7 @@ class ErrorBoundary extends Component<Props, State> {
             fontSize: "1.75rem",
             fontWeight: 700,
             marginBottom: "0.75rem",
-            color: "#111",
+            color: "var(--color-text-primary)",
           }}
         >
           Something went wrong
@@ -136,7 +136,7 @@ class ErrorBoundary extends Component<Props, State> {
         <p
           style={{
             fontSize: "1rem",
-            color: "#555",
+            color: "var(--color-text-muted)",
             maxWidth: "480px",
             marginBottom: "1.5rem",
             lineHeight: 1.6,
@@ -153,8 +153,8 @@ class ErrorBoundary extends Component<Props, State> {
             padding: "0.6rem 1.4rem",
             fontSize: "1rem",
             fontWeight: 600,
-            color: "#fff",
-            background: "#2563eb",
+            color: "var(--color-on-accent)",
+            background: "var(--color-accent)",
             border: "none",
             borderRadius: "6px",
             cursor: "pointer",
@@ -171,8 +171,8 @@ class ErrorBoundary extends Component<Props, State> {
               textAlign: "left",
               maxWidth: "800px",
               width: "100%",
-              background: "#fef2f2",
-              border: "1px solid #fca5a5",
+              background: "var(--color-danger-bg)",
+              border: "1px solid var(--color-danger-border)",
               borderRadius: "6px",
               padding: "1rem",
             }}
@@ -181,7 +181,7 @@ class ErrorBoundary extends Component<Props, State> {
               style={{
                 cursor: "pointer",
                 fontWeight: 600,
-                color: "#991b1b",
+                color: "var(--color-danger)",
                 marginBottom: "0.5rem",
               }}
             >
@@ -192,7 +192,7 @@ class ErrorBoundary extends Component<Props, State> {
                 fontSize: "0.8rem",
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-all",
-                color: "#7f1d1d",
+                color: "var(--color-danger)",
                 margin: 0,
               }}
             >
