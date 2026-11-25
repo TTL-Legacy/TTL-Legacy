@@ -190,6 +190,12 @@ pub const MILESTONE_CLAIM_TOPIC: Symbol = symbol_short!("ms_clam");
 // Multi-vesting-schedule topic
 pub const VESTING_SCHEDULE_ADDED_TOPIC: Symbol = symbol_short!("vs_add");
 pub const VESTING_SCHEDULE_REMOVED_TOPIC: Symbol = symbol_short!("vs_rem");
+pub const VESTING_AMENDMENT_PROPOSED_TOPIC: Symbol = symbol_short!("va_prop");
+pub const VESTING_AMENDMENT_APPROVED_TOPIC: Symbol = symbol_short!("va_appr");
+pub const VESTING_AMENDMENT_APPLIED_TOPIC: Symbol = symbol_short!("va_apply");
+pub const VESTING_AMENDMENT_REJECTED_TOPIC: Symbol = symbol_short!("va_rej");
+pub const VESTING_AMENDMENT_EXPIRED_TOPIC: Symbol = symbol_short!("va_exp");
+pub const VESTING_AMENDMENT_CANCELLED_TOPIC: Symbol = symbol_short!("va_can");
 // Clawback of unvested funds
 pub const CLAWBACK_UNVESTED_TOPIC: Symbol = symbol_short!("clawback");
 // Issue #526: beneficiary post-release clawback
@@ -663,6 +669,9 @@ pub enum StorageKey {
     // Issue #2063: BeneficiaryConfirmationDeadline — auto-decline after N days
     /// Stores a `BeneficiaryConfirmationDeadline` keyed by (vault_id, beneficiary).
     BeneficiaryConfirmationDeadline(u64, Address),
+    // Issue #2140: beneficiary-approved vesting amendments.
+    VestingAmendmentProposal(u64, u64),
+    VestingAmendmentProposalCount(u64),
 }
 
 /// Check-in history entry for TTL prediction - Issue #482
@@ -1505,6 +1514,22 @@ pub struct MultiSigProposal {
     pub payload: Bytes,
     pub address_payload: Option<Address>,
     pub created_at: u64,
+}
+
+/// Beneficiary-approved replacement for an active vesting schedule.
+#[contracttype]
+#[derive(Clone)]
+pub struct VestingAmendmentProposal {
+    pub id: u64,
+    pub vault_id: u64,
+    pub schedule_id: u32,
+    pub schedule: VestingSchedule,
+    pub eligible_beneficiaries: Vec<Address>,
+    pub approvals: Vec<Address>,
+    pub required_approvals: u32,
+    pub status: ProposalStatus,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
 /// Multi-signature operation types

@@ -53,6 +53,8 @@ fn test_storage_key_no_collisions() {
         StorageKey::MultiSigConfig(0),
         StorageKey::MultiSigProposal(0, 0),
         StorageKey::MultiSigProposalCount(0),
+        StorageKey::VestingAmendmentProposal(0, 0),
+        StorageKey::VestingAmendmentProposalCount(0),
         StorageKey::MetadataHistory(0),
         StorageKey::CustomMetadataHistory(0),
         StorageKey::OwnerVaultCount(Address::generate(&env)),

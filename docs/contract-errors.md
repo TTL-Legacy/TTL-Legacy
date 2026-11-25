@@ -173,3 +173,6 @@ CI runs the same generator and fails if the committed table drifts from the enum
 | 160 | `BeneficiaryNotVerified` | Beneficiary identity has not been verified by the vault's KYC oracle. |
 | 161 | `InvalidSignature` | Secp256r1 signature or signed message is invalid or missing. |
 | 162 | `IdentityOracleNotSet` | No identity oracle has been configured for the vault. |
+| 163 | `DepositTooSmall` | Deposit amount is below the configured minimum (Issue #2054). |
+| 164 | `VestingAmendmentPending` | An active vesting amendment proposal already targets this schedule. |
+| 165 | `VestingClaimPending` | A vesting claim is awaiting finalization or reversal. |

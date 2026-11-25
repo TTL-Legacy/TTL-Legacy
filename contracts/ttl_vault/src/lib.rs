@@ -61,6 +61,7 @@ mod checkin_streak_bonus_tests;
 #[cfg(test)]
 mod milestone_vesting_tests;
 #[cfg(test)]
+mod vesting_amendment_tests;
 mod passkey_device_type_tests;
 #[cfg(test)]
 mod passkey_last_used_tests;
@@ -442,6 +443,123 @@ pub enum ContractError {
     IdentityOracleNotSet = 162,
     /// Deposit amount is below the configured minimum (Issue #2054).
     DepositTooSmall = 163,
+    /// An active vesting amendment proposal already targets this schedule.
+    VestingAmendmentPending = 164,
+    /// A vesting claim is awaiting finalization or reversal.
+    VestingClaimPending = 165,
+}
+
+fn validate_vesting_amendment(
+    proposed: &VestingSchedule,
+    current: &VestingSchedule,
+) -> Result<(), ContractError> {
+    if proposed.interval == 0
+        || proposed.num_installments == 0
+        || proposed.total_amount <= 0
+        || current.num_installments == 0
+        || current.claimed_installments >= current.num_installments
+        || proposed.num_installments <= current.claimed_installments
+    {
+        return Err(ContractError::InvalidVestingSchedule);
+    }
+
+    let duration = proposed
+        .interval
+        .checked_mul(proposed.num_installments as u64)
+        .ok_or(ContractError::InvalidVestingSchedule)?;
+    let end_time = proposed
+        .start_time
+        .checked_add(duration)
+        .ok_or(ContractError::InvalidVestingSchedule)?;
+    let cliff_end = proposed
+        .start_time
+        .checked_add(proposed.cliff_period)
+        .ok_or(ContractError::InvalidVestingSchedule)?;
+    if cliff_end > end_time {
+        return Err(ContractError::InvalidVestingSchedule);
+    }
+
+    let current_claimed_value = (current.total_amount / current.num_installments as i128)
+        .checked_mul(current.claimed_installments as i128)
+        .ok_or(ContractError::InvalidVestingSchedule)?;
+    let proposed_claimed_value = (proposed.total_amount / proposed.num_installments as i128)
+        .checked_mul(current.claimed_installments as i128)
+        .ok_or(ContractError::InvalidVestingSchedule)?;
+    if proposed_claimed_value < current_claimed_value {
+        return Err(ContractError::InvalidVestingSchedule);
+    }
+
+    Ok(())
+}
+
+fn remaining_vesting_amount(schedule: &VestingSchedule) -> Option<i128> {
+    if schedule.num_installments == 0 || schedule.claimed_installments >= schedule.num_installments
+    {
+        return Some(0);
+    }
+    let installment_amount = schedule.total_amount / schedule.num_installments as i128;
+    let claimed_amount =
+        installment_amount.checked_mul(schedule.claimed_installments as i128)?;
+    schedule.total_amount.checked_sub(claimed_amount)
+}
+
+fn amendment_fits_vault(
+    env: &Env,
+    vault_id: u64,
+    schedule_id: u32,
+    proposed: &VestingSchedule,
+    vault: &Vault,
+) -> bool {
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&StorageKey::VestingScheduleCount(vault_id))
+        .unwrap_or(0);
+    let Some(mut remaining) = remaining_vesting_amount(proposed) else {
+        return false;
+    };
+
+    for other_id in 0..count {
+        if other_id == schedule_id {
+            continue;
+        }
+        let Some(other_schedule) = env.storage().persistent().get::<StorageKey, VestingSchedule>(
+            &StorageKey::VestingSchedule(vault_id, other_id),
+        )
+        else {
+            continue;
+        };
+        let Some(other_remaining) = remaining_vesting_amount(&other_schedule) else {
+            return false;
+        };
+        let Some(total_remaining) = remaining.checked_add(other_remaining) else {
+            return false;
+        };
+        remaining = total_remaining;
+    }
+
+    remaining <= vault.balance
+}
+
+fn vault_beneficiaries(env: &Env, vault: &Vault) -> Vec<Address> {
+    let mut beneficiaries = Vec::new(env);
+    if vault.beneficiaries.is_empty() {
+        beneficiaries.push_back(vault.beneficiary.clone());
+    } else {
+        for entry in vault.beneficiaries.iter() {
+            if !beneficiaries.iter().any(|address| address == entry.address) {
+                beneficiaries.push_back(entry.address);
+            }
+        }
+    }
+    beneficiaries
+}
+
+fn beneficiaries_match(left: &Vec<Address>, right: &Vec<Address>) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .all(|address| right.iter().any(|other| other == address))
 }
 
 #[contract]
@@ -5402,6 +5520,276 @@ impl TtlVaultContract {
             (schedule_index, amount),
         );
         Ok(schedule_index)
+    }
+
+    /// Proposes replacing an active schedule. A strict majority of the vault's
+    /// current beneficiaries must approve; the proposal snapshots that voter set.
+    pub fn propose_vesting_amendment(
+        env: Env,
+        vault_id: u64,
+        caller: Address,
+        schedule_id: u32,
+        mut schedule: VestingSchedule,
+    ) -> Result<u64, ContractError> {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        if vault.status != ReleaseStatus::Released {
+            return Err(ContractError::NotReleased);
+        }
+
+        let current_schedule = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VestingSchedule>(&StorageKey::VestingSchedule(
+                vault_id, schedule_id,
+            ))
+            .ok_or(ContractError::VestingNotFound)?;
+        if schedule_id == 0
+            && env
+                .storage()
+                .persistent()
+                .has(&StorageKey::VestingPendingClaim(vault_id))
+        {
+            return Err(ContractError::VestingClaimPending);
+        }
+        schedule.claimed_installments = current_schedule.claimed_installments;
+        validate_vesting_amendment(&schedule, &current_schedule)?;
+        if !amendment_fits_vault(&env, vault_id, schedule_id, &schedule, &vault) {
+            return Err(ContractError::InsufficientBalance);
+        }
+
+        let now = env.ledger().timestamp();
+        let count_key = StorageKey::VestingAmendmentProposalCount(vault_id);
+        let proposal_count: u64 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        for id in 1..=proposal_count {
+            if let Some(existing) = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, VestingAmendmentProposal>(
+                    &StorageKey::VestingAmendmentProposal(vault_id, id),
+                )
+            {
+                if existing.schedule_id == schedule_id
+                    && existing.status == ProposalStatus::Pending
+                    && now < existing.expires_at
+                {
+                    return Err(ContractError::VestingAmendmentPending);
+                }
+            }
+        }
+
+        let eligible_beneficiaries = vault_beneficiaries(&env, &vault);
+        if eligible_beneficiaries.is_empty() {
+            return Err(ContractError::InvalidBeneficiary);
+        }
+        let required_approvals = eligible_beneficiaries.len() / 2 + 1;
+        let proposal_id = proposal_count
+            .checked_add(1)
+            .ok_or(ContractError::BalanceOverflow)?;
+        let expires_at = now.saturating_add(MULTISIG_PROPOSAL_EXPIRY);
+        let proposal = VestingAmendmentProposal {
+            id: proposal_id,
+            vault_id,
+            schedule_id,
+            schedule,
+            eligible_beneficiaries,
+            approvals: Vec::new(&env),
+            required_approvals,
+            status: ProposalStatus::Pending,
+            created_at: now,
+            expires_at,
+        };
+        let proposal_key = StorageKey::VestingAmendmentProposal(vault_id, proposal_id);
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&proposal_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage().persistent().set(&count_key, &proposal_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (VESTING_AMENDMENT_PROPOSED_TOPIC, vault_id),
+            (proposal_id, schedule_id, required_approvals, expires_at),
+        );
+        Ok(proposal_id)
+    }
+
+    /// Records a beneficiary's approval and applies the amendment at quorum.
+    pub fn approve_vesting_amendment(
+        env: Env,
+        vault_id: u64,
+        proposal_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+        let proposal_key = StorageKey::VestingAmendmentProposal(vault_id, proposal_id);
+        let mut proposal = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VestingAmendmentProposal>(&proposal_key)
+            .ok_or(ContractError::ProposalNotFound)?;
+        if proposal.status != ProposalStatus::Pending {
+            return Err(ContractError::ProposalNotFound);
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= proposal.expires_at {
+            proposal.status = ProposalStatus::Expired;
+            env.storage().persistent().set(&proposal_key, &proposal);
+            env.events()
+                .publish((VESTING_AMENDMENT_EXPIRED_TOPIC, vault_id), proposal_id);
+            return Ok(());
+        }
+        if !proposal
+            .eligible_beneficiaries
+            .iter()
+            .any(|beneficiary| beneficiary == caller)
+        {
+            return Err(ContractError::NotBeneficiary);
+        }
+        if proposal.approvals.iter().any(|approver| approver == caller) {
+            return Err(ContractError::AlreadyApproved);
+        }
+
+        let vault = Self::load_vault(&env, vault_id);
+        let current_beneficiaries = vault_beneficiaries(&env, &vault);
+        if !beneficiaries_match(&proposal.eligible_beneficiaries, &current_beneficiaries) {
+            proposal.status = ProposalStatus::Rejected;
+            env.storage().persistent().set(&proposal_key, &proposal);
+            env.events()
+                .publish((VESTING_AMENDMENT_REJECTED_TOPIC, vault_id), proposal_id);
+            return Ok(());
+        }
+
+        proposal.approvals.push_back(caller.clone());
+        if proposal.approvals.len() as u32 >= proposal.required_approvals {
+            let mut current_schedule = env
+                .storage()
+                .persistent()
+                .get::<StorageKey, VestingSchedule>(&StorageKey::VestingSchedule(
+                    vault_id,
+                    proposal.schedule_id,
+                ));
+            let can_apply = if let Some(current) = current_schedule.as_mut() {
+                proposal.schedule.claimed_installments = current.claimed_installments;
+                vault.status == ReleaseStatus::Released
+                    && !(proposal.schedule_id == 0
+                        && env
+                            .storage()
+                            .persistent()
+                            .has(&StorageKey::VestingPendingClaim(vault_id)))
+                    && validate_vesting_amendment(&proposal.schedule, current).is_ok()
+                    && amendment_fits_vault(
+                        &env,
+                        vault_id,
+                        proposal.schedule_id,
+                        &proposal.schedule,
+                        &vault,
+                    )
+            } else {
+                false
+            };
+            if can_apply {
+                let schedule_key =
+                    StorageKey::VestingSchedule(vault_id, proposal.schedule_id);
+                let ttl = vault_ttl_ledgers(vault.check_in_interval);
+                env.storage()
+                    .persistent()
+                    .set(&schedule_key, &proposal.schedule);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&schedule_key, VAULT_TTL_THRESHOLD, ttl);
+                proposal.status = ProposalStatus::Executed;
+                env.events().publish(
+                    (VESTING_AMENDMENT_APPLIED_TOPIC, vault_id),
+                    (proposal_id, proposal.schedule_id),
+                );
+            } else {
+                proposal.status = ProposalStatus::Rejected;
+                env.events()
+                    .publish((VESTING_AMENDMENT_REJECTED_TOPIC, vault_id), proposal_id);
+            }
+        }
+
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&proposal_key, VAULT_TTL_THRESHOLD, ttl);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        env.events().publish(
+            (VESTING_AMENDMENT_APPROVED_TOPIC, vault_id),
+            (proposal_id, caller, proposal.approvals.len() as u32),
+        );
+        Ok(())
+    }
+
+    /// Cancels a pending amendment proposal. Only the vault owner may cancel it.
+    pub fn cancel_vesting_amendment(
+        env: Env,
+        vault_id: u64,
+        proposal_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        caller.require_auth();
+        let vault = Self::load_vault(&env, vault_id);
+        if caller != vault.owner {
+            return Err(ContractError::NotOwner);
+        }
+        let proposal_key = StorageKey::VestingAmendmentProposal(vault_id, proposal_id);
+        let mut proposal = env
+            .storage()
+            .persistent()
+            .get::<StorageKey, VestingAmendmentProposal>(&proposal_key)
+            .ok_or(ContractError::ProposalNotFound)?;
+        if proposal.status != ProposalStatus::Pending {
+            return Err(ContractError::ProposalNotFound);
+        }
+        proposal.status = ProposalStatus::Cancelled;
+        let ttl = vault_ttl_ledgers(vault.check_in_interval);
+        env.storage().persistent().set(&proposal_key, &proposal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&proposal_key, VAULT_TTL_THRESHOLD, ttl);
+        env.events().publish(
+            (VESTING_AMENDMENT_CANCELLED_TOPIC, vault_id),
+            proposal_id,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_LEDGERS);
+        Ok(())
+    }
+
+    /// Returns a vesting amendment proposal by ID.
+    pub fn get_vesting_amendment_proposal(
+        env: Env,
+        vault_id: u64,
+        proposal_id: u64,
+    ) -> Option<VestingAmendmentProposal> {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::VestingAmendmentProposal(vault_id, proposal_id))
+    }
+
+    /// Returns the number of vesting amendment proposals created for a vault.
+    pub fn get_vesting_amendment_proposal_count(env: Env, vault_id: u64) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&StorageKey::VestingAmendmentProposalCount(vault_id))
+            .unwrap_or(0)
     }
 
     /// Returns the vesting schedule for a vault, if one exists.

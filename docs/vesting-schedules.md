@@ -62,6 +62,52 @@ Constraints:
 - Replaces any previously set schedule (claimed_installments resets to 0).
 - `cliff_period` may be 0 (disables cliff enforcement).
 
+### Beneficiary-approved amendments
+
+After a vault is released, the owner can propose a replacement for an incomplete
+vesting schedule with `propose_vesting_amendment`. The proposal takes effect
+automatically when a strict majority of the vault's beneficiaries approve it.
+For multi-beneficiary vaults, each distinct beneficiary has one vote; for a
+single-beneficiary vault, that beneficiary's approval is sufficient. The
+beneficiary set is snapshotted when the proposal is created, and an amendment
+is rejected if that set changes before quorum is reached.
+
+The proposal expires after seven days. Only the owner may propose or cancel an
+amendment, and only the snapshotted beneficiaries may approve. A schedule can
+have only one live amendment proposal at a time. When the proposal reaches
+quorum, it updates immediately; no separate execute call is needed.
+
+The proposed schedule replaces timing, installment count, total allocation,
+cliff, and cliff grace period. The current `claimed_installments` value is
+preserved (the value supplied in the proposed schedule is ignored). The
+proposed allocation must preserve at least the face value of already-claimed
+installments, and its remaining allocation plus other schedules' remaining
+allocations must fit the vault balance. If claims or balance changes make the
+proposal invalid before quorum, it is rejected instead of changing the
+schedule. A proposal cannot be created for schedule 0 while a vesting claim is
+pending finalization or reversal.
+
+```rust
+let proposed = VestingSchedule {
+    start_time: new_start,
+    interval: new_interval,
+    num_installments: new_installments,
+    claimed_installments: 0, // ignored; the existing value is retained
+    total_amount: new_total_amount,
+    cliff_period: new_cliff,
+    cliff_grace_period_seconds: new_cliff_grace,
+};
+let proposal_id =
+    client.propose_vesting_amendment(&vault_id, &owner, &schedule_id, &proposed)?;
+
+// Each current beneficiary authenticates their own approval.
+client.approve_vesting_amendment(&vault_id, &proposal_id, &beneficiary)?;
+let proposal = client.get_vesting_amendment_proposal(&vault_id, &proposal_id);
+```
+
+The proposal status is queryable through `get_vesting_amendment_proposal`.
+`cancel_vesting_amendment` lets the owner cancel a pending proposal.
+
 ### `get_vesting_schedule`
 
 ```rust
