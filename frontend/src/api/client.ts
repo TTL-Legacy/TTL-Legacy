@@ -12,6 +12,31 @@ import type {
 
 export type ApiMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
 
+export type RestoreVerificationStatus = "passed" | "failed" | "unknown";
+
+export interface RestoreVerificationResult {
+  status: RestoreVerificationStatus;
+  verified_at: string | null;
+  backup_prefix: string | null;
+  details: string | null;
+}
+
+export type DrAlertSeverity = "warning" | "critical";
+
+export interface DrAlert {
+  id: string;
+  severity: DrAlertSeverity;
+  message: string;
+  triggered_at: string;
+}
+
+export interface DrStatusResponse {
+  last_successful_backup_at: string | null;
+  last_restore_verification: RestoreVerificationResult;
+  active_alerts: DrAlert[];
+  checked_at: string;
+}
+
 export interface ApiClientOptions {
   baseUrl?: string;
   credentials?: RequestCredentials;
