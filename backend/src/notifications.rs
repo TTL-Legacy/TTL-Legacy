@@ -29,6 +29,8 @@ pub type RetryStore = Arc<Mutex<HashMap<String, ReminderDeliveryLog>>>;
 pub type UnsubscribeStore = Arc<Mutex<HashMap<String, UnsubscribeToken>>>;
 /// Keyed by token string → ReminderToken (#1286).
 pub type ReminderTokenStore = Arc<Mutex<HashMap<String, ReminderToken>>>;
+/// Keyed by token string → WithdrawalCancellationToken.
+pub type WithdrawalCancellationStore = Arc<Mutex<HashMap<String, WithdrawalCancellationToken>>>;
 /// Channel delivery logs (#827).
 pub type ChannelDeliveryStore = Arc<Mutex<Vec<ChannelDeliveryLog>>>;
 /// Idempotency key store (#825). Key → cached record.
@@ -53,6 +55,9 @@ pub fn create_unsubscribe_store() -> UnsubscribeStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 pub fn create_reminder_token_store() -> ReminderTokenStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+pub fn create_withdrawal_cancellation_store() -> WithdrawalCancellationStore {
     Arc::new(Mutex::new(HashMap::new()))
 }
 pub fn create_channel_delivery_store() -> ChannelDeliveryStore {
@@ -222,6 +227,7 @@ pub struct NotificationService {
     pub retry_log: RetryStore,
     pub unsubscribe_tokens: UnsubscribeStore,
     pub reminder_tokens: ReminderTokenStore,
+    pub withdrawal_cancellation_tokens: WithdrawalCancellationStore,
     pub channel_delivery_log: ChannelDeliveryStore,
     pub idempotency: IdempotencyStore,
     // Issue #2058: low-TTL mobile push
@@ -246,6 +252,7 @@ impl NotificationService {
             retry_log: create_retry_store(),
             unsubscribe_tokens: create_unsubscribe_store(),
             reminder_tokens: create_reminder_token_store(),
+            withdrawal_cancellation_tokens: create_withdrawal_cancellation_store(),
             channel_delivery_log: create_channel_delivery_store(),
             idempotency: create_idempotency_store(),
             low_ttl_push_prefs: create_low_ttl_push_prefs_store(),
@@ -663,6 +670,185 @@ impl NotificationService {
             "withdrawal alert notification enqueued"
         );
         let _ = data; // data is embedded in the schedule; retained for future direct-send path
+    }
+
+    // ── Beneficiary withdrawal initiation email & one-click cancellation ─────
+
+    /// Generate a single-use opaque cancellation token valid for the dispute window duration.
+    pub fn generate_withdrawal_cancellation_token(
+        &self,
+        event: &WithdrawalInitiatedEvent,
+    ) -> Result<WithdrawalCancellationToken, String> {
+        if event.dispute_window_seconds == 0 {
+            return Err("dispute_window_seconds must be greater than zero".to_string());
+        }
+        let duration_secs = i64::try_from(event.dispute_window_seconds)
+            .map_err(|_| "dispute_window_seconds exceeds supported range".to_string())?;
+        let created_at = event.initiated_at;
+        let expires_at = created_at
+            .checked_add_signed(chrono::Duration::seconds(duration_secs))
+            .ok_or_else(|| "dispute window expiration overflow".to_string())?;
+
+        let token = Uuid::new_v4().to_string();
+        let record = WithdrawalCancellationToken {
+            token: token.clone(),
+            vault_id: event.vault_id.clone(),
+            owner: event.owner.clone(),
+            beneficiary: event.beneficiary.clone(),
+            amount: event.amount,
+            asset: event.token.clone(),
+            created_at,
+            expires_at,
+            cancelled_at: None,
+        };
+        self.withdrawal_cancellation_tokens
+            .lock()
+            .unwrap()
+            .insert(token, record.clone());
+        Ok(record)
+    }
+
+    /// Build the one-click cancellation URL for a withdrawal cancellation token.
+    pub fn generate_withdrawal_cancellation_url(&self, base_url: &str, token: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        format!("{base}/withdrawals/cancel?token={token}")
+    }
+
+    /// Render the email subject and HTML body notifying the vault owner that a
+    /// beneficiary has initiated a withdrawal.
+    pub fn render_withdrawal_initiated_email(
+        &self,
+        event: &WithdrawalInitiatedEvent,
+        cancellation_url: &str,
+        expires_at: DateTime<Utc>,
+    ) -> (String, String) {
+        let subject = format!(
+            "Withdrawal Initiated: {} {} from your vault",
+            event.amount, event.token
+        );
+        let unsub_token = self.generate_unsubscribe_token(&event.owner);
+        let body = format!(
+            "<html><body>\
+             <h2>Beneficiary Withdrawal Initiated</h2>\
+             <p>A beneficiary has initiated a withdrawal from your vault:</p>\
+             <ul>\
+               <li><strong>Beneficiary Address:</strong> {beneficiary}</li>\
+               <li><strong>Amount:</strong> {amount}</li>\
+               <li><strong>Token:</strong> {token}</li>\
+               <li><strong>Dispute Window Expires At:</strong> {expires_at}</li>\
+             </ul>\
+             <p>If you did not authorize this withdrawal, cancel it immediately using the one-click link below (valid for {window} seconds):</p>\
+             <p><a href=\"{cancel_url}\">Cancel Withdrawal</a></p>\
+             <p>Or copy this link: {cancel_url}</p>\
+             <hr/>\
+             <p style=\"font-size:12px;color:#666;\">\
+               <a href=\"/notifications/unsubscribe?token={unsub}\">Unsubscribe</a>\
+             </p>\
+             </body></html>",
+            beneficiary = event.beneficiary,
+            amount = event.amount,
+            token = event.token,
+            expires_at = expires_at.to_rfc3339(),
+            window = event.dispute_window_seconds,
+            cancel_url = cancellation_url,
+            unsub = unsub_token,
+        );
+        (subject, body)
+    }
+
+    /// Email the vault owner whenever a beneficiary initiates a withdrawal.
+    ///
+    /// Includes the beneficiary address, amount, token, and a one-click
+    /// cancellation link valid for `event.dispute_window_seconds`.
+    #[instrument(
+        skip(self, email_provider, event),
+        fields(vault_id = %event.vault_id, owner = %event.owner, beneficiary = %event.beneficiary)
+    )]
+    pub async fn notify_owner_withdrawal_initiated(
+        &self,
+        email_provider: &dyn crate::scheduler::EmailProvider,
+        event: &WithdrawalInitiatedEvent,
+        base_url: &str,
+    ) -> Result<WithdrawalCancellationToken, String> {
+        if event.owner_email.trim().is_empty() {
+            return Err("owner_email must not be empty".to_string());
+        }
+        if event.beneficiary.trim().is_empty() {
+            return Err("beneficiary address must not be empty".to_string());
+        }
+        if event.token.trim().is_empty() {
+            return Err("token must not be empty".to_string());
+        }
+        if event.amount <= 0 {
+            return Err("withdrawal amount must be positive".to_string());
+        }
+
+        let cancel_token = self.generate_withdrawal_cancellation_token(event)?;
+        let cancellation_url =
+            self.generate_withdrawal_cancellation_url(base_url, &cancel_token.token);
+        let (subject, body) = self.render_withdrawal_initiated_email(
+            event,
+            &cancellation_url,
+            cancel_token.expires_at,
+        );
+
+        email_provider
+            .send_email(&event.owner_email, &subject, &body)
+            .await?;
+
+        tracing::info!(
+            vault_id = %event.vault_id,
+            owner = %event.owner,
+            beneficiary = %event.beneficiary,
+            amount = event.amount,
+            token = %event.token,
+            dispute_window_seconds = event.dispute_window_seconds,
+            "withdrawal initiation email sent to vault owner"
+        );
+
+        Ok(cancel_token)
+    }
+
+    /// Redeem a one-click withdrawal cancellation token at the given timestamp.
+    ///
+    /// Fails if the token does not exist, has already been used, or the dispute
+    /// window has elapsed (`now > expires_at`).
+    pub fn cancel_withdrawal_by_token(
+        &self,
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WithdrawalCancellationResult, String> {
+        let mut store = self.withdrawal_cancellation_tokens.lock().unwrap();
+        let entry = store
+            .get_mut(token)
+            .ok_or_else(|| "invalid withdrawal cancellation token".to_string())?;
+
+        if entry.cancelled_at.is_some() {
+            return Err("withdrawal cancellation token has already been used".to_string());
+        }
+        if now > entry.expires_at {
+            return Err(
+                "withdrawal cancellation token has expired (dispute window closed)".to_string(),
+            );
+        }
+
+        entry.cancelled_at = Some(now);
+        Ok(WithdrawalCancellationResult {
+            vault_id: entry.vault_id.clone(),
+            owner: entry.owner.clone(),
+            beneficiary: entry.beneficiary.clone(),
+            amount: entry.amount,
+            asset: entry.asset.clone(),
+            cancelled_at: now,
+        })
+    }
+
+    /// Convenience wrapper around [`Self::cancel_withdrawal_by_token`] using `Utc::now()`.
+    pub fn redeem_withdrawal_cancellation_token(
+        &self,
+        token: &str,
+    ) -> Result<WithdrawalCancellationResult, String> {
+        self.cancel_withdrawal_by_token(token, Utc::now())
     }
 
     // ── Deduplication ─────────────────────────────────────────────────────────

@@ -228,6 +228,47 @@ pub struct WithdrawalEvent {
     pub tx_hash: Option<String>,
 }
 
+/// Event emitted when a beneficiary initiates a withdrawal from a vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalInitiatedEvent {
+    pub vault_id: String,
+    pub owner: String,
+    pub owner_email: String,
+    pub beneficiary: String,
+    /// Withdrawal amount in base units.
+    pub amount: i128,
+    /// Token symbol or asset contract address (e.g. "XLM", "USDC").
+    pub token: String,
+    /// Dispute window duration in seconds during which the owner may cancel.
+    pub dispute_window_seconds: u64,
+    pub initiated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Single-use opaque token backing a one-click withdrawal cancellation link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalCancellationToken {
+    pub token: String,
+    pub vault_id: String,
+    pub owner: String,
+    pub beneficiary: String,
+    pub amount: i128,
+    pub asset: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub cancelled_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Result returned when a vault owner redeems a one-click cancellation link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawalCancellationResult {
+    pub vault_id: String,
+    pub owner: String,
+    pub beneficiary: String,
+    pub amount: i128,
+    pub asset: String,
+    pub cancelled_at: chrono::DateTime<chrono::Utc>,
+}
+
 // ── Unsubscribe support (#828) ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
