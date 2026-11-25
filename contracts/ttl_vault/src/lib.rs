@@ -19,7 +19,7 @@ pub use vault_state_machine::{state_of, transition, TransitionContext, VaultStat
 pub use types::*;
 pub use constants::*;
 #[cfg(test)]
-pub mod tests;
+mod tests;
 #[cfg(test)]
 mod beneficiary_auction_tests;
 #[cfg(test)]
@@ -3886,6 +3886,7 @@ impl TtlVaultContract {
                     // Amount is 0 here — funds are held for graduated release
                     amount: 0,
                     memo: release_memo.clone(),
+                    beneficiary_memo: release_memo.clone(),
                 },
             );
         } else if has_vesting || has_milestone_vesting {
@@ -3909,6 +3910,7 @@ impl TtlVaultContract {
                     beneficiary: vault.beneficiary.clone(),
                     amount: 0,
                     memo: release_memo.clone(),
+                    beneficiary_memo: release_memo.clone(),
                 },
             );
         } else {
@@ -3974,6 +3976,7 @@ impl TtlVaultContract {
                         beneficiary: vault.beneficiary.clone(),
                         amount: release_amount,
                         memo: release_memo.clone(),
+                        beneficiary_memo: release_memo.clone(),
                     },
                 );
             } else {
@@ -17790,6 +17793,7 @@ impl TtlVaultContract {
                     beneficiary: vault.owner.clone(),
                     amount: release_amount,
                     memo: release_memo.clone(),
+                    beneficiary_memo: release_memo.clone(),
                 },
             );
             return;
@@ -17846,6 +17850,7 @@ impl TtlVaultContract {
                         beneficiary: entry.address.clone(),
                         amount: share,
                         memo: release_memo.clone(),
+                        beneficiary_memo: release_memo.clone(),
                     },
                 );
             }

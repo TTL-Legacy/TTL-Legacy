@@ -231,6 +231,7 @@ fn test_trigger_release_emits_release_event() {
     assert_eq!(event.vault_id, vault_id, "vault_id mismatch");
     assert_eq!(event.beneficiary, beneficiary, "beneficiary mismatch");
     assert_eq!(event.amount, 5_000i128, "amount mismatch");
+    assert!(event.beneficiary_memo.is_empty());
 }
 
 /// The `ReleaseEvent` amount matches the actual vault balance at the time of release.
@@ -251,6 +252,7 @@ fn test_trigger_release_event_amount_matches_balance() {
 
     assert_eq!(event.amount, deposit_amount);
     assert_eq!(event.beneficiary, beneficiary);
+    assert!(event.beneficiary_memo.is_empty());
 }
 
 // ── Issue #1326: BeneficiaryUpdatedEvent ──────────────────────────────────────

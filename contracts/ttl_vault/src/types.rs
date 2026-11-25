@@ -832,6 +832,7 @@ pub struct ReleaseEvent {
     pub beneficiary: Address,
     pub amount: i128,
     pub memo: Bytes,
+    pub beneficiary_memo: Bytes,
 }
 
 /// A single beneficiary entry: (address, basis_points, minimum_threshold).
