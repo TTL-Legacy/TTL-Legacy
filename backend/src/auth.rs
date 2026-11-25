@@ -33,7 +33,7 @@ use crate::{
 const ACCESS_TOKEN_TTL_SECONDS: i64 = 15 * 60; // 15 minutes
 const REFRESH_TOKEN_TTL_SECONDS: i64 = 30 * 24 * 60 * 60; // 30 days
 
-fn jwt_secret() -> Vec<u8> {
+pub(crate) fn jwt_secret() -> Vec<u8> {
     match std::env::var("JWT_SECRET") {
         Ok(s) if !s.is_empty() => s.into_bytes(),
         _ => {

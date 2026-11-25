@@ -90,34 +90,31 @@ export interface AdminAddressResponse {
   admin_address: string;
 }
 
-// ── Issue #2066: Token price oracle types ────────────────────────────────────
-
-export type OracleProvider = "redstone" | "pyth";
-
-export interface TokenPriceOracleConfig {
-  provider: OracleProvider;
-  endpoint_url: string;
-  refresh_interval_seconds: number;
-  xlm_feed_id: string;
-  enabled: boolean;
-  updated_at: string;
-}
-
-export interface SetOracleConfigRequest {
-  provider: OracleProvider;
-  endpoint_url: string;
-  refresh_interval_seconds: number;
-  xlm_feed_id: string;
-  enabled: boolean;
-}
-
-export interface EstimatedVaultValue {
+export interface Passkey {
+  passkey_id: string;
+  owner: string;
   vault_id: string;
-  balance_stroops: number;
-  estimated_value_usd: number | null;
-  token_symbol: string;
-  price_per_token_usd: number | null;
-  price_fetched_at: string | null;
-  is_stale: boolean;
-  estimated_at: string;
+  credential_id: string;
+  /**
+   * Device name (e.g., "iPhone", "YubiKey 5", "Chrome") — the
+   * AAGUID-derived display name, used as a fallback when `friendly_name`
+   * is unset or empty.
+   */
+  device_name: string;
+  /**
+   * Optional user-editable display name (Issue #2147). When `null` or
+   * empty, clients fall back to the AAGUID-derived `device_name`.
+   */
+  friendly_name?: string | null;
+  registered_at: string;
+  last_used?: string | null;
+  is_backup: boolean;
+}
+
+export interface UpdatePasskeyFriendlyNameRequest {
+  /**
+   * New user-facing display name for the passkey. Empty/null clears the
+   * custom name, restoring the AAGUID-derived `device_name` display.
+   */
+  friendly_name?: string | null;
 }

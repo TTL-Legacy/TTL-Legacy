@@ -3,10 +3,12 @@ import type {
   DeviceToken,
   ErrorResponse,
   HealthResponse,
+  Passkey,
   ReadyResponse,
   RegisterTokenRequest,
   ReminderPreferences,
   SetPreferencesRequest,
+  UpdatePasskeyFriendlyNameRequest,
   UpgradeProposal,
 } from "./generated";
 
@@ -145,6 +147,20 @@ export class ApiClient {
   public async registerDeviceToken(payload: RegisterTokenRequest): Promise<DeviceToken> {
     return this.request<DeviceToken>("/api/notifications/register", {
       method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async listPasskeys(vaultId: string, owner: string): Promise<Passkey[]> {
+    return this.request<Passkey[]>(`/auth/passkeys/${vaultId}/${owner}`);
+  }
+
+  public async updatePasskeyFriendlyName(
+    passkeyId: string,
+    payload: UpdatePasskeyFriendlyNameRequest,
+  ): Promise<Passkey> {
+    return this.request<Passkey>(`/auth/passkeys/${passkeyId}/name`, {
+      method: "PUT",
       body: JSON.stringify(payload),
     });
   }
