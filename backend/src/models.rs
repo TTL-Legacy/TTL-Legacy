@@ -56,6 +56,10 @@ pub fn default_reminder_timezone() -> String {
     "UTC".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Persisted reminder preferences stored by `Db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReminderPreferences {

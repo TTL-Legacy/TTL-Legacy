@@ -1884,6 +1884,10 @@ pub struct ProtocolConfig {
     pub require_utf8_metadata: bool,
     /// Maximum number of vaults a single owner may create — Issue #767.
     pub max_vaults_per_owner: u32,
+    /// Seconds after TTL expiry during which `trigger_release` is blocked.
+    /// Defaults to 0 (no grace period). Must not exceed MAX_GRACE_PERIOD_SECONDS.
+    /// Issue #2029: stored and validated so the absolute deadline can be checked.
+    pub release_grace_period_seconds: u64,
 }
 
 /// Vault state snapshot at a specific point in time.
