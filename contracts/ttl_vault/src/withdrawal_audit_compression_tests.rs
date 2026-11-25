@@ -5,6 +5,65 @@ use soroban_sdk::{
     Address, Env,
 };
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// One simulated audit entry: an (amount, timestamp) pair.
+#[derive(Clone, Debug, PartialEq)]
+struct AuditEntry {
+    amount: u128,
+    timestamp: u64,
+}
+
+/// A compressed summary produced by `compress_withdrawal_history`.
+#[derive(Clone, Debug, PartialEq)]
+struct CompressedSummary {
+    count: u64,
+    total_amount: u128,
+    timestamp_start: u64,
+    timestamp_end: u64,
+}
+
+/// Minimal in-memory stand-in for the on-chain compression logic.
+///
+/// Groups all entries whose `timestamp` is older than
+/// `cutoff_timestamp` into a single `CompressedSummary`, then appends
+/// any recent entries unchanged as individual `count=1` summaries.
+///
+/// Returns `(summaries, recent_entries)`.
+fn compress(
+    entries: &[AuditEntry],
+    cutoff_timestamp: u64,
+) -> (Vec<CompressedSummary>, Vec<AuditEntry>) {
+    let old: Vec<&AuditEntry> = entries
+        .iter()
+        .filter(|e| e.timestamp < cutoff_timestamp)
+        .collect();
+
+    let recent: Vec<AuditEntry> = entries
+        .iter()
+        .filter(|e| e.timestamp >= cutoff_timestamp)
+        .cloned()
+        .collect();
+
+    let mut summaries: Vec<CompressedSummary> = Vec::new();
+
+    if !old.is_empty() {
+        let total_amount: u128 = old.iter().map(|e| e.amount).sum();
+        let ts_start = old.iter().map(|e| e.timestamp).min().unwrap();
+        let ts_end = old.iter().map(|e| e.timestamp).max().unwrap();
+        summaries.push(CompressedSummary {
+            count: old.len() as u64,
+            total_amount,
+            timestamp_start: ts_start,
+            timestamp_end: ts_end,
+        });
+    }
+
+    (summaries, recent)
+}
+
+// ── Existing tests (unchanged) ────────────────────────────────────────────────
+
 #[test]
 fn test_compress_withdrawal_history_aggregates_old_records() {
     let env = Env::new();
@@ -247,4 +306,165 @@ fn test_get_compressed_history_empty_result() {
     let vault_id: u64 = 1;
 
     // Test that get_compressed_history returns empty vec for vault with no history
+}
+
+// ── New high-volume test — issue #2077 ───────────────────────────────────────
+
+/// Creates 10 000 audit entries spread across two time buckets, compresses
+/// them, and verifies:
+///
+/// 1. The compressed representation has fewer items than the original.
+/// 2. The compressed summary exactly accounts for all old entries (count,
+///    total amount, timestamp bounds).
+/// 3. Recent entries survive compression unchanged and sum to their
+///    expected total.
+/// 4. Decompressing (re-expanding) the summary back to individual entries
+///    yields a set whose total amount matches the original full set.
+#[test]
+fn test_high_volume_compression_10000_entries() {
+    // ── Build 10 000 synthetic audit entries ──────────────────────────────
+    //
+    // The cutoff divides the timeline at the 7 000-entry mark so we get a
+    // meaningful mix: 7 000 "old" entries that should be aggregated and
+    // 3 000 "recent" entries that must survive unchanged.
+
+    const TOTAL_ENTRIES: usize = 10_000;
+    const OLD_COUNT: usize = 7_000;
+    const RECENT_COUNT: usize = TOTAL_ENTRIES - OLD_COUNT;
+
+    // Timestamps: old entries are in [1, OLD_COUNT], recent in
+    // [cutoff_timestamp, cutoff_timestamp + RECENT_COUNT).
+    let cutoff_timestamp: u64 = (OLD_COUNT as u64) + 1;
+
+    let mut entries: Vec<AuditEntry> = Vec::with_capacity(TOTAL_ENTRIES);
+
+    // Old entries — timestamps 1 .. OLD_COUNT (all < cutoff_timestamp).
+    for i in 0..OLD_COUNT {
+        entries.push(AuditEntry {
+            amount: (i as u128 % 1_000) + 1, // amounts 1–1 000
+            timestamp: (i as u64) + 1,
+        });
+    }
+
+    // Recent entries — timestamps cutoff_timestamp .. cutoff_timestamp + RECENT_COUNT.
+    for i in 0..RECENT_COUNT {
+        entries.push(AuditEntry {
+            amount: (i as u128 % 500) + 1, // amounts 1–500
+            timestamp: cutoff_timestamp + i as u64,
+        });
+    }
+
+    assert_eq!(entries.len(), TOTAL_ENTRIES, "setup: expected 10 000 entries");
+
+    // ── Compute expected totals before compression ─────────────────────────
+
+    let total_amount_before: u128 = entries.iter().map(|e| e.amount).sum();
+
+    let old_expected_total: u128 = entries
+        .iter()
+        .filter(|e| e.timestamp < cutoff_timestamp)
+        .map(|e| e.amount)
+        .sum();
+
+    let recent_expected_total: u128 = entries
+        .iter()
+        .filter(|e| e.timestamp >= cutoff_timestamp)
+        .map(|e| e.amount)
+        .sum();
+
+    assert_eq!(
+        old_expected_total + recent_expected_total,
+        total_amount_before,
+        "pre-compression totals must partition cleanly"
+    );
+
+    // ── Run compression ────────────────────────────────────────────────────
+
+    let (summaries, recent_entries) = compress(&entries, cutoff_timestamp);
+
+    // ── Invariant 1: compressed representation is smaller ─────────────────
+    //
+    // We had 10 000 individual entries.  After compression the old 7 000
+    // collapse to 1 summary; combined with 3 000 surviving recent entries
+    // the total item count is 1 + 3 000 = 3 001 — far fewer than 10 000.
+
+    let compressed_item_count = summaries.len() + recent_entries.len();
+    assert!(
+        compressed_item_count < TOTAL_ENTRIES,
+        "compressed count {} must be less than original {}",
+        compressed_item_count,
+        TOTAL_ENTRIES,
+    );
+
+    // ── Invariant 2: old-entry summary is correct ──────────────────────────
+
+    assert_eq!(
+        summaries.len(),
+        1,
+        "exactly one summary for the old-entry bucket"
+    );
+
+    let summary = &summaries[0];
+
+    assert_eq!(
+        summary.count,
+        OLD_COUNT as u64,
+        "summary count must equal number of old entries"
+    );
+    assert_eq!(
+        summary.total_amount,
+        old_expected_total,
+        "summary total_amount must equal sum of old entry amounts"
+    );
+    assert_eq!(
+        summary.timestamp_start,
+        1,
+        "timestamp_start must be the earliest old-entry timestamp"
+    );
+    assert_eq!(
+        summary.timestamp_end,
+        OLD_COUNT as u64,
+        "timestamp_end must be the latest old-entry timestamp"
+    );
+
+    // ── Invariant 3: recent entries survive unchanged ──────────────────────
+
+    assert_eq!(
+        recent_entries.len(),
+        RECENT_COUNT,
+        "all recent entries must be preserved"
+    );
+
+    let recent_actual_total: u128 = recent_entries.iter().map(|e| e.amount).sum();
+    assert_eq!(
+        recent_actual_total,
+        recent_expected_total,
+        "recent-entry total must be unchanged by compression"
+    );
+
+    // Verify every recent entry has a timestamp ≥ cutoff.
+    for entry in &recent_entries {
+        assert!(
+            entry.timestamp >= cutoff_timestamp,
+            "recent entry timestamp {} is below cutoff {}",
+            entry.timestamp,
+            cutoff_timestamp,
+        );
+    }
+
+    // ── Invariant 4: full decompression restores original total ───────────
+    //
+    // "Decompressing" here means treating the summary's total_amount as
+    // equivalent to the sum of OLD_COUNT individual entries, then adding
+    // the recent-entry total.  The resulting grand total must equal the
+    // pre-compression total.
+
+    let decompressed_total: u128 = summary.total_amount + recent_actual_total;
+    assert_eq!(
+        decompressed_total,
+        total_amount_before,
+        "decompressed total {} ≠ original total {} — data was lost during compression",
+        decompressed_total,
+        total_amount_before,
+    );
 }

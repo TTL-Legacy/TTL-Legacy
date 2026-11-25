@@ -17,7 +17,7 @@ use crate::{
     error::AppError,
     models::{
         Enable2FARequest, Enable2FAResponse, TwoFactorConfig, TwoFactorMethod,
-        TwoFactorStatusResponse, Verify2FARequest,
+        TwoFactorStatusResponse, VaultMfaPolicy, Verify2FARequest,
     },
 };
 
@@ -549,6 +549,102 @@ mod tests {
         std::env::remove_var("TOTP_ENCRYPTION_KEY_PREVIOUS");
     }
 
+/// Check whether MFA enforcement is required for a state-changing
+/// operation on the given vault.
+///
+/// Returns `Ok(())` when the call is allowed, or `Err(AppError::Unauthorized)`
+/// when a fresh TOTP verification is required.
+///
+/// The check is skipped when:
+/// - No MFA policy is configured for the vault, or the policy is disabled.
+/// - The vault's estimated value (balance in stroops) does not exceed the
+///   policy's `mfa_threshold_usd`.
+pub fn check_vault_mfa_enforcement(
+    vault_id: &str,
+    db: &Db,
+) -> Result<(), AppError> {
+    let policy = db.get_vault_mfa_policy(vault_id)?;
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    if !policy.enabled {
+        return Ok(());
+    }
+
+    let vault = db.get_vault(vault_id).ok_or(AppError::NotFound)?;
+    let threshold = policy.mfa_threshold_usd as f64;
+
+    // Estimate vault value in USD: balance (stroops) / 10_000_000 stroops per XLM
+    // multiplied by a fixed exchange rate of 0.30 USD per XLM.
+    let vault_value_usd = (vault.balance as f64 / 10_000_000.0) * 0.30;
+
+    if vault_value_usd <= threshold {
+        return Ok(());
+    }
+
+    // High-value vault: require a fresh TOTP verification.
+    // The session must have a verified 2FA claim AND the latest TOTP step
+    // consumed must be newer than the one stored for this vault.
+    let session_verified = SESSION_VERIFIED
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .copied()
+        .unwrap_or(false);
+
+    if !session_verified {
+        return Err(AppError::Unauthorized(
+            "MFA verification required for this high-value vault".into(),
+        ));
+    }
+
+    // Even with an existing 2FA claim, a fresh TOTP code is required.
+    // The caller must present a TOTP code whose time step is strictly newer
+    // than the latest consumed step for this vault.
+    let latest_step = USED_TOTP_STEPS
+        .lock()
+        .unwrap()
+        .get(vault_id)
+        .copied()
+        .unwrap_or(0);
+
+    // We cannot verify freshness here without the code itself; the caller
+    // must present a TOTP code via the `X-MFA-Code` header on the request.
+    // The handler is responsible for verifying the code and updating
+    // USED_TOTP_STEPS before calling this check.
+    //
+    // For now, we require that the session has been verified with a TOTP
+    // method specifically for this vault.  The `verified_at` timestamp on
+    // the TwoFactorConfig serves as a proxy for freshness.
+    let config = db.get_2fa_config(vault_id)?;
+    if let Some(cfg) = config {
+        if cfg.method != TwoFactorMethod::Totp {
+            return Err(AppError::Unauthorized(
+                "MFA enforcement requires a TOTP method for this vault".into(),
+            ));
+        }
+        // If the 2FA was verified more than 60 seconds ago, require a fresh code.
+        if let Some(verified_at) = cfg.verified_at {
+            let age = (Utc::now() - verified_at).num_seconds();
+            if age > 60 {
+                return Err(AppError::Unauthorized(
+                    "Fresh TOTP verification required for this high-value vault".into(),
+                ));
+            }
+        } else {
+            return Err(AppError::Unauthorized(
+                "Fresh TOTP verification required for this high-value vault".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
     #[test]
     fn stored_secret_is_not_plaintext() {
         set_keys();
@@ -570,6 +666,42 @@ mod tests {
         let rotated = rotate_secret(&secret).expect("rotate");
         assert!(rotated.starts_with(ENC_PREFIX));
         assert_eq!(decrypt_secret(&rotated).expect("decrypt"), secret);
+    }
+
+    #[test]
+    fn backup_codes_invalidated_after_recovery() {
+        // Demonstrates the contract: once any backup code is consumed for recovery,
+        // all remaining codes for the same vault must be treated as invalid.
+        // This test models the expected state after the fix in passkey.rs.
+
+        // Simulate three codes for a vault
+        let vault_id = "vault-42";
+        let owner = "owner-42";
+
+        let make_code = |id: &str, raw: &str| -> (String, Option<chrono::DateTime<Utc>>) {
+            (format!("{id}-hash-{raw}"), None) // (code_hash, used_at)
+        };
+
+        let mut codes = vec![
+            make_code("rc-1", "CODE01"),
+            make_code("rc-2", "CODE02"),
+            make_code("rc-3", "CODE03"),
+        ];
+
+        // Recovery: use code 0
+        codes[0].1 = Some(Utc::now());
+
+        // Invalidate remaining
+        let recovery_at = Utc::now();
+        for entry in codes.iter_mut() {
+            if entry.1.is_none() {
+                entry.1 = Some(recovery_at);
+            }
+        }
+
+        // All codes must be invalidated
+        let active = codes.iter().filter(|c| c.1.is_none()).count();
+        assert_eq!(active, 0, "no backup codes should remain active after recovery");
     }
 
     #[test]

@@ -6115,16 +6115,15 @@ fn test_reverse_withdrawal_emits_cancelled_event() {
 
 // ── Beneficiary Rotation Schedule Tests ──────────────────────────────────────
 
-fn make_beneficiary_entry(env: &Env, addr: Address, bps: u32) -> BeneficiaryEntry {
-    BeneficiaryEntry { address: addr, bps }
-}
-
 #[test]
 fn test_schedule_beneficiary_rotation_stores_entry() {
     let (env, owner, beneficiary, _, _, client) = setup();
     let id = client.create_vault(&owner, &beneficiary, &3600u64, &None);
     let new_ben = Address::generate(&env);
-    let entries = soroban_sdk::vec![&env, make_beneficiary_entry(&env, new_ben.clone(), 10_000)];
+    let entries = soroban_sdk::vec![
+        &env,
+        crate::tests::helpers::beneficiary::make_beneficiary(&env, new_ben.clone(), 10_000)
+    ];
     client.schedule_beneficiary_rotation(&id, &owner, &9999u64, &entries);
     let schedule = client.get_beneficiary_rotation_schedule(&id);
     assert_eq!(schedule.len(), 1);

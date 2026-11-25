@@ -125,6 +125,39 @@ cargo run --release
 2. Check database query performance
 3. Review network latency between load generator and backend
 
+## History Endpoint Load Test (#2080)
+
+The `check_in_history` scenario tests `GET /vaults/{id}/history` against a
+vault pre-seeded with **10,000 check-in records** under 100 VUs. It runs after
+the default scenario completes (startTime 9 m).
+
+### Thresholds
+
+| Metric | Threshold |
+|--------|-----------|
+| `p(95)` response time | < 500 ms |
+| Error rate (non-2xx / 5xx) | < 1 % |
+
+### Pre-seeding
+
+```bash
+# Seed 10,000 records into the target vault before running
+BASE_URL=http://localhost:3000 \
+HISTORY_VAULT_ID=history-load-test-vault \
+bash backend/tests/seed_history.sh
+```
+
+Then run with the matching vault ID:
+
+```bash
+BASE_URL=http://localhost:3000 \
+HISTORY_VAULT_ID=history-load-test-vault \
+k6 run backend/tests/k6_load_test.js
+```
+
+The seed script accepts `SEED_COUNT` (default 10 000) and `BATCH_SIZE`
+(default 50) overrides if you need a different dataset size.
+
 ## Future Improvements
 
 - [ ] Add endpoints-specific load profiles (mixed workload)

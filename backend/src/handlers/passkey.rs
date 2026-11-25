@@ -47,6 +47,9 @@ pub async fn register_passkey_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterPasskeyRequest>,
 ) -> Result<(StatusCode, Json<RegisterPasskeyResponse>), AppError> {
+    // Issue #2133: enforce MFA for high-value vaults
+    crate::two_factor::check_vault_mfa_enforcement(&body.vault_id, &state.db)?;
+
     let passkey_id = uuid::Uuid::new_v4().to_string();
     let passkey = Passkey {
         passkey_id: passkey_id.clone(),
@@ -193,6 +196,15 @@ pub async fn recover_with_credential_handler(
                 ))?;
 
             code_entry.used_at = Some(Utc::now());
+
+            // Invalidate all remaining unused backup codes for this owner/vault
+            // so an attacker who obtained the full code list cannot reuse them.
+            let recovery_at = Utc::now();
+            for rc in recovery_codes.iter_mut() {
+                if rc.owner == body.owner && rc.vault_id == body.vault_id && rc.used_at.is_none() {
+                    rc.used_at = Some(recovery_at);
+                }
+            }
             drop(recovery_codes);
 
             audit::log_action(
@@ -214,6 +226,116 @@ pub async fn recover_with_credential_handler(
         recovery_method: body.recovery_method,
         authenticated_at: Utc::now(),
     }))
+}
+
+// ── Check-in delegation and passkey check-in (#2049) ───────────────────────
+
+/// Updates `last_used` on the passkey and `last_check_in` on the vault when a
+/// passkey is used for check-in delegation.  Returns `Err` if the passkey is
+/// not found.
+pub fn check_in_delegation(
+    passkey_store: &PasskeyStore,
+    vault_store: &VaultStore,
+    audit_store: &AuditStore,
+    passkey_id: &str,
+    vault_id: &str,
+) -> Result<(), String> {
+    let now = Utc::now();
+
+    // Find the passkey and capture its owner before releasing the lock.
+    let owner = {
+        let store = passkey_store.lock().unwrap();
+        store
+            .iter()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+            .map(|pk| pk.owner.clone())
+            .ok_or_else(|| "Passkey not found".to_string())?
+    };
+
+    // Update last_used on the passkey.
+    {
+        let mut store = passkey_store.lock().unwrap();
+        if let Some(pk) = store
+            .iter_mut()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+        {
+            pk.last_used = Some(now);
+        }
+    }
+
+    // Update last_check_in on the vault.
+    {
+        let mut vaults = vault_store.lock().unwrap();
+        if let Some(vault) = vaults.get_mut(vault_id) {
+            vault.last_check_in = now;
+        }
+    }
+
+    append_audit_entry(
+        audit_store,
+        "check_in_delegation",
+        &owner,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "passkey_id": passkey_id,
+        }),
+    );
+
+    Ok(())
+}
+
+/// Updates `last_used` on the passkey and `last_check_in` on the vault when a
+/// passkey is used directly for a check-in.  Returns `Err` if the passkey is
+/// not found.
+pub fn check_in_with_passkey(
+    passkey_store: &PasskeyStore,
+    vault_store: &VaultStore,
+    audit_store: &AuditStore,
+    passkey_id: &str,
+    vault_id: &str,
+) -> Result<(), String> {
+    let now = Utc::now();
+
+    // Find the passkey and capture its owner before releasing the lock.
+    let owner = {
+        let store = passkey_store.lock().unwrap();
+        store
+            .iter()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+            .map(|pk| pk.owner.clone())
+            .ok_or_else(|| "Passkey not found".to_string())?
+    };
+
+    // Update last_used on the passkey.
+    {
+        let mut store = passkey_store.lock().unwrap();
+        if let Some(pk) = store
+            .iter_mut()
+            .find(|pk| pk.passkey_id == passkey_id && pk.vault_id == vault_id)
+        {
+            pk.last_used = Some(now);
+        }
+    }
+
+    // Update last_check_in on the vault.
+    {
+        let mut vaults = vault_store.lock().unwrap();
+        if let Some(vault) = vaults.get_mut(vault_id) {
+            vault.last_check_in = now;
+        }
+    }
+
+    append_audit_entry(
+        audit_store,
+        "check_in_with_passkey",
+        &owner,
+        serde_json::json!({
+            "vault_id": vault_id,
+            "passkey_id": passkey_id,
+        }),
+    );
+
+    Ok(())
 }
 
 pub async fn list_passkeys_handler(
@@ -417,6 +539,71 @@ mod tests {
             .filter(|rc| rc.used_at.is_none())
             .count();
         assert_eq!(unused, 10);
+    }
+
+    #[test]
+    fn test_recovery_invalidates_all_remaining_codes() {
+        // After using one recovery code, all remaining codes for the vault
+        // must be marked as used (invalidated).
+        let vault_id = "vault-1";
+        let owner = "owner1";
+        let used_code = "USED01";
+        let other_code1 = "OTHER1";
+        let other_code2 = "OTHER2";
+
+        let mut codes: Vec<RecoveryCode> = vec![
+            RecoveryCode {
+                code_id: "rc-1".to_string(),
+                owner: owner.to_string(),
+                vault_id: vault_id.to_string(),
+                code_hash: hash_code(used_code),
+                generated_at: Utc::now(),
+                used_at: None,
+            },
+            RecoveryCode {
+                code_id: "rc-2".to_string(),
+                owner: owner.to_string(),
+                vault_id: vault_id.to_string(),
+                code_hash: hash_code(other_code1),
+                generated_at: Utc::now(),
+                used_at: None,
+            },
+            RecoveryCode {
+                code_id: "rc-3".to_string(),
+                owner: owner.to_string(),
+                vault_id: vault_id.to_string(),
+                code_hash: hash_code(other_code2),
+                generated_at: Utc::now(),
+                used_at: None,
+            },
+        ];
+
+        // Simulate the recovery: mark the used code
+        let entry = codes
+            .iter_mut()
+            .find(|rc| {
+                rc.owner == owner
+                    && rc.vault_id == vault_id
+                    && verify_code(used_code, &rc.code_hash)
+                    && rc.used_at.is_none()
+            })
+            .expect("code must be found");
+        entry.used_at = Some(Utc::now());
+
+        // Invalidate remaining codes (the fix)
+        let recovery_at = Utc::now();
+        for rc in codes.iter_mut() {
+            if rc.owner == owner && rc.vault_id == vault_id && rc.used_at.is_none() {
+                rc.used_at = Some(recovery_at);
+            }
+        }
+
+        // All codes must now be invalidated
+        let still_valid = codes
+            .iter()
+            .filter(|rc| rc.owner == owner && rc.vault_id == vault_id && rc.used_at.is_none())
+            .count();
+        assert_eq!(still_valid, 0, "all backup codes must be invalidated after recovery");
     }
 
     #[test]

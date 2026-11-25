@@ -96,6 +96,20 @@ cargo test --package ttl-vault --test integration_tests -- --ignored --nocapture
 
 ## Test Suites
 
+### 20-Beneficiary Varying-BPS Testnet Release
+
+The `test_full_lifecycle_twenty_beneficiary_varying_bps_split` lifecycle test
+creates the contract's maximum 20 beneficiaries with unequal allocations,
+deposits 1 XLM in the local SDK environment, advances past expiry, triggers
+release, and asserts every beneficiary receives its exact BPS share.
+
+The `testnet-smoke.yml` workflow runs the equivalent release scenario against
+Stellar Testnet. It funds 20 beneficiary accounts, sets a varying-BPS split,
+deposits 10 XLM, waits for the 1-hour minimum inactivity interval, triggers
+release, and verifies each Horizon account balance increase within the
+transaction verification window. This is a live-network end-to-end test and
+requires testnet credentials only for the owner/admin transaction sources.
+
 ### 1. Full Vault Lifecycle (`integration_full_vault_lifecycle`)
 
 **What it tests**:
