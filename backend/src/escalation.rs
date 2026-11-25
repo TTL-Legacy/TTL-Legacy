@@ -192,10 +192,11 @@ async fn dispatch_escalation(db: &Arc<Db>, vault_id: u64, tier: EscalationTier) 
         timestamp: now,
         description: format!("Escalation {:?} sent via: {}", tier, channels.join(", ")),
         amount: None,
-        metadata: serde_json::json!({
-            "tier": format!("{:?}", tier).to_lowercase(),
-            "channels": channels,
-        }),
+        metadata: crate::models::VaultMetadata {
+            tier: Some(format!("{:?}", tier).to_lowercase()),
+            channels: Some(channels.clone()),
+            ..Default::default()
+        },
     };
     if let Err(e) = db.insert_timeline_event(&timeline_event) {
         tracing::error!(vault_id, error = %e, "escalation: failed to insert timeline event");
