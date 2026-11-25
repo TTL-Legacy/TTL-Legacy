@@ -266,3 +266,48 @@ fn test_export_does_not_panic() {
     let config = client.export_vault_config(&vault_id, &owner);
     assert_eq!(config.exported_at, 42);
 }
+
+// ─── Issue #2028: imported vault re-derives persistent entry TTL ─────────────
+
+/// After import the vault's check-in clock starts at the import timestamp,
+/// not the original export timestamp.  This verifies the import path
+/// re-derives `last_check_in` from `ledger.timestamp()` so the persistent
+/// entry TTL is recalculated from the current ledger time rather than from
+/// the stale exported value.
+#[test]
+fn test_import_vault_last_check_in_is_import_timestamp() {
+    let (env, owner, beneficiary, _admin, _token, client) = setup();
+    let interval = 3_600u64;
+
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+
+    // Export at t=100 — this is the "export time" baked into the config.
+    env.ledger().with_mut(|l| l.timestamp = 100);
+    let config = client.export_vault_config(&vault_id, &owner);
+    assert_eq!(config.exported_at, 100);
+
+    // Simulate time passing before import (disaster scenario).
+    let import_time = 99_000u64;
+    env.ledger().with_mut(|l| l.timestamp = import_time);
+
+    let new_id = client.import_vault(&config, &owner);
+    let new_vault = client.get_vault(&new_id).expect("imported vault must exist");
+
+    // The imported vault's last_check_in must equal the ledger timestamp at
+    // import time, not config.exported_at (100).  This ensures the persistent
+    // entry TTL is derived from the current ledger rather than stale export data.
+    assert_eq!(
+        new_vault.last_check_in,
+        import_time,
+        "last_check_in must be re-derived from ledger.timestamp() at import, \
+         not taken from the exported config (exported_at={})",
+        config.exported_at
+    );
+
+    // The vault must not be immediately expired: last_check_in + interval > now.
+    let expiry = new_vault.last_check_in + new_vault.check_in_interval;
+    assert!(
+        expiry > import_time,
+        "imported vault must have a valid TTL window starting at the import timestamp"
+    );
+}

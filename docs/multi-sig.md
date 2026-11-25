@@ -107,10 +107,102 @@ encode_u64_payload(value: u64) -> Bytes     // for UpdateCheckInInterval
 | `Expired` | Not executed within 7 days |
 | `Cancelled` | Owner cancelled the pending proposal |
 
-Proposals expire **7 days** after creation. Expired proposals are pruned when
-listed, approved, or executed. An approval or execution call that discovers an
-expired proposal returns success after pruning and emits `ms_exp`; it does not
-approve or execute the proposal.
+### Proposal Creation
+
+A proposal is created with `propose_multisig` (also exposed as
+`initiate_pending_multisig_op`). The caller must be the vault owner. The
+operation and its payload are recorded on-chain, and the owner is
+**auto-approved** at creation time, so a fresh proposal starts with one
+approval already counted.
+
+```rust
+propose_multisig(vault_id, caller, operation, payload, address_payload)
+    -> Result<u64, ContractError>
+```
+
+Payload encoding depends on the operation:
+
+| Operation | Payload | `address_payload` |
+|---|---|---|
+| `Withdraw` | `encode_i128_payload(amount)` | `None` |
+| `UpdateBeneficiary` | empty `Bytes` | `Some(new_beneficiary)` |
+| `CancelVault` | empty `Bytes` | `None` |
+| `TransferOwnership` | empty `Bytes` | `Some(new_owner)` |
+| `UpdateCheckInInterval` | `encode_u64_payload(new_interval)` | `None` |
+
+The returned `proposal_id` is monotonically increasing per vault and is used
+for every subsequent approve / reject / execute / cancel call. Creation emits
+`ms_prop` with `(proposal_id, operation, expires_at)`.
+
+### Approval Window
+
+Every proposal carries an `expires_at` timestamp set to **7 days** after
+creation. The window is fixed at creation time and is not extended by
+approvals.
+
+- While `now < expires_at`, the proposal is live and co-signers may approve or
+  reject it.
+- Once `now >= expires_at`, the proposal is **expired**. It can no longer be
+  approved or executed.
+- An approval or execution call that discovers an expired proposal prunes it,
+  emits `ms_exp`, and returns success **without** approving or executing the
+  operation.
+
+### Threshold Logic
+
+The threshold is the total number of approvals required before a proposal can
+execute. It is validated at configuration time:
+
+- `1 <= threshold <= signers.len() + 1`
+- The owner always counts as one approver, which is why the upper bound is
+  `signers.len() + 1`.
+- `signers` must not include the owner.
+
+Approval counting rules:
+
+- The owner's approval is recorded automatically at proposal creation.
+- Each configured co-signer may approve at most once; a second approval from
+  the same address returns `AlreadyApproved` (`#35`).
+- Only the owner or a configured co-signer may approve; anyone else gets
+  `NotASigner` (`#39`).
+- When the approval count reaches `threshold`, the proposal transitions from
+  `Pending` to `Approved` and becomes executable.
+- Approving an already-`Approved` proposal is a no-op (the threshold is already
+  met); approving an `Executed`, `Rejected`, `Cancelled`, or `Vetoed` proposal
+  fails.
+
+### Expiry and Cleanup
+
+Expired proposals are pruned lazily rather than by a background job:
+
+- `list_open_proposals` skips and prunes expired entries, so the returned list
+  only contains live `Pending` / `Approved` proposals.
+- `approve_multisig` and `execute_multisig` prune an expired proposal on
+  access, emit `ms_exp`, and return success without acting on it.
+- Status queries (`get_multisig_proposal`) still return the proposal record
+  after expiry, so audit trails remain intact. The record's status reflects
+  `Expired` once observed.
+- `get_multisig_proposal_count` continues to count all proposals ever created
+  for the vault, including expired ones.
+
+### Cancelling a Proposal
+
+```rust
+cancel_multisig_proposal(vault_id, proposal_id, caller) -> Result<(), ContractError>
+```
+
+- **Who may cancel**: the vault owner, who is the only party allowed to create
+  proposals.
+- **Preconditions**: the proposal must exist and be in `Pending` or `Approved`
+  status (i.e. not yet executed, rejected, cancelled, or expired).
+- **Resulting status**: `Cancelled`. A cancelled proposal can never be
+  approved or executed.
+- **Audit visibility**: cancelled proposals remain queryable via
+  `get_multisig_proposal` for status and audit purposes, but are removed from
+  `list_open_proposals` so they no longer appear as actionable work.
+- Cancelling is distinct from `reject_multisig`: rejection is the owner's
+  negative vote on a proposal, while cancellation withdraws the proposal
+  entirely.
 
 ## Veto Workflow
 
@@ -259,21 +351,56 @@ Result:
 | `#46` | `CannotRemoveLastSigner` | Must keep at least one co-signer |
 | `#47` | `SignerNotFound` | Signer not in the current configuration |
 
-## Example: 2-of-3 Withdraw
+## Worked Example: 2-of-3 Withdraw
+
+A 2-of-3 configuration has the owner plus two co-signers (`alice`, `bob`) and
+requires **2** total approvals. Because the owner auto-approves at creation,
+only one co-signer needs to cosign.
+
+### Happy path
 
 ```rust
-// 1. Configure
+// 1. Configure: owner + [alice, bob], threshold = 2
 configure_multisig(vault_id, owner, [alice, bob], 2);
 
 // 2. Owner proposes a 500-stroop withdrawal
 let payload = encode_i128_payload(500);
 let pid = propose_multisig(vault_id, owner, Withdraw, payload, None);
-// → owner auto-approved (1/2)
+// → owner auto-approved (1/2), status = Pending, expires_at = now + 7 days
 
-// 3. Alice approves → threshold reached (2/2)
+// 3. Alice cosigns → threshold reached (2/2)
 approve_multisig(vault_id, pid, alice);
+// → status = Approved, emits ms_appr
 
 // 4. Owner executes
 execute_multisig(vault_id, pid, owner);
-// → 500 stroops transferred to owner
+// → 500 stroops transferred to owner, status = Executed, emits ms_exec
+```
+
+### Alternate path: owner cancels before execution
+
+```rust
+// 1. Configure: owner + [alice, bob], threshold = 2
+configure_multisig(vault_id, owner, [alice, bob], 2);
+
+// 2. Owner proposes a 500-stroop withdrawal
+let payload = encode_i128_payload(500);
+let pid = propose_multisig(vault_id, owner, Withdraw, payload, None);
+// → owner auto-approved (1/2), status = Pending
+
+// 3. Alice cosigns → threshold reached (2/2)
+approve_multisig(vault_id, pid, alice);
+// → status = Approved
+
+// 4. Owner changes their mind and cancels the proposal
+cancel_multisig_proposal(vault_id, pid, owner);
+// → status = Cancelled, removed from list_open_proposals
+
+// 5. Execution now fails
+execute_multisig(vault_id, pid, owner);
+// → Err(ProposalNotFound) — cancelled proposals cannot execute
+
+// 6. Audit trail is preserved
+get_multisig_proposal(vault_id, pid);
+// → Some(proposal with status = Cancelled)
 ```

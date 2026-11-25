@@ -96,3 +96,92 @@ fn test_trigger_release_sets_failed_status_on_transfer_error() {
     // The vault's internal accounting still reflects the un-transferred funds.
     assert_eq!(client.get_deposit_total(&vault_id), 1_000i128);
 }
+
+// ─── Issue #2030: multi-beneficiary all-or-nothing release ───────────────────
+
+/// When `trigger_release` sends assets to multiple beneficiaries and a
+/// mid-flight transfer fails, the vault must be recorded as `Failed` and
+/// funds must remain in the contract (no partial release with side effects).
+///
+/// Two beneficiaries: the first address is the vault contract itself
+/// (FailingToken permits transfers *to* the vault), the second is an
+/// external address which FailingToken rejects.  The first "transfer"
+/// therefore succeeds while the second fails.
+///
+/// The fix for Issue #2030 is that `distribute_release_amount` uses
+/// `try_transfer` for every beneficiary and aborts with `ReleaseStatus::Failed`
+/// on the first error rather than panicking or leaving partial state.
+#[test]
+fn test_multi_beneficiary_partial_failure_sets_failed_status() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    // b1 = the vault contract itself (FailingToken allows transfers to it).
+    // b2 = an external address (FailingToken rejects transfers to it).
+    let beneficiary_placeholder = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, TtlVaultContract);
+    let token_id = env.register_contract(None, FailingToken);
+    // Allow transfers *to* the vault contract (simulate a successful first transfer).
+    FailingTokenClient::new(&env, &token_id).init(&contract_id);
+
+    let client = TtlVaultContractClient::new(&env, &contract_id);
+    client.initialize(&token_id, &admin);
+    let client: TtlVaultContractClient<'static> =
+        unsafe { core::mem::transmute(client) };
+
+    let interval = 3_600u64;
+    // Create vault with the placeholder as primary beneficiary; we will override
+    // with a multi-beneficiary split below.
+    let vault_id = client.create_vault(&owner, &beneficiary_placeholder, &interval, &None);
+
+    // Set two beneficiaries: 50/50 split.
+    // b1 = contract_id  → FailingToken allows this transfer (deposit direction).
+    // b2 = external addr → FailingToken rejects this transfer.
+    let b2 = Address::generate(&env);
+    client.set_beneficiaries(
+        &vault_id,
+        &owner,
+        &soroban_sdk::vec![
+            &env,
+            BeneficiaryEntry {
+                address: contract_id.clone(),
+                bps: 5_000,
+                minimum_threshold: 0,
+            },
+            BeneficiaryEntry {
+                address: b2.clone(),
+                bps: 5_000,
+                minimum_threshold: 0,
+            },
+        ],
+    );
+
+    client.deposit(&vault_id, &owner, &2_000i128);
+
+    // Fast-forward past expiry.
+    env.ledger().with_mut(|l| l.timestamp += interval + 1);
+
+    // trigger_release must complete without trapping.
+    let result = client.try_trigger_release(&vault_id);
+    assert!(
+        result.is_ok(),
+        "trigger_release must not trap on a mid-flight transfer failure"
+    );
+
+    // The vault must be in Failed status — not Released, not Locked.
+    assert_eq!(
+        client.get_release_status(&vault_id),
+        ReleaseStatus::Failed,
+        "vault must be Failed after a partial multi-beneficiary transfer error"
+    );
+
+    // Funds must remain intact in the vault (no partial release side effects).
+    assert_eq!(
+        client.get_deposit_total(&vault_id),
+        2_000i128,
+        "vault balance must be unchanged after a failed multi-beneficiary release"
+    );
+}

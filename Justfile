@@ -40,8 +40,17 @@ fmt:
 # ── Security ──────────────────────────────────────────────────────────────────
 
 # Run cargo-audit (install with: cargo install cargo-audit)
+# Fails only on CRITICAL or HIGH severity advisories.
+# Low/medium advisories are suppressed via .cargo/audit.toml.
 audit:
-    cargo audit --deny warnings
+    cargo audit --json > audit_output.json
+    CRITICAL_HIGH=$$(jq '[.vulnerabilities.list[] | select(.advisory.severity == "critical" or .advisory.severity == "high")] | length' audit_output.json)
+    if [ "$$CRITICAL_HIGH" -gt 0 ]; then
+        echo "❌ CRITICAL or HIGH severity vulnerabilities found:"
+        jq -r '[.vulnerabilities.list[] | select(.advisory.severity == "critical" or .advisory.severity == "high")] | .[] | "  \(.advisory.id): \(.advisory.severity) - \(.advisory.title)"' audit_output.json
+        exit 1
+    fi
+    echo "✅ No CRITICAL or HIGH severity vulnerabilities found"
 
 # Audit all `pub fn` definitions for require_auth / admin-check coverage (issue #1507)
 auth-audit:

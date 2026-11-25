@@ -17,11 +17,47 @@
     "checkInIntervalLabel": "Intervalle de signalement (secondes)",
     "idLabel": "ID du coffre-fort"
   },
+  "vaultWizard": {
+    "stepBasic": "Configuration de base",
+    "stepBeneficiaries": "Bénéficiaires",
+    "stepReleaseConditions": "Conditions de libération",
+    "stepVesting": "Acquisition",
+    "stepReview": "Réviser et signer",
+    "resumeDraft": "Vous avez un brouillon de création de coffre non sauvegardé. Reprendre ou recommencer ?",
+    "resume": "Reprendre",
+    "discard": "Supprimer",
+    "back": "← Retour",
+    "next": "Suivant →",
+    "cancel": "Annuler",
+    "signAndCreate": "Signer et créer le coffre",
+    "submitting": "Envoi en cours…",
+    "draftSaved": "Brouillon sauvegardé",
+    "totalMustBe100": "(doit être égal à 100)",
+    "noBeneficiaries": "Ajoutez au moins un bénéficiaire",
+    "releaseConditionTtl": "Expiration du TTL",
+    "releaseConditionOwner": "Initié par le propriétaire",
+    "releaseConditionOracle": "Oracle",
+    "vestingEnabled": "Activer le calendrier d'acquisition",
+    "cliffGraceHint": "Les réclamations dans cette fenêtre après la date de cliff n'entraînent aucune pénalité."
+  },
   "common": {
     "loading": "Chargement…",
     "error": "Une erreur s'est produite",
     "retry": "Réessayer",
     "confirm": "Confirmer",
     "cancel": "Annuler"
+  },
+  "vaultNotes": {
+    "heading": "Notes du coffre-fort",
+    "edit": "Modifier",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "saving": "Enregistrement…",
+    "noNotes": "Aucune note pour l'instant.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Aperçu",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Échec de l'enregistrement. Veuillez réessayer.",
+    "ariaLabel": "Notes pour le coffre-fort {{vaultId}}"
   }
 }
