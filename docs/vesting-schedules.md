@@ -70,6 +70,18 @@ fn get_vesting_schedule(env: Env, vault_id: u64) -> Option<VestingSchedule>
 
 Returns the attached schedule, or `None` if none exists.
 
+### `get_vesting_claimable`
+
+```rust
+fn get_vesting_claimable(env: Env, vault_id: u64, schedule_id: u32) -> i128
+```
+
+Returns the amount that `claim_vested` would pay right now, or `0` if the vault
+is not `Released`, the schedule does not exist, the cliff has not passed, or
+nothing is left to claim. The value is recomputed from the current ledger
+timestamp on every call; it is never cached, so it updates immediately once
+`start_time + cliff_period` passes.
+
 ### `claim_vested_installment`
 
 ```rust
