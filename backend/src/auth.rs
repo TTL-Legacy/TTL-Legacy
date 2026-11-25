@@ -25,7 +25,8 @@ use crate::{
     csrf::{csrf_cookie_header_value, generate_token as generate_csrf_token},
     db::Db,
     error::AppError,
-    models::{AuthClaims, LoginRequest, RefreshClaims, RefreshRequest, TokenPairResponse},
+    models::{AuthClaims, LoginRequest, Passkey, RefreshClaims, RefreshRequest, TokenPairResponse},
+    session_binding::{compute_session_binding, verify_session_binding, SESSION_BINDING_HEADER},
 };
 
 /// Access tokens are short-lived by design (Issue #1177's whole premise is that
@@ -57,11 +58,13 @@ fn issue_access_token(
     secret: &[u8],
     sub: &str,
     vault_ids: Vec<String>,
+    session_binding: Option<&str>,
 ) -> Result<String, AppError> {
     let claims = AuthClaims {
         sub: sub.to_string(),
         vault_ids,
         exp: (now_unix() + ACCESS_TOKEN_TTL_SECONDS) as usize,
+        session_binding: session_binding.map(|b| b.to_string()),
     };
     encode(
         &Header::default(),
@@ -77,6 +80,7 @@ fn issue_refresh_token(
     secret: &[u8],
     sub: &str,
     family_id: &str,
+    session_binding: Option<&str>,
 ) -> Result<String, AppError> {
     let jti = Uuid::new_v4().to_string();
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(REFRESH_TOKEN_TTL_SECONDS);
@@ -89,6 +93,7 @@ fn issue_refresh_token(
         jti,
         family_id: family_id.to_string(),
         exp: (now_unix() + REFRESH_TOKEN_TTL_SECONDS) as usize,
+        session_binding: session_binding.map(|b| b.to_string()),
     };
     encode(
         &Header::default(),
@@ -121,8 +126,8 @@ pub async fn login(
     let secret = jwt_secret();
     let family_id = Uuid::new_v4().to_string();
 
-    let access_token = issue_access_token(&secret, &req.sub, req.vault_ids.clone())?;
-    let refresh_token = issue_refresh_token(&db, &secret, &req.sub, &family_id)?;
+    let access_token = issue_access_token(&secret, &req.sub, req.vault_ids.clone(), None)?;
+    let refresh_token = issue_refresh_token(&db, &secret, &req.sub, &family_id, None)?;
 
     // Issue #1497: rotate CSRF token on every successful authentication so
     // that any token the client (or attacker) held before login is invalidated.
@@ -141,6 +146,52 @@ pub async fn login(
         [(axum::http::header::SET_COOKIE, csrf_cookie)],
         axum::Json(body),
     ))
+}
+
+/// Issues a token pair for a passkey-authenticated session (Issue #2135).
+///
+/// Computes the deterministic device binding from the passkey's device
+/// public key (`session_binding::compute_session_binding`) and embeds it as
+/// the `session_binding` claim in both the access and refresh tokens.
+///
+/// Every subsequent request presenting these tokens must also supply the
+/// same binding — via the `X-Session-Binding` header, or the `session_binding`
+/// field of the refresh request — which the session verification guard
+/// checks with a constant-time comparison
+/// (`session_binding::verify_session_binding`). Tokens replayed from a
+/// different device are rejected with the standard unauthorized envelope.
+pub fn issue_passkey_session(
+    db: &Db,
+    secret: &[u8],
+    sub: &str,
+    passkey: &Passkey,
+) -> Result<TokenPairResponse, AppError> {
+    let binding = compute_session_binding(passkey);
+    let family_id = Uuid::new_v4().to_string();
+
+    let access_token = issue_access_token(secret, sub, vec![], Some(&binding))?;
+    let refresh_token = issue_refresh_token(db, secret, sub, &family_id, Some(&binding))?;
+
+    let csrf_token = generate_csrf_token();
+
+    Ok(TokenPairResponse {
+        access_token,
+        refresh_token,
+        expires_in: ACCESS_TOKEN_TTL_SECONDS,
+        csrf_token,
+    })
+}
+
+/// Extracts the presented device binding from the request headers
+/// (Issue #2135) — the `X-Session-Binding` header carrying the SHA-256
+/// fingerprint of the caller's device public key, as computed by
+/// `session_binding::compute_session_binding`.
+pub fn extract_session_binding_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(SESSION_BINDING_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// POST /api/auth/refresh
@@ -165,6 +216,10 @@ pub async fn refresh(
     .map_err(|e| AppError::Unauthorized(format!("invalid refresh token: {e}")))?;
     let claims = token_data.claims;
 
+    // Issue #2135: passkey-bound sessions must present the matching device
+    // binding on every request; fail closed on mismatch or missing proof.
+    verify_session_binding(&claims, req.session_binding.as_deref())?;
+
     let record = db
         .get_refresh_token(&claims.jti)
         .map_err(|e| AppError::Unauthorized(format!("failed to look up refresh token: {e}")))?
@@ -187,8 +242,8 @@ pub async fn refresh(
         ));
     }
 
-    let access_token = issue_access_token(&secret, &sub, vec![])?;
-    let new_refresh_token = issue_refresh_token(&db, &secret, &sub, &family_id)?;
+    let access_token = issue_access_token(&secret, &sub, vec![], None)?;
+    let new_refresh_token = issue_refresh_token(&db, &secret, &sub, &family_id, None)?;
 
     // Issue #1497: also rotate the CSRF token on token refresh so the
     // session-fixation protection extends across token renewals.
@@ -264,6 +319,7 @@ mod tests {
             State(Arc::clone(&db)),
             ExtractJson(RefreshRequest {
                 refresh_token: first_refresh.clone(),
+                session_binding: None,
             }),
         )
         .await
@@ -275,6 +331,7 @@ mod tests {
             State(Arc::clone(&db)),
             ExtractJson(RefreshRequest {
                 refresh_token: first_refresh,
+                session_binding: None,
             }),
         )
         .await;
@@ -290,6 +347,7 @@ mod tests {
             State(Arc::clone(&db)),
             ExtractJson(RefreshRequest {
                 refresh_token: refreshed.0.refresh_token.clone(),
+                session_binding: None,
             }),
         )
         .await;
@@ -313,7 +371,7 @@ mod tests {
     async fn refresh_rejects_unknown_token() {
         let (db, path) = test_db().await;
         let secret = jwt_secret();
-        let bogus = issue_refresh_token(&db, &secret, "someone", "some-family").unwrap();
+        let bogus = issue_refresh_token(&db, &secret, "someone", "some-family", None).unwrap();
         // Delete the underlying record so the JWT is well-formed but unknown.
         let claims = decode::<RefreshClaims>(
             &bogus,
@@ -328,10 +386,170 @@ mod tests {
             State(db),
             ExtractJson(RefreshRequest {
                 refresh_token: bogus,
+                session_binding: None,
             }),
         )
         .await;
         assert!(result.is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ── Issue #2135: passkey session binding ─────────────────────────────────
+
+    fn test_passkey(credential_id: &str) -> Passkey {
+        Passkey {
+            passkey_id: format!("pk-{credential_id}"),
+            owner: "GABC...OWNER".to_string(),
+            vault_id: "vault-1".to_string(),
+            credential_id: credential_id.to_string(),
+            device_name: "Test Device".to_string(),
+            registered_at: chrono::Utc::now(),
+            last_used: None,
+            is_backup: false,
+        }
+    }
+
+    /// Decodes the `session_binding` claim of a signed access token
+    /// (validation via the same secret used to sign it).
+    fn access_claims_of(token: &str, secret: &[u8]) -> AuthClaims {
+        decode::<AuthClaims>(
+            token,
+            &DecodingKey::from_secret(secret),
+            &Validation::default(),
+        )
+        .unwrap()
+        .claims
+    }
+
+    /// Decodes the `session_binding` claim of a signed refresh token.
+    fn refresh_claims_of(token: &str, secret: &[u8]) -> RefreshClaims {
+        decode::<RefreshClaims>(
+            token,
+            &DecodingKey::from_secret(secret),
+            &Validation::default(),
+        )
+        .unwrap()
+        .claims
+    }
+
+    #[tokio::test]
+    async fn issue_passkey_session_embeds_binding_in_tokens() {
+        let (db, path) = test_db().await;
+        let secret = jwt_secret();
+        let passkey = test_passkey("cred-device-a");
+        let expected = compute_session_binding(&passkey);
+
+        let pair = issue_passkey_session(&db, &secret, "GABC...OWNER", &passkey).unwrap();
+
+        // The access token carries the binding tied to the device public key.
+        let access_claims = access_claims_of(&pair.access_token, &secret);
+        assert_eq!(access_claims.session_binding.as_deref(), Some(expected.as_str()));
+
+        // The refresh token carries the same binding.
+        let refresh_claims = refresh_claims_of(&pair.refresh_token, &secret);
+        assert_eq!(refresh_claims.session_binding.as_deref(), Some(expected.as_str()));
+
+        // Binding is deterministic per device and distinct from another device.
+        let other = compute_session_binding(&test_passkey("cred-device-b"));
+        assert_ne!(
+            expected,
+            other,
+            "different devices must have different bindings"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn password_login_tokens_carry_no_binding() {
+        let (db, path) = test_db().await;
+
+        let pair = do_login(&db, "GPW...OWNER").await.unwrap();
+        let secret = jwt_secret();
+
+        let access_claims = access_claims_of(&pair.access_token, &secret);
+        assert!(
+            access_claims.session_binding.is_none(),
+            "password sessions must stay unbound (issue #2135)"
+        );
+        let refresh_claims = refresh_claims_of(&pair.refresh_token, &secret);
+        assert!(refresh_claims.session_binding.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn extract_session_binding_from_headers_reads_header() {
+        let expected = compute_session_binding(&test_passkey("cred-device-a"));
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            SESSION_BINDING_HEADER,
+            axum::http::HeaderValue::from_str(&expected).unwrap(),
+        );
+        assert_eq!(extract_session_binding_from_headers(&headers), Some(expected));
+
+        // Empty or missing header → None.
+        let mut empty = axum::http::HeaderMap::new();
+        empty.insert(SESSION_BINDING_HEADER, axum::http::HeaderValue::from_static(""));
+        assert_eq!(extract_session_binding_from_headers(&empty), None);
+        assert_eq!(
+            extract_session_binding_from_headers(&axum::http::HeaderMap::new()),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_binding_mismatch_for_passkey_session() {
+        let (db, path) = test_db().await;
+        let passkey = test_passkey("cred-device-a");
+        let bound = compute_session_binding(&passkey);
+        let other_device = compute_session_binding(&test_passkey("cred-device-b"));
+
+        let pair = issue_passkey_session(&db, &jwt_secret(), "GABC...OWNER", &passkey).unwrap();
+
+        // Different device presents a different binding → rejected (fail closed).
+        let rejected = refresh(
+            State(Arc::clone(&db)),
+            ExtractJson(RefreshRequest {
+                refresh_token: pair.refresh_token.clone(),
+                session_binding: Some(other_device),
+            }),
+        )
+        .await;
+        assert!(
+            rejected.is_err(),
+            "refresh from a different device must be rejected"
+        );
+
+        // No binding presented → rejected (fail closed).
+        let missing = refresh(
+            State(Arc::clone(&db)),
+            ExtractJson(RefreshRequest {
+                refresh_token: pair.refresh_token.clone(),
+                session_binding: None,
+            }),
+        )
+        .await;
+        assert!(
+            missing.is_err(),
+            "bound session without a binding proof must be rejected"
+        );
+
+        // Same device presents the binding → refresh succeeds.
+        let ok = refresh(
+            State(Arc::clone(&db)),
+            ExtractJson(RefreshRequest {
+                refresh_token: pair.refresh_token,
+                session_binding: Some(bound),
+            }),
+        )
+        .await;
+        assert!(
+            ok.is_ok(),
+            "refresh with the matching device binding must succeed"
+        );
+
         let _ = std::fs::remove_file(path);
     }
 

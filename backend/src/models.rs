@@ -11,6 +11,12 @@ pub struct AuthClaims {
     pub sub: String,
     pub vault_ids: Vec<String>,
     pub exp: usize,
+    /// Passkey-session device binding (Issue #2135): the SHA-256 fingerprint
+    /// of the passkey's device public key, embedded when the session is
+    /// created via passkey authentication. `None` for password sessions
+    /// (or tokens issued before the feature), which are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_binding: Option<String>,
 }
 
 // ── Locale support ──────────────────────────────────────────────────────────
@@ -1335,6 +1341,9 @@ pub struct RefreshClaims {
     /// revoke an entire family if a rotated-out token is presented again.
     pub family_id: String,
     pub exp: usize,
+    /// Passkey-session device binding (Issue #2135) — see `AuthClaims`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_binding: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1347,6 +1356,12 @@ pub struct LoginRequest {
 #[derive(Debug, Deserialize)]
 pub struct RefreshRequest {
     pub refresh_token: String,
+    /// Device binding (Issue #2135): the SHA-256 fingerprint of the caller's
+    /// device public key, presented via the `X-Session-Binding` header.
+    /// Required to be equal to the token's `session_binding` claim for
+    /// passkey-bound sessions; ignored for password sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_binding: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
