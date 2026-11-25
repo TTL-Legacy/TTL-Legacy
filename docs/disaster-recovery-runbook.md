@@ -210,3 +210,92 @@ Complete within 72 hours of incident resolution.
 6. **Action Items** — Concrete follow-up tasks with owners and due dates
 
 Publish the report as a GitHub Security Advisory or in the project's incident log.
+
+---
+
+## 9. Automated Disaster Recovery Scripts
+
+> Issue #1147: Automate Disaster Recovery Runbook Steps as CI/CD Scripts
+
+The manual steps in sections 1–4 are complemented by two automation scripts
+and a nightly CI/CD workflow that reduce human error during incidents.
+
+### `scripts/dr_backup.sh`
+
+Snapshots the contract state and backend database to an S3-compatible bucket.
+
+```bash
+# Required environment variables
+export DR_S3_BUCKET=my-ttl-legacy-dr
+export DR_S3_ENDPOINT=https://s3.amazonaws.com
+export CONTRACT_TTL_VAULT=<contract-id>
+export STELLAR_NETWORK=mainnet
+export DR_DB_PATH=/var/lib/ttl-legacy/backend.db
+
+# Dry-run (prints actions without executing)
+./scripts/dr_backup.sh --dry-run
+
+# Live backup
+./scripts/dr_backup.sh
+```
+
+**What it does:**
+1. Exports contract state via `stellar contract read`
+2. Creates a hot SQLite snapshot using `.backup` command
+3. Uploads contract state JSON, database snapshot, and WASM artefact to
+   `s3://<DR_S3_BUCKET>/backups/<TIMESTAMP>/`
+4. Writes a `manifest.json` with artefact paths and metadata
+
+### `scripts/dr_restore.sh`
+
+Restores the database from a snapshot and re-deploys the contract from a
+backed-up WASM.
+
+```bash
+# Required environment variables (same as backup, plus DEPLOYER_IDENTITY)
+export DEPLOYER_IDENTITY=deployer-mainnet
+
+# Dry-run first to verify what will happen
+./scripts/dr_restore.sh --backup-prefix backups/20260727T020000Z --dry-run
+
+# Live restore
+./scripts/dr_restore.sh --backup-prefix backups/20260727T020000Z
+```
+
+**What it does:**
+1. Downloads the backup manifest to confirm the target network
+2. Restores the database (backs up the existing file first)
+3. Re-deploys the contract WASM via `stellar contract deploy`
+4. Verifies the restored database is readable
+
+### Nightly Backup Workflow
+
+The nightly backup is automated via `.github/workflows/dr-backup.yml` which runs at
+02:00 UTC every day. It can also be triggered manually via the GitHub Actions UI
+with an optional dry-run flag.
+
+**Required repository secrets:**
+
+| Secret | Description |
+|---|---|
+| `DR_AWS_ACCESS_KEY_ID` | AWS access key with S3 write permissions |
+| `DR_AWS_SECRET_ACCESS_KEY` | AWS secret key |
+| `DR_AWS_REGION` | AWS region (e.g. `us-east-1`) |
+| `DR_S3_BUCKET` | S3 bucket name |
+| `DR_S3_ENDPOINT` | S3 endpoint URL |
+| `CONTRACT_TTL_VAULT` | Deployed contract address |
+| `DR_DB_PATH` | Path to the backend database on the runner |
+| `DR_GPG_PRIVATE_KEY` | ASCII-armored GPG private key used to sign every artefact (`gpg --armor --export-secret-keys <id>`). Must not be passphrase-protected, because `dr_backup.sh` signs with `gpg --batch`. Use a dedicated DR signing key. |
+| `DR_GPG_KEY_ID` | Key ID or fingerprint of that signing key |
+| `DR_STELLAR_RPC_URL` | Soroban RPC URL for mainnet. The Stellar CLI ships no default mainnet RPC (see https://developers.stellar.org/docs/data/rpc/rpc-providers) |
+
+**Optional secrets:** `DR_REPLICA_BUCKET` + `DR_REPLICA_REGION` (cross-region
+replica), `DR_VAULT_SNAPSHOTS` (comma-separated `vault_id:timestamp` pairs).
+
+The first step, "Check required secrets", fails before anything else runs if any
+required secret is missing. It lists the missing names in the run summary.
+The workflow pins the Stellar CLI with `STELLAR_CLI_VERSION`. Release assets are
+versioned, so the unversioned `releases/latest/download/` URL does not work.
+
+If the backup fails, the workflow automatically opens a GitHub issue labelled
+`disaster-recovery` and `bug` for visibility.
