@@ -15,6 +15,7 @@ use soroban_sdk::{
     token::StellarAssetClient,
     Address, Env,
 };
+use crate::tests::helpers::beneficiary::make_beneficiaries;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -36,26 +37,6 @@ fn setup_bench() -> (Env, Address, Address, Address, TtlVaultContractClient<'sta
 
     let client: TtlVaultContractClient<'static> = unsafe { core::mem::transmute(client) };
     (env, owner, beneficiary, admin, client)
-}
-
-/// Build `n` unique beneficiary entries with equal BPS splits.
-///
-/// BPS must sum to exactly 10_000; this distributes evenly and assigns any
-/// remainder to the last entry.
-fn make_beneficiaries(env: &Env, n: u32) -> soroban_sdk::Vec<BeneficiaryEntry> {
-    assert!(n > 0 && n <= 10_000, "n must be 1..=10_000");
-    let base = 10_000u32 / n;
-    let remainder = 10_000u32 - base * n;
-    let mut entries = soroban_sdk::Vec::new(env);
-    for i in 0..n {
-        let bps = if i == n - 1 { base + remainder } else { base };
-        entries.push_back(BeneficiaryEntry {
-            address: Address::generate(env),
-            bps,
-            minimum_threshold: 0,
-        });
-    }
-    entries
 }
 
 /// Set up a vault with `n` beneficiaries, optionally attach a vesting schedule,

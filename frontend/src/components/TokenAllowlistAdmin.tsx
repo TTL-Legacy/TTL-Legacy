@@ -104,7 +104,7 @@ export function TokenAllowlistAdmin({ tokens, isAdmin, onAdd, onRemove, classNam
       </form>
 
       {error && (
-        <p role="alert" style={{ color: '#d32f2f' }}>
+        <p role="alert" style={{ color: 'var(--color-danger)' }}>
           {error}
         </p>
       )}
