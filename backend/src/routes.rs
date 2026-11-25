@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use std::sync::Arc;
 
@@ -402,56 +402,87 @@ pub struct AuditExportQuery {
 ///
 /// Exports the vault's audit trail. Only the vault owner may export. The
 
-/* … truncated 3428 chars — edit only what you need near the top … */
+/// export is handled by `crate::audit::export_vault_audit`.
 
-// ── Issue #1852: Beneficiary proof-of-life endpoint ────────────────────────
+// ── Domain sub-routers (#2118) ────────────────────────────────────────────────
+//
+// Each function returns an `axum::Router<crate::AppState>` pre-scoped to its
+// domain.  Compose them in `main.rs` via `Router::merge`.
 
-#[derive(serde::Deserialize)]
-pub struct ProofOfLifeSubmitRequest {
-    pub beneficiary: String,
-    pub proof: String,
-    pub validity_seconds: Option<u64>,
+use axum::{
+    routing::{delete, get, post},
+    Router,
+};
+
+/// Routes that operate on vaults: check-in, simulate-release, vesting, audit.
+pub fn vault_router() -> Router<crate::AppState> {
+    Router::new()
+        .route("/api/vaults/:vault_id/check-in", post(check_in))
+        .route(
+            "/api/vaults/:vault_id/simulate-release",
+            get(simulate_release),
+        )
+        .route(
+            "/api/vaults/:vault_id/vesting/claim-bonus",
+            post(claim_vesting_bonus),
+        )
+        .route(
+            "/api/vaults/:vault_id/vesting/bonus",
+            get(get_vesting_bonus),
+        )
+        .route(
+            "/api/vaults/:vault_id/audit/export",
+            get(crate::audit::export_vault_audit),
+        )
 }
 
-/// POST /api/vaults/:vault_id/proof-of-life
+/// Routes for user authentication (passkey, 2FA, recovery).
+pub fn auth_router() -> Router<crate::AppState> {
+    use crate::handlers::{
+        generate_recovery_codes_handler, list_passkeys_handler, recover_with_credential_handler,
+        register_passkey_handler,
+    };
+    Router::new()
+        .route("/api/auth/passkeys/register", post(register_passkey_handler))
+        .route("/api/auth/passkeys", get(list_passkeys_handler))
+        .route(
+            "/api/auth/passkeys/recovery-codes",
+            post(generate_recovery_codes_handler),
+        )
+        .route(
+            "/api/auth/passkeys/recover",
+            post(recover_with_credential_handler),
+        )
+}
+
+/// Routes for administrative operations (compliance reports, etc.).
 ///
-/// Submits a beneficiary proof-of-life attestation. The backend records
-/// the proof so that a periodic scheduler can request re-attestation from
-/// beneficiaries for high-value vaults.
-#[instrument(skip(state), fields(vault_id = %vault_id))]
-pub async fn submit_proof_of_life(
-    state: Data<Arc<AppState>>,
-    vault_id: Path<u64>,
-    body: Json<ProofOfLifeSubmitRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let vault_id = vault_id.into_inner();
-    let db = &state.db;
+/// Axum-compatible admin request handlers will be added here as they are
+/// introduced.  The router is registered in `build_router` so new routes can
+/// be wired without touching `main.rs`.
+pub fn admin_router() -> Router<crate::AppState> {
+    Router::new()
+}
 
-    // Verify vault exists
-    match db.get(vault_id) {
-        Ok(vault) => {
-            if vault.beneficiary != body.beneficiary {
-                return Err(AppError::InvalidInput(
-                    "Only the beneficiary can submit proof of life".into(),
-                ));
-            }
-        }
-        Err(_) => return Err(AppError::NotFound),
-    }
-
-    // Record proof of life submission
-    db.store_proof_of_life(
-        vault_id,
-        &body.beneficiary,
-        &body.proof,
-        body.validity_seconds.unwrap_or(86400 * 30),
-    )?;
-
-    Ok(Json(serde_json::json!({
-        "status": "submitted",
-        "vault_id": vault_id,
-        "beneficiary": body.beneficiary,
-    })))
+/// Routes for notification preferences, reminders, and subscriptions.
+pub fn notifications_router() -> Router<crate::AppState> {
+    Router::new()
+        .route(
+            "/api/vaults/:vault_id/reminder-preferences",
+            post(set_preferences)
+                .get(get_preferences)
+                .delete(delete_preferences),
+        )
+        .route(
+            "/api/vaults/:vault_id/subscriptions",
+            post(set_subscription).delete(delete_subscription),
+        )
+        .route(
+            "/api/vaults/:vault_id/reminders",
+            get(list_vault_reminders),
+        )
+        .route("/notifications/unsubscribe", get(unsubscribe))
+        .route("/reminders/check-in", get(resolve_reminder_token))
 }
 
 // ── Issue #2069: vault full-text search over tags and notes ─────────────────

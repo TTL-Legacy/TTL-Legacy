@@ -1619,6 +1619,39 @@ pub enum TimelineEventKind {
     WebhookFailed,
 }
 
+/// Typed metadata attached to a vault timeline event.
+///
+/// Known fields are declared explicitly; any additional key/value pairs that
+/// do not map to a known field are captured in `extra` so that forward
+/// compatibility is preserved without losing data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VaultMetadata {
+    /// Escalation tier label (e.g. `"t1"`, `"t2"`, `"t3"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Notification channels used (e.g. `["email", "sms"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<String>>,
+    /// Whether the notification was successfully delivered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<bool>,
+    /// Webhook delivery identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    /// Webhook event type string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    /// Webhook target URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_url: Option<String>,
+    /// Number of delivery attempts made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_count: Option<u32>,
+    /// Catch-all for any fields not covered above.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEvent {
     pub id: String,
@@ -1627,7 +1660,7 @@ pub struct TimelineEvent {
     pub timestamp: DateTime<Utc>,
     pub description: String,
     pub amount: Option<i128>,
-    pub metadata: serde_json::Value,
+    pub metadata: VaultMetadata,
 }
 
 // ── Webhook delivery / retry (#1102) ────────────────────────────────────────
