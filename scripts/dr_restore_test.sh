@@ -94,12 +94,12 @@ test_dr_restore_uses_mktemp() {
     log "Test 3: dr_restore.sh uses mktemp for all temp files"
 
     # Check that dr_restore.sh uses mktemp for temp files
-    if ! grep -q "mktemp" /workspaces/TTL-Legacy/scripts/dr_restore.sh; then
+    if ! grep -q "mktemp" "${REPO_ROOT}/scripts/dr_restore.sh"; then
         fail "dr_restore.sh does not use mktemp for temp files"
     fi
 
     # Check that trap is set to clean up temp files
-    if ! grep -q "trap.*rm.*EXIT" /workspaces/TTL-Legacy/scripts/dr_restore.sh; then
+    if ! grep -q "trap.*rm.*EXIT" "${REPO_ROOT}/scripts/dr_restore.sh"; then
         fail "dr_restore.sh does not have trap cleanup for temp files"
     fi
 

@@ -264,9 +264,7 @@ else
 
     # Verify the restored database's applied migration version matches the
     # version the current backend binary expects (Issue #2149).
-    if ! $DRY_RUN; then
-        verify_schema_version "${DR_DB_PATH}"
-    fi
+    verify_schema_version "${DR_DB_PATH}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -286,8 +284,11 @@ else
     NEW_CONTRACT_ID=$(stellar contract deploy \
         --wasm "${WASM_FILE}" \
         --source "${DEPLOYER_IDENTITY}" \
-        --network "${STELLAR_NETWORK}") \
-        || die "Contract re-deployment failed"
+        --network "${STELLAR_NETWORK}") || die "Contract re-deployment failed"
+
+    if [[ -z "${NEW_CONTRACT_ID}" ]]; then
+        die "Contract re-deployment produced no contract ID"
+    fi
 
     log "Contract re-deployed: ${NEW_CONTRACT_ID}"
     log "Update CONTRACT_TTL_VAULT=${NEW_CONTRACT_ID} in your environment / environments.toml"

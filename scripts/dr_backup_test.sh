@@ -10,6 +10,7 @@ set -euo pipefail
 
 # Setup test environment
 TEST_DIR=$(mktemp -d)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 trap 'rm -rf "${TEST_DIR}"' EXIT
 
 log() { echo "[dr_backup_test] $*"; }
@@ -119,12 +120,12 @@ test_dr_backup_uses_mktemp() {
     log "Test 4: dr_backup.sh uses mktemp for all temp files"
 
     # Check that dr_backup.sh uses mktemp for temp files
-    if ! grep -q "mktemp" /workspaces/TTL-Legacy/scripts/dr_backup.sh; then
+    if ! grep -q "mktemp" "${REPO_ROOT}/scripts/dr_backup.sh"; then
         fail "dr_backup.sh does not use mktemp for temp files"
     fi
 
     # Check that trap is set to clean up temp files
-    if ! grep -q "trap.*rm.*EXIT" /workspaces/TTL-Legacy/scripts/dr_backup.sh; then
+    if ! grep -q "trap.*rm.*EXIT" "${REPO_ROOT}/scripts/dr_backup.sh"; then
         fail "dr_backup.sh does not have trap cleanup for temp files"
     fi
 

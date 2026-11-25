@@ -23,6 +23,8 @@
 #   DR_REPLICA_BUCKET     Second bucket in another region for cross-region
 #                         replication (3-2-1). Replication is skipped if unset.
 #   DR_REPLICA_REGION     Region of the replica bucket   (required with DR_REPLICA_BUCKET)
+#   DR_REPLICA_ENDPOINT   S3 endpoint URL for the replica bucket
+#                         (defaults to https://s3.amazonaws.com)
 
 set -euo pipefail
 
@@ -65,6 +67,7 @@ fi
 
 DR_S3_PREFIX="${DR_S3_PREFIX:-backups}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
+DR_REPLICA_ENDPOINT="${DR_REPLICA_ENDPOINT:-https://s3.amazonaws.com}"
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 BACKUP_KEY_PREFIX="${DR_S3_PREFIX}/${TIMESTAMP}"
 
@@ -101,7 +104,9 @@ fi
 
 CONTRACT_STATE_FILE=$(mktemp /tmp/contract_state_XXXXXX.json)
 SIG_DIR=$(mktemp -d /tmp/dr_sig_XXXXXX)
-trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}"; rm -rf "${SIG_DIR}"' EXIT
+MANIFEST_FILE=""
+VAULT_SNAPSHOT_DIR=""
+trap 'rm -f "${CONTRACT_STATE_FILE}" "${DB_SNAPSHOT_FILE:-}" "${MANIFEST_FILE:-}"; rm -rf "${SIG_DIR}" "${VAULT_SNAPSHOT_DIR:-}"' EXIT
 
 log "Exporting contract state for contract ${CONTRACT_TTL_VAULT} on ${STELLAR_NETWORK}..."
 if $DRY_RUN; then
@@ -150,6 +155,8 @@ if [[ -z "${DR_VAULT_SNAPSHOTS:-}" ]]; then
 else
     SKIP_VAULT_SNAPSHOTS=false
     VAULT_SNAPSHOT_DIR=$(mktemp -d /tmp/vault_snapshots_XXXXXX)
+    # Registered in the EXIT trap (via VAULT_SNAPSHOT_DIR) so the files
+    # are cleaned up on every exit path, including die() and set -e.
     IFS=',' read -ra SNAPSHOT_REFS <<< "${DR_VAULT_SNAPSHOTS}"
     for ref in "${SNAPSHOT_REFS[@]}"; do
         [[ "${ref}" =~ ^[0-9]+:[0-9]+$ ]] || die "Invalid DR_VAULT_SNAPSHOTS entry '${ref}' (expected vault_id:timestamp)"
@@ -191,7 +198,7 @@ upload_to_s3() {
     if [[ -n "${DR_REPLICA_BUCKET:-}" ]]; then
         log "Replicating ${s3_key} -> s3://${DR_REPLICA_BUCKET}/${s3_key} (${DR_REPLICA_REGION})"
         run aws s3 cp "${local_path}" "s3://${DR_REPLICA_BUCKET}/${s3_key}" \
-            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --endpoint-url "${DR_REPLICA_ENDPOINT}" \
             --region "${DR_REPLICA_REGION}"
     fi
 }
@@ -250,8 +257,8 @@ cat > "${MANIFEST_FILE}" <<EOF
   },
   "sha256": {
     "contract_state": $(json_sha256 "${CONTRACT_STATE_FILE}"),
-    "backend_db": $(json_sha256 "${DB_SNAPSHOT_FILE:-}"),
-    "wasm": $(json_sha256 "${WASM_PATH}")
+    "backend_db": $(if $SKIP_DB; then echo null; else json_sha256 "${DB_SNAPSHOT_FILE}"; fi),
+    "wasm": $(if $SKIP_WASM; then echo null; else json_sha256 "${WASM_PATH}"; fi)
   }
 }
 EOF

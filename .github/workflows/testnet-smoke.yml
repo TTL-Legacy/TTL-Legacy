@@ -243,7 +243,8 @@ jobs:
             -- check_in \
             --vault_id "${VAULT_ID}" \
             --caller "${OWNER_ADDR}" \
-            --passkey_hash "${PASSKEY_HASH}"
+            --passkey_hash "${PASSKEY_HASH}" \
+            --nonce 0
 
           echo "Checked in (passkey: ${PASSKEY_HASH})"
 

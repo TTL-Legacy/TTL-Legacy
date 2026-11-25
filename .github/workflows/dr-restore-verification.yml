@@ -36,6 +36,42 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Fail fast, naming every missing secret, instead of failing later
+      # with a vague error from the AWS, GPG or Stellar tooling.
+      - name: Check required secrets
+        env:
+          DR_AWS_ACCESS_KEY_ID: ${{ secrets.DR_AWS_ACCESS_KEY_ID }}
+          DR_AWS_SECRET_ACCESS_KEY: ${{ secrets.DR_AWS_SECRET_ACCESS_KEY }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+        run: |
+          required=(
+            DR_AWS_ACCESS_KEY_ID
+            DR_AWS_SECRET_ACCESS_KEY
+            DR_S3_BUCKET
+            DR_S3_ENDPOINT
+          )
+
+          missing=()
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || missing+=("${name}")
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            {
+              echo "## DR restore verification not run: missing repository secrets"
+              echo
+              echo "Set these under Settings → Secrets and variables → Actions:"
+              echo
+              for name in "${missing[@]}"; do echo "- \`${name}\`"; done
+              echo
+              echo "See docs/disaster-recovery-runbook.md (Nightly Backup Workflow)."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::error title=DR restore verification misconfigured::Missing required secrets: ${missing[*]}. See docs/disaster-recovery-runbook.md."
+            exit 1
+          fi
+          echo "All required secrets are set."
+
       - name: Install Stellar CLI
         run: |
           curl -sSfL \
@@ -283,6 +319,8 @@ jobs:
 
       - name: Notify on failure
         if: failure()
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
