@@ -1,100 +1,34 @@
 # Security Policy
 
-## Overview
-
-The TTL-Legacy smart contract handles real XLM (Stellar Lumens) and implements time-locked vaults with beneficiary distributions. Security is critical to protect user funds and ensure the integrity of the contract.
-
-## Supported Versions
-
-| Version | Supported          |
-| ------- | ------------------ |
-| Latest  | :white_check_mark: |
-| < Latest| :x:                |
-
-Only the latest version of the contract is supported. Users should always deploy the most recent audited version.
-
 ## Reporting a Vulnerability
 
-We take security vulnerabilities seriously. If you discover a security vulnerability, please follow responsible disclosure practices.
+If you discover a security vulnerability, please report it responsibly by opening a private security advisory or contacting the maintainers directly. Do not disclose vulnerabilities publicly until they have been addressed.
 
-### How to Report
+## Admin Function Auth Audit
 
-**DO NOT** open a public GitHub issue for security vulnerabilities.
+All admin-only entrypoints in the vault contract must enforce authorization via `require_auth` (or an equivalent admin check) before mutating state. To keep this guarantee from regressing as the contract grows, the repository ships an audit script that scans the contract sources and reports the auth coverage of every public function.
 
-Instead, please report vulnerabilities via one of the following methods:
+### Running the audit
 
-1. **Email**: Send details to [security@ttl-legacy.example.com](mailto:security@ttl-legacy.example.com)
-2. **Encrypted Communication**: Use our PGP key available at [https://ttl-legacy.example.com/security-key.asc](https://ttl-legacy.example.com/security-key.asc)
+```sh
+./scripts/audit_admin_auth.sh
+```
 
-### What to Include
+The script:
 
-When reporting a vulnerability, please include:
+1. Lists every `pub fn` defined under `contracts/`.
+2. Inspects each function body for an auth check (`require_auth`, `require_admin`, or an admin guard).
+3. Flags any function whose name indicates an admin-only path (e.g. `set_`, `update_`, `pause`, `unpause`, `upgrade`, `withdraw`, `mint`, `burn`, `transfer_admin`, `initialize`) but that is missing an auth check.
+4. Exits non-zero when a missing check is found, so it can gate CI.
 
-- Description of the vulnerability
-- Steps to reproduce the issue
-- Potential impact on user funds
-- Suggested fix (if available)
-- Your contact information for follow-up
+### CI enforcement
 
-### Response Timeline
+The audit runs automatically on every pull request and push to `main` via the `security-audit` job. A failing audit blocks the merge until the missing `require_auth` call is added.
 
-- **Initial Response**: Within 48 hours of receipt
-- **Status Update**: Within 7 days
-- **Fix Timeline**: Depends on severity, typically 14-30 days for critical issues
+### Adding a new admin function
 
-### Severity Levels
+When adding an admin-only entrypoint:
 
-- **Critical**: Immediate fund loss or unauthorized access to user funds
-- **High**: Potential fund loss or contract manipulation
-- **Medium**: Contract functionality issues without direct fund risk
-- **Low**: Minor issues or improvements
-
-## Security Measures
-
-### Pre-Mainnet Audit Requirement
-
-**IMPORTANT**: Before deploying to mainnet, the contract MUST undergo a comprehensive security audit by a reputable third-party auditor. No mainnet deployment should occur without:
-
-1. Complete code review
-2. Formal security audit report
-3. Resolution of all critical and high-severity findings
-4. Community review period
-
-### Current Security Features
-
-- **Authorization Checks**: All sensitive operations require proper authentication
-- **Error Handling**: Structured error codes for reliable client-side error handling
-- **Time-Lock Mechanism**: Funds are locked until specified conditions are met
-- **Beneficiary Protection**: Multiple beneficiaries with BPS-based distribution
-- **Pause Functionality**: Admin can pause contract in emergency situations
-
-### Best Practices for Users
-
-1. **Verify Contract Address**: Always confirm you're interacting with the official contract
-2. **Check Parameters**: Double-check all transaction parameters before signing
-3. **Monitor Expiry**: Use `ping_expiry` to monitor vault TTL status
-4. **Use View Functions**: Check vault status before executing state-changing operations
-
-## Bug Bounty Program
-
-We are considering implementing a bug bounty program for security researchers. Details will be announced once the program is established.
-
-## Security Updates
-
-Security updates and announcements will be published through:
-
-- GitHub Security Advisories
-- Official project communication channels
-- Contract upgrade notifications (when applicable)
-
-## Contact
-
-For general security questions or concerns: [security@ttl-legacy.example.com](mailto:security@ttl-legacy.example.com)
-
-## Acknowledgments
-
-We thank the security research community for their contributions to keeping this project secure.
-
----
-
-**Last Updated**: 2026-03-27
+- Call `require_auth` on the stored admin address (or the caller) before any state mutation.
+- Add a test asserting that a non-admin caller fails with the expected authorization error.
+- Run `./scripts/audit_admin_auth.sh` locally to confirm the function is recognized as covered.

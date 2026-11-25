@@ -1,0 +1,26 @@
+# Cargo Audit Configuration
+# This file configures vulnerability severity thresholds and allows accepted advisories.
+# The CI will fail on any CRITICAL or HIGH severity vulnerabilities.
+#
+# CI Integration (issue #2130): cargo-audit is executed as part of the CI pipeline
+# in .github/workflows/ci.yml via the "Install cargo-audit" and "Run security audit"
+# steps. The workflow installs cargo-audit and runs `cargo audit --json`, then parses
+# the output to fail only on CRITICAL or HIGH severity advisories. Advisories listed
+# in the `ignore` list below are suppressed with justifications.
+
+# Advisories to ignore (known false positives or accepted risks)
+# Each entry includes a justification for why the advisory is suppressed.
+ignore = [
+  # RUSTSEC-2021-0001: time-unsafe-assumptions
+  # The chrono crate uses time-unsafe-assumptions for DST handling, which is
+  # required for timezone-aware scheduling (issue #1752). The vulnerable code
+  # path (localtime_r) is not used in our deployment environment where TZ
+  # database updates are managed at the OS level.
+  "RUSTSEC-2021-0001",
+]
+
+# Vulnerability categories
+[vulnerability]
+unmaintained = "deny"
+unsound = "deny"
+yanked = "warn"

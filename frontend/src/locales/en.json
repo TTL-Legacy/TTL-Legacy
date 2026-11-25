@@ -1,0 +1,78 @@
+{
+  "checkIn": {
+    "button": "Check In",
+    "pending": "Pending…",
+    "success": "Check-in successful",
+    "failed": "Check-in failed",
+    "error": "Error submitting check-in",
+    "connectWallet": "Connect wallet to check in"
+  },
+  "vault": {
+    "statusHealthy": "Vault healthy",
+    "statusDegraded": "Vault degraded",
+    "statusDown": "Vault down",
+    "statusUnknown": "Vault status unknown",
+    "create": "Create Vault",
+    "beneficiaryLabel": "Beneficiary address",
+    "checkInIntervalLabel": "Check-in interval (seconds)",
+    "idLabel": "Vault ID"
+  },
+  "vaultWizard": {
+    "stepBasic": "Basic Config",
+    "stepBeneficiaries": "Beneficiaries",
+    "stepReleaseConditions": "Release Conditions",
+    "stepVesting": "Vesting",
+    "stepReview": "Review & Sign",
+    "resumeDraft": "You have an unsaved vault creation draft. Resume or start fresh?",
+    "resume": "Resume",
+    "discard": "Discard",
+    "back": "← Back",
+    "next": "Next →",
+    "cancel": "Cancel",
+    "signAndCreate": "Sign and Create Vault",
+    "submitting": "Submitting…",
+    "draftSaved": "Draft saved",
+    "totalMustBe100": "(must equal 100)",
+    "noBeneficiaries": "Add at least one beneficiary",
+    "releaseConditionTtl": "TTL expiry",
+    "releaseConditionOwner": "Owner initiated",
+    "releaseConditionOracle": "Oracle",
+    "vestingEnabled": "Enable vesting schedule",
+    "cliffGraceHint": "Claims within this window after the cliff date incur no late-claim penalty."
+  },
+  "upgradeProposal": {
+    "title": "Upgrade Proposals",
+    "pending": "Pending",
+    "timelockLabel": "Timelock",
+    "unlocksIn": "Unlocks in {{time}}",
+    "unlocked": "Timelock elapsed",
+    "approve": "Approve",
+    "reject": "Reject",
+    "adminOnlyNotice": "Only the contract admin can approve or reject upgrade proposals.",
+    "empty": "No pending upgrade proposals",
+    "approveSuccess": "Upgrade proposal approved",
+    "rejectSuccess": "Upgrade proposal rejected",
+    "approveError": "Failed to approve upgrade proposal",
+    "rejectError": "Failed to reject upgrade proposal"
+  },
+  "common": {
+    "loading": "Loading…",
+    "error": "An error occurred",
+    "retry": "Retry",
+    "confirm": "Confirm",
+    "cancel": "Cancel"
+  },
+  "vaultNotes": {
+    "heading": "Vault notes",
+    "edit": "Edit",
+    "save": "Save",
+    "cancel": "Cancel",
+    "saving": "Saving…",
+    "noNotes": "No notes yet.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Preview",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Save failed. Please try again.",
+    "ariaLabel": "Notes for vault {{vaultId}}"
+  }
+}

@@ -46,6 +46,7 @@ final class VaultStore: ObservableObject {
     @Published var vaults: [Vault] = []
     @Published var isLoading = false
     @Published var error: String?
+    @Published var pendingDeepLink: UniversalLinkRouter.DeepLink?
 
     func load() async {
         isLoading = true; error = nil
@@ -61,6 +62,21 @@ final class VaultStore: ObservableObject {
     }
 
     func checkIn(vault: Vault) async {
+        guard NetworkMonitor.shared.isConnected else {
+            // Sign locally and enqueue for later submission.
+            do {
+                let payload = try await PasskeyService.shared.signCheckIn(vaultID: vault.id)
+                let queued = QueuedCheckIn(
+                    vaultID: vault.id,
+                    queuedAt: Date(),
+                    signedPayload: payload
+                )
+                OfflineCheckInQueue.shared.enqueue(queued)
+            } catch {
+                self.error = "Could not sign check-in offline: \(error.localizedDescription)"
+            }
+            return
+        }
         do {
             try await APIClient.shared.checkIn(vaultID: vault.id)
             await load()

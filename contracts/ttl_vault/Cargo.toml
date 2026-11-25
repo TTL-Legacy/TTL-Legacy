@@ -3,11 +3,21 @@ name = "ttl-vault"
 version = "0.1.0"
 edition = "2021"
 
+[lints]
+workspace = true
+
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Enables the generated contract client and test-harness support so that
+# other crates (integration tests, fuzz targets) can register and invoke
+# the contract through soroban-sdk testutils.
+testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
 soroban-sdk = { version = "21.0.0", features = ["alloc"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+proptest = { version = "1.4", default-features = false, features = ["std"] }

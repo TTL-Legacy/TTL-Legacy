@@ -1,0 +1,138 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Specific Test (Prompt)",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--workspace"
+        ]
+      },
+      "args": [
+        "${input:testName}",
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug 'ttl-vault' Library Tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "ttl-vault",
+          "--lib"
+        ]
+      },
+      "args": [
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug 'ttl-vault' Integration Tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "ttl-vault",
+          "--test",
+          "integration_tests"
+        ]
+      },
+      "args": [
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug 'ttl-vault' Property Tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "ttl-vault",
+          "--test",
+          "property_tests"
+        ]
+      },
+      "args": [
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug 'zk-verifier' Library Tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "zk-verifier",
+          "--lib"
+        ]
+      },
+      "args": [
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug 'ttl-legacy-backend' Library Tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--package",
+          "ttl-legacy-backend",
+          "--lib"
+        ]
+      },
+      "args": [
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug All Workspace Tests",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--workspace"
+        ]
+      },
+      "args": [
+        "--nocapture"
+      ],
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "Enter the name of the test to run/debug (e.g. test_search_vaults_by_owner)",
+      "default": ""
+    }
+  ]
+}

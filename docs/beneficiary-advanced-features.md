@@ -1,0 +1,188 @@
+# Beneficiary Advanced Features
+
+This document covers four advanced beneficiary features added in issues #494–#497.
+
+---
+
+## #494 — Beneficiary Succession Planning
+
+Allows the vault owner to designate a **successor beneficiary** as a fallback in case the primary beneficiary is unavailable or declines.
+
+### How it works
+
+1. Owner calls `set_succession_plan(vault_id, caller, successor, activation_delay)`.
+2. If the primary beneficiary declines or becomes unavailable, the owner calls `activate_succession(vault_id, caller)`.
+3. The vault's `beneficiary` field is updated to the successor immediately. An optional `activation_delay` (seconds) is recorded for off-chain enforcement.
+
+### API
+
+```rust
+set_succession_plan(vault_id: u64, caller: Address, successor: Address, activation_delay: u64)
+activate_succession(vault_id: u64, caller: Address)
+get_succession_plan(vault_id: u64) -> Option<SuccessionPlan>
+```
+
+### Events
+
+| Topic             | Data                                          |
+|-------------------|-----------------------------------------------|
+| `suc_set`         | `(caller, successor, activation_delay)`       |
+| `suc_act`         | `(old_beneficiary, new_beneficiary, timestamp)` |
+
+### Error codes
+
+| Code | Name                        | Meaning                              |
+|------|-----------------------------|--------------------------------------|
+| 55   | `SuccessionNotSet`          | No succession plan exists            |
+| 56   | `SuccessionAlreadyActivated`| Plan has already been activated      |
+
+---
+
+## #495 — Beneficiary Escrow
+
+Holds released funds in escrow pending explicit beneficiary acceptance, preventing accidental or unwanted transfers.
+
+### How it works
+
+1. Owner calls `create_escrow(vault_id, caller, expiry_seconds)` after depositing funds.
+2. Beneficiary calls `accept_escrow` to receive funds, or `reject_escrow` to return them to the owner.
+3. If neither action is taken before `expiry_seconds`, anyone can call `expire_escrow` to return funds to the owner.
+
+### API
+
+```rust
+create_escrow(vault_id: u64, caller: Address, expiry_seconds: u64)
+accept_escrow(vault_id: u64, caller: Address)
+reject_escrow(vault_id: u64, caller: Address)
+expire_escrow(vault_id: u64)
+get_escrow(vault_id: u64) -> Option<EscrowEntry>
+```
+
+### Events
+
+| Topic     | Data                                      |
+|-----------|-------------------------------------------|
+| `esc_cre` | `(beneficiary, amount, expires_at)`       |
+| `esc_acc` | `(beneficiary, amount)`                   |
+| `esc_rej` | `(beneficiary, amount)`                   |
+| `esc_exp` | `(owner, amount)`                         |
+
+### Error codes
+
+| Code | Name                  | Meaning                                  |
+|------|-----------------------|------------------------------------------|
+| 57   | `EscrowNotFound`      | No escrow entry exists for this vault    |
+| 58   | `EscrowAlreadySettled`| Escrow was already accepted or removed   |
+| 59   | `EscrowExpired`       | Escrow deadline has passed               |
+
+---
+
+## #496 — Beneficiary Dispute Arbitration
+
+Enables multi-party arbitration for disputes between the vault owner and beneficiary via a designated neutral arbitrator.
+
+### How it works
+
+1. Owner calls `set_arbitrator(vault_id, caller, arbitrator)` to designate a trusted third party.
+2. Beneficiary files a dispute via the existing `file_dispute` function.
+3. The arbitrator calls `arbitrate_dispute(vault_id, caller, ruling)`:
+   - `ruling = true` → funds transferred to beneficiary
+   - `ruling = false` → funds returned to owner
+4. The dispute is automatically marked `Resolved`.
+
+### API
+
+```rust
+set_arbitrator(vault_id: u64, caller: Address, arbitrator: Address)
+arbitrate_dispute(vault_id: u64, caller: Address, ruling: bool)
+get_arbitration_config(vault_id: u64) -> Option<ArbitrationConfig>
+```
+
+### Events
+
+| Topic     | Data                          |
+|-----------|-------------------------------|
+| `arb_set` | `(owner, arbitrator)`         |
+| `arb_rul` | `(arbitrator, ruling, timestamp)` |
+
+### Error codes
+
+| Code | Name                    | Meaning                                  |
+|------|-------------------------|------------------------------------------|
+| 60   | `ArbitratorNotSet`      | No arbitrator configured for this vault  |
+| 61   | `ArbitrationAlreadyRuled` | A ruling has already been issued        |
+| 62   | `NotArbitrator`         | Caller is not the configured arbitrator  |
+
+---
+
+## #497 — Beneficiary Notification System
+
+Automatically emits on-chain events and maintains a persistent notification log whenever vault status changes occur.
+
+### How it works
+
+- Notifications are emitted automatically by succession activation, escrow lifecycle events, and arbitration rulings.
+- The vault owner or admin can also manually emit a notification via `notify_beneficiary`.
+- All notifications are appended to a persistent `NotificationLog` keyed by vault ID.
+
+### API
+
+```rust
+notify_beneficiary(vault_id: u64, caller: Address, kind: String)
+get_notification_log(vault_id: u64) -> Vec<NotificationEntry>
+```
+
+### Event
+
+| Topic     | Data              |
+|-----------|-------------------|
+| `v_notif` | `(kind, timestamp)` |
+
+### Automatic notifications
+
+| Trigger                  | `kind` value            |
+|--------------------------|-------------------------|
+| Succession activated     | `succession_activated`  |
+| Escrow created           | `escrow_created`        |
+| Escrow accepted          | `escrow_accepted`       |
+| Escrow rejected          | `escrow_rejected`       |
+| Escrow expired           | `escrow_expired`        |
+| Arbitration ruled        | `arbitration_ruled`     |
+
+---
+
+## Scheduled Beneficiary Rotation
+
+Owners can schedule a future beneficiary rotation that will be applied automatically when its effective timestamp is reached. Use `schedule_beneficiary_rotation(vault_id, caller, effective_timestamp, new_beneficiaries)` to enqueue a rotation. The `new_beneficiaries` vector must be a valid multi-beneficiary split (non-empty, BPS sum = 10_000) and the caller must be the vault owner.
+
+When a scheduled rotation becomes effective it is applied on the next state-mutating call that touches the vault (for example `check_in` or `batch_check_in`). The contract emits a `ben_rot` event with the effective timestamp when the rotation is applied.
+
+API:
+
+```rust
+schedule_beneficiary_rotation(vault_id: u64, caller: Address, effective_timestamp: u64, new_beneficiaries: Vec<BeneficiaryEntry>)
+```
+
+Event:
+
+| Topic     | Data                         |
+|-----------|------------------------------|
+| `ben_rot` | `(effective_timestamp)`      |
+
+
+---
+
+## BPS Sum Invariant
+
+**Invariant:** After any sequence of `set_beneficiaries`, cap application, floor enforcement, or ranking operations, the sum of all allocated basis points across a vault's beneficiary list must equal exactly **10 000**.
+
+This is enforced at the contract level: `set_beneficiaries` returns `ContractError::InvalidBps` if the provided entries do not sum to 10 000. Cap and floor logic operates on absolute token amounts and does not alter BPS values stored in the vault.
+
+### Tested invariants
+
+| Test | Description |
+|------|-------------|
+| `bps_sum_invariant_after_set_beneficiaries` | BPS sum equals 10 000 after a multi-beneficiary set |
+| `bps_sum_invariant_after_cap_application` | Stored BPS remains 10 000 after caps are configured |
+| `bps_sum_invariant_set_rejects_non_10000` | `set_beneficiaries` rejects any split that doesn't sum to 10 000 |
+| `prop_bps_sum_invariant_after_set_beneficiaries` | Proptest: random valid splits always yield a stored sum of 10 000 |

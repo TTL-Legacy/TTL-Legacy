@@ -1,0 +1,236 @@
+#![cfg(test)]
+
+extern crate alloc;
+
+use super::*;
+use soroban_sdk::{
+    testutils::{
+        storage::{Instance as _, Persistent as _},
+        Address as _, Events, Ledger,
+    },
+    token::{self},
+    vec, Address, Env, IntoVal, TryIntoVal,
+};
+
+use crate::tests::common::setup_with_roles as setup;
+
+fn withdrawal(env: &Env, vault_id: u64, destination: &Address, amount: i128) -> BatchWithdrawal {
+    BatchWithdrawal {
+        vault_id,
+        destination: destination.clone(),
+        amount,
+    }
+}
+
+#[test]
+fn test_batch_withdraw_single_destination() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    client.batch_withdraw(
+        &vec![&env, withdrawal(&env, vault_id, &dest, 400i128)],
+        &owner,
+    );
+
+    assert_eq!(client.get_vault(&vault_id).balance, 600i128);
+}
+
+#[test]
+fn test_batch_withdraw_multiple_destinations() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest1 = Address::generate(&env);
+    let dest2 = Address::generate(&env);
+    let dest3 = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    client.batch_withdraw(
+        &vec![
+            &env,
+            withdrawal(&env, vault_id, &dest1, 100i128),
+            withdrawal(&env, vault_id, &dest2, 200i128),
+            withdrawal(&env, vault_id, &dest3, 300i128),
+        ],
+        &owner,
+    );
+
+    assert_eq!(client.get_vault(&vault_id).balance, 400i128);
+}
+
+#[test]
+fn test_batch_withdraw_validates_total_against_vault_balance() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // Two instructions whose summed amount (600) exceeds the vault balance (500).
+    let err = client
+        .try_batch_withdraw(
+            &vec![
+                &env,
+                withdrawal(&env, vault_id, &dest, 400i128),
+                withdrawal(&env, vault_id, &dest, 200i128),
+            ],
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InsufficientBalance);
+
+    // Vault balance must be unchanged when the batch is rejected.
+    assert_eq!(client.get_vault(&vault_id).balance, 500i128);
+}
+
+#[test]
+fn test_batch_withdraw_owner_only() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let non_owner = Address::generate(&env);
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, withdrawal(&env, vault_id, &dest, 100i128)],
+            &non_owner,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::NotOwner);
+}
+
+#[test]
+fn test_batch_withdraw_empty_list_rejected() {
+    let (env, owner, _, _, _, client) = setup();
+
+    let err = client
+        .try_batch_withdraw(&vec![&env], &owner)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidAmount);
+}
+
+#[test]
+fn test_batch_withdraw_zero_amount_rejected() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, withdrawal(&env, vault_id, &dest, 0i128)],
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ContractError::InvalidAmount);
+}
+
+#[test]
+fn test_batch_withdraw_is_atomic() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &500i128);
+
+    // First instruction is valid; second exceeds the balance. The whole batch must fail.
+    assert!(client
+        .try_batch_withdraw(
+            &vec![
+                &env,
+                withdrawal(&env, vault_id, &dest, 100i128),
+                withdrawal(&env, vault_id, &dest, 1_000i128),
+            ],
+            &owner,
+        )
+        .is_err());
+
+    assert_eq!(client.get_vault(&vault_id).balance, 500i128);
+}
+
+#[test]
+fn test_batch_withdraw_reduces_balance() {
+    let (env, owner, beneficiary, _, token_address, client) = setup();
+    let token_client = token::Client::new(&env, &token_address);
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+    let before = token_client.balance(&dest);
+
+    client.batch_withdraw(
+        &vec![
+            &env,
+            withdrawal(&env, vault_id, &dest, 250i128),
+            withdrawal(&env, vault_id, &dest, 250i128),
+        ],
+        &owner,
+    );
+
+    assert_eq!(client.get_vault(&vault_id).balance, 500i128);
+    assert_eq!(token_client.balance(&dest), before + 500i128);
+}
+
+// ── Issue #1529: batch_withdraw must not bypass hold checks ──────────────────
+
+/// A paused vault must not be withdrawable via the batch path. The single
+/// `withdraw` function already enforces `vault.is_paused`; this test confirms
+/// that `batch_withdraw` applies the same guard so an attacker cannot bypass
+/// the vault-level pause by routing through the batch endpoint.
+#[test]
+fn test_batch_withdraw_blocked_on_paused_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // Pause the vault.
+    client.pause_vault(&vault_id, &owner).unwrap();
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, withdrawal(&env, vault_id, &dest, 100i128)],
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    // The batch must be rejected — the vault-level pause must not be bypassable.
+    assert_eq!(
+        err,
+        ContractError::Paused,
+        "batch_withdraw must honour vault-level pause (issue #1529)"
+    );
+    // Vault balance must be unchanged.
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000i128);
+}
+
+/// An owner-locked vault must not be withdrawable via the batch path.
+/// Mirrors the `VaultOwnerLocked` guard applied by single `withdraw`.
+#[test]
+fn test_batch_withdraw_blocked_on_owner_locked_vault() {
+    let (env, owner, beneficiary, _, _, client) = setup();
+    let dest = Address::generate(&env);
+    let vault_id = client.create_vault(&owner, &beneficiary, &100u64, &None);
+    client.deposit(&vault_id, &owner, &1_000i128);
+
+    // Owner-lock the vault.
+    client.owner_lock_vault(&vault_id, &owner).unwrap();
+
+    let err = client
+        .try_batch_withdraw(
+            &vec![&env, withdrawal(&env, vault_id, &dest, 100i128)],
+            &owner,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(
+        err,
+        ContractError::VaultOwnerLocked,
+        "batch_withdraw must honour owner-lock (issue #1529)"
+    );
+    assert_eq!(client.get_vault(&vault_id).balance, 1_000i128);
+}

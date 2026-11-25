@@ -80,6 +80,69 @@ mobile/
 3. Configure `assetlinks.json` at `https://ttl-legacy.app/.well-known/assetlinks.json`
 4. Set `API_BASE_URL` in `build.gradle.kts` `buildConfigField`
 
+## Deep Link URL Format (Android App Links)
+
+TTL-Legacy supports two URI schemes for vault deep links on Android.
+
+### Primary scheme — App Links (Issue #1146)
+
+```
+ttl-legacy://vault/{vault_id}/{action}
+```
+
+This scheme is registered with `android:autoVerify="true"` in `AndroidManifest.xml`.
+Android verifies the `assetlinks.json` fingerprint at install time, so these links open
+directly in the app without a browser disambiguation dialog.
+
+**Examples:**
+
+| URL | Opens |
+|-----|-------|
+| `ttl-legacy://vault/abc-123/view-details` | Vault detail screen |
+| `ttl-legacy://vault/abc-123/check-in` | Check-in flow |
+| `ttl-legacy://vault/abc-123/withdraw` | Withdrawal screen |
+| `ttl-legacy://vault/abc-123/manage-beneficiary` | Beneficiary management |
+
+**Supported actions:**
+
+| Action path segment | Description |
+|---------------------|-------------|
+| `view-details` | Open the vault detail screen |
+| `check-in` | Launch the check-in confirmation flow |
+| `withdraw` | Open the withdrawal screen |
+| `manage-beneficiary` | Open beneficiary management |
+
+### Legacy scheme (backwards compatibility)
+
+```
+ttllegacy://vault/{vault_id}/{action}
+```
+
+Kept for backwards compatibility with existing push notifications and shared links.
+Both schemes are parsed by `VaultDeepLinkParser` and routed identically.
+
+### HTTPS App Links
+
+HTTPS App Links are also supported for beneficiary acceptance flows:
+
+```
+https://ttl-legacy.app/accept?vault_id={vault_id}
+```
+
+### assetlinks.json
+
+The backend serves `/.well-known/assetlinks.json` to allow Android to verify the
+association between `ttl-legacy.app` and the `com.ttllegacy` app package.
+
+> **Important:** Replace `REPLACE_WITH_PRODUCTION_SHA256_CERT_FINGERPRINT` in
+> `backend/.well-known/assetlinks.json` with the SHA-256 fingerprint of your
+> release signing certificate before publishing the app.
+>
+> Get the fingerprint:
+> ```bash
+> keytool -list -v -keystore release.jks -alias your-alias | grep SHA256
+> ```
+
 ## Testing
 
 ### iOS
@@ -95,4 +158,11 @@ cd mobile/android
 ./gradlew test                  # Unit tests (JVM)
 ./gradlew connectedAndroidTest  # Instrumented tests (device/emulator)
 ```
-Covers: ViewModel state transitions, model logic, Compose UI smoke tests.
+Covers: ViewModel state transitions, model logic, Compose UI smoke tests, vault deep-link
+intent handling (`VaultDeepLinkIntentTest`).
+
+To run only the deep-link UI tests:
+```bash
+cd mobile/android
+./gradlew connectedAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.ttllegacy.VaultDeepLinkIntentTest
+```

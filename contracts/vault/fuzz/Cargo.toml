@@ -1,0 +1,33 @@
+[package]
+name = "vault-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.vault]
+path = ".."
+
+[[bin]]
+name = "create_vault"
+path = "fuzz_targets/create_vault.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "check_in"
+path = "fuzz_targets/check_in.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "set_vesting_schedule"
+path = "fuzz_targets/set_vesting_schedule.rs"
+test = false
+doc = false

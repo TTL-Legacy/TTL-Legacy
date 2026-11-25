@@ -1,0 +1,168 @@
+#![cfg(test)]
+
+use super::*;
+use soroban_sdk::{Address, BytesN, Env};
+
+#[test]
+fn test_storage_key_no_collisions() {
+    let env = Env::default();
+
+    let keys: Vec<StorageKey> = vec![
+        StorageKey::Vault(0),
+        StorageKey::OwnerVaults(Address::generate(&env)),
+        StorageKey::MaxVaultsPerOwner,
+        StorageKey::BeneficiaryVaults(Address::generate(&env)),
+        StorageKey::VaultCount,
+        StorageKey::TokenAddress,
+        StorageKey::Admin,
+        StorageKey::Paused,
+        StorageKey::PendingAdmin,
+        StorageKey::MinCheckInInterval,
+        StorageKey::MaxCheckInInterval,
+        StorageKey::Version,
+        StorageKey::VestingSchedule(0, 0),
+        StorageKey::VestingPenalty(0, 0),
+        StorageKey::VestingPendingClaim(0, 0),
+        StorageKey::VestingScheduleCount(0),
+        StorageKey::MilestoneVestingSchedule(0),
+        StorageKey::CountdownFired(0),
+        StorageKey::TokenWhitelist(Address::generate(&env)),
+        StorageKey::WrappedToken(Address::generate(&env)),
+        StorageKey::VaultMetadata(0),
+        StorageKey::ParentVault(0),
+        StorageKey::VaultPasskeys(0),
+        StorageKey::BackupCodes(0),
+        StorageKey::BeneficiaryDelegate(0),
+        StorageKey::BeneficiaryDelegationChain(0),
+        StorageKey::WithdrawalSchedule(0),
+        StorageKey::DisputeStatus(0),
+        StorageKey::ConditionalAcceptance(0),
+        StorageKey::ArchivedVault(0),
+        StorageKey::MaxTtlSeconds,
+        StorageKey::TtlDecayRate,
+        StorageKey::ReleaseGracePeriodSeconds,
+        StorageKey::BridgeConfig(0),
+        StorageKey::TokenConversion(0),
+        StorageKey::TokenStaking(0),
+        StorageKey::PasskeyUsage(0),
+        StorageKey::BeneficiaryStatus(0),
+        StorageKey::PasskeyExpiry(0, BytesN::from_array(&env, &[0u8; 32])),
+        StorageKey::PendingOwnership(0),
+        StorageKey::PendingBeneficiaryUpdate(0),
+        StorageKey::VaultAuditLog(0),
+        StorageKey::MultiSigConfig(0),
+        StorageKey::MultiSigProposal(0, 0),
+        StorageKey::MultiSigProposalCount(0),
+        StorageKey::MetadataHistory(0),
+        StorageKey::CustomMetadataHistory(0),
+        StorageKey::OwnerVaultCount(Address::generate(&env)),
+        StorageKey::StateTransitionLog(0),
+        StorageKey::PasskeyChallenge(0, BytesN::from_array(&env, &[0u8; 32])),
+        StorageKey::WithdrawalApprovals(0),
+        StorageKey::VaultSnapshot(0, 0),
+        StorageKey::VaultSnapshotTimestamps(0),
+        StorageKey::CheckInHistory(0),
+        StorageKey::CheckInEntry(0, 0),
+        StorageKey::CheckInHistoryHead(0),
+        StorageKey::CheckInHistoryLen(0),
+        StorageKey::CheckInStreak(0),
+        StorageKey::CheckInNonce(0),
+        StorageKey::CheckInDelegates(0),
+        StorageKey::DelegateNonce(0, Address::generate(&env)),
+        StorageKey::CheckInDelegateExpiry(0, Address::generate(&env)),
+        StorageKey::ProofOfLife(0),
+        StorageKey::ReleaseVotes(0),
+        StorageKey::ReleaseVoteThreshold(0),
+        StorageKey::BeneficiaryIdentityOracle(0),
+        StorageKey::BeneficiaryIdentityVerification(0),
+        StorageKey::BeneficiaryReleaseTriggers(0),
+        StorageKey::BeneficiaryTierThreshold(0, Address::generate(&env)),
+        StorageKey::BeneficiaryStatusEntry(0, Address::generate(&env)),
+        StorageKey::BeneficiaryReleaseConditionVeto(0),
+        StorageKey::ReleaseAttempted(0),
+        StorageKey::Hibernation(0),
+        StorageKey::LastCheckInTime(0),
+        StorageKey::MinCheckInCooldown,
+        StorageKey::VaultDuplicate(Address::generate(&env), Address::generate(&env), 0),
+        StorageKey::BeneficiaryRotationSchedule(0),
+        StorageKey::CheckInGeoLog(0),
+        StorageKey::TtlBorrow(0),
+        StorageKey::EncryptedBackupCodes(0),
+        StorageKey::WithdrawalAuditLog(0),
+        StorageKey::WithdrawalDisputes(0),
+        StorageKey::WithdrawalScheduleValidation(0),
+        StorageKey::WithdrawalLimit(0),
+        StorageKey::WithdrawalTracker(0),
+        StorageKey::WithdrawalWhitelist(0),
+        StorageKey::WithdrawalReversal(0, 0),
+        StorageKey::WithdrawalReversalCounter(0),
+        StorageKey::VestingCatchUp(0),
+        StorageKey::VestingBonus(0),
+        StorageKey::YieldDistributionConfig(0),
+        StorageKey::TokenLending(0),
+        StorageKey::TokenCollateral(0),
+        StorageKey::TokenHedge(0),
+        StorageKey::TokenRebalance(0),
+        StorageKey::BeneficiaryPool(0),
+        StorageKey::BeneficiaryPoolAlloc(0),
+        StorageKey::BeneficiaryVestingSchedule(0, Address::generate(&env)),
+        StorageKey::BeneficiaryVestingCount(0),
+        StorageKey::BeneficiaryAuction(0),
+        StorageKey::BeneficiaryAuctionBid(0, Address::generate(&env)),
+        StorageKey::BeneficiaryAuctionCount,
+        StorageKey::PendingProtocolConfig,
+        StorageKey::ProtocolConfigProposedAt,
+        StorageKey::RequireUtf8Metadata,
+        StorageKey::OpenProposals(0),
+        StorageKey::TwoFactorConfig(0),
+        StorageKey::TwoFactorVerified(0),
+        StorageKey::VaultFrozen(0),
+        StorageKey::PendingMultiSigOp(0, 0),
+        StorageKey::PendingMultiSigOpNonce(0),
+        StorageKey::PendingUpgrade,
+        StorageKey::AllowedTokens,
+        // Issue #2044: VaultTag and VaultNote must not collide even when their
+        // inner (vault_id, id) tuples share the same values, because they carry
+        // different enum discriminants.
+        StorageKey::VaultTag(0, 42),
+        StorageKey::VaultNote(0, 42),
+    ];
+
+    for (i, key) in keys.iter().enumerate() {
+        env.storage().persistent().set(key, &(i as u32));
+    }
+
+    for (i, key) in keys.iter().enumerate() {
+        let val: u32 = env.storage().persistent().get(key).unwrap_or(9999);
+        assert_eq!(
+            val, i as u32,
+            "StorageKey collision detected at index {}",
+            i
+        );
+    }
+}
+
+/// Issue #2044 — VaultTag and VaultNote must not collide when both use the
+/// same (vault_id, id) pair, because they differ only in enum discriminant.
+#[test]
+fn test_vault_tag_and_vault_note_no_collision() {
+    let env = Env::default();
+
+    let vault_id: u64 = 1;
+    let shared_id: u64 = 99;
+
+    let tag_key = StorageKey::VaultTag(vault_id, shared_id);
+    let note_key = StorageKey::VaultNote(vault_id, shared_id);
+
+    env.storage().persistent().set(&tag_key, &100u32);
+    env.storage().persistent().set(&note_key, &200u32);
+
+    let tag_val: u32 = env.storage().persistent().get(&tag_key).unwrap_or(0);
+    let note_val: u32 = env.storage().persistent().get(&note_key).unwrap_or(0);
+
+    assert_eq!(tag_val, 100u32, "VaultTag value was overwritten by VaultNote");
+    assert_ne!(
+        tag_val, note_val,
+        "VaultTag and VaultNote collide when vault_id and inner id are identical"
+    );
+}

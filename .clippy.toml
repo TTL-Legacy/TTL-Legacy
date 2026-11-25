@@ -1,0 +1,18 @@
+# Clippy configuration for the TTL-Legacy workspace.
+#
+# Lint levels (including `clippy::pedantic`) are defined in the root Cargo.toml
+# under `[workspace.lints.clippy]`. This file holds Clippy-specific thresholds
+# and behavioral settings. See CONTRIBUTING.md for the full lint policy.
+
+avoid-breaking-exported-api = false
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8
+type-complexity-threshold = 250
+single-char-binding-names-threshold = 4
+vec-box-size-threshold = 4096
+
+# Issue #1483: forbid panicking `unwrap()`/`expect()` in non-test backend code.
+# `allow-unwrap-in-tests` keeps test modules (and `#[cfg(test)]` code) free to
+# unwrap, while production request handlers must propagate typed errors instead.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

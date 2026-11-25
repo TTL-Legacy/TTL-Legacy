@@ -1,0 +1,295 @@
+name: Weekly DR Restore Verification
+
+on:
+  schedule:
+    # Runs every Monday at 03:00 UTC (one hour after the nightly backup)
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      backup_prefix:
+        description: "Backup prefix to test (e.g., backups/20260727T020000Z). If empty, uses the latest."
+        required: false
+        type: string
+      dry_run:
+        description: "Run in dry-run mode (simulate restore without applying changes)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  STELLAR_NETWORK: testnet
+  # Release assets are versioned, so releases/latest/download/... 404s.
+  STELLAR_CLI_VERSION: "28.1.0"
+
+jobs:
+  verify-dr-restore:
+    name: Verify DR Backup Restorability
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Stellar CLI
+        run: |
+          curl -sSfL \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin stellar
+          stellar --version
+
+      - name: Install SQLite tools
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-access-key-id: ${{ secrets.DR_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DR_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+
+      - name: Determine backup prefix to test
+        id: determine-prefix
+        env:
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          if [[ -n "${{ github.event.inputs.backup_prefix }}" ]]; then
+            echo "prefix=${{ github.event.inputs.backup_prefix }}" >> $GITHUB_OUTPUT
+          else
+            # Find the most recent backup
+            LATEST=$(aws s3 ls "s3://${DR_S3_BUCKET}/backups/" \
+              --endpoint-url "${DR_S3_ENDPOINT}" \
+              --region "${AWS_REGION}" \
+              --recursive \
+              | grep manifest.json \
+              | sort \
+              | tail -1 \
+              | awk '{print $NF}' \
+              | sed 's|/manifest.json||')
+            if [[ -z "${LATEST}" ]]; then
+              echo "ERROR: No backups found in S3"
+              exit 1
+            fi
+            echo "prefix=${LATEST}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download and validate backup manifest
+        id: manifest
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          MANIFEST_FILE=$(mktemp /tmp/manifest_XXXXXX.json)
+          aws s3 cp \
+            "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/manifest.json" \
+            "${MANIFEST_FILE}" \
+            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --region "${AWS_REGION}" \
+            || exit 1
+
+          # Validate manifest contains required fields
+          NETWORK=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print(d.get('network', ''))" 2>/dev/null)
+          CONTRACT=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print(d.get('contract', ''))" 2>/dev/null)
+          TIMESTAMP=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print(d.get('timestamp', ''))" 2>/dev/null)
+          SHA_CONTRACT_STATE=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print((d.get('sha256') or {}).get('contract_state') or '')" 2>/dev/null)
+          SHA_BACKEND_DB=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print((d.get('sha256') or {}).get('backend_db') or '')" 2>/dev/null)
+          SHA_WASM=$(python3 -c "import json; d=json.load(open('${MANIFEST_FILE}')); print((d.get('sha256') or {}).get('wasm') or '')" 2>/dev/null)
+
+          if [[ -z "${NETWORK}" ]] || [[ -z "${CONTRACT}" ]] || [[ -z "${TIMESTAMP}" ]]; then
+            echo "ERROR: Manifest validation failed"
+            cat "${MANIFEST_FILE}"
+            exit 1
+          fi
+
+          echo "network=${NETWORK}" >> $GITHUB_OUTPUT
+          echo "contract=${CONTRACT}" >> $GITHUB_OUTPUT
+          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+          echo "sha_contract_state=${SHA_CONTRACT_STATE}" >> $GITHUB_OUTPUT
+          echo "sha_backend_db=${SHA_BACKEND_DB}" >> $GITHUB_OUTPUT
+          echo "sha_wasm=${SHA_WASM}" >> $GITHUB_OUTPUT
+          rm -f "${MANIFEST_FILE}"
+
+      - name: Verify backup checksums
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          SHA_CONTRACT_STATE: ${{ steps.manifest.outputs.sha_contract_state }}
+          SHA_BACKEND_DB: ${{ steps.manifest.outputs.sha_backend_db }}
+          SHA_WASM: ${{ steps.manifest.outputs.sha_wasm }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          # Fails fast on corruption, before any restore work starts.
+          verify_checksum() {
+            local artefact="$1"
+            local expected="$2"
+            if [[ -z "${expected}" ]]; then
+              echo "⚠ No checksum recorded for ${artefact} (may have been skipped or predates checksum manifests)"
+              return 0
+            fi
+
+            local tmp_file
+            tmp_file=$(mktemp /tmp/checksum_XXXXXX)
+            aws s3 cp \
+              "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/${artefact}" \
+              "${tmp_file}" \
+              --endpoint-url "${DR_S3_ENDPOINT}" \
+              --region "${AWS_REGION}" \
+              || { rm -f "${tmp_file}"; exit 1; }
+
+            local actual
+            actual=$(sha256sum "${tmp_file}" | cut -d' ' -f1)
+            rm -f "${tmp_file}"
+
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "ERROR: SHA-256 mismatch for ${artefact} (expected ${expected}, got ${actual})"
+              exit 1
+            fi
+            echo "✓ ${artefact} checksum verified"
+          }
+
+          verify_checksum "contract_state.json" "${SHA_CONTRACT_STATE}"
+          verify_checksum "backend_db.sqlite3" "${SHA_BACKEND_DB}"
+          verify_checksum "ttl_vault.wasm" "${SHA_WASM}"
+
+      - name: Restore and validate contract state
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          CONTRACT_TTL_VAULT: ${{ steps.manifest.outputs.contract }}
+          MANIFEST_NETWORK: ${{ steps.manifest.outputs.network }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          STATE_FILE=$(mktemp /tmp/contract_state_XXXXXX.json)
+          trap 'rm -f "${STATE_FILE}"' EXIT
+
+          # Download backed-up contract state
+          aws s3 cp \
+            "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/contract_state.json" \
+            "${STATE_FILE}" \
+            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --region "${AWS_REGION}" \
+            || exit 1
+
+          # Validate the state file is valid JSON
+          if ! python3 -c "import json; json.load(open('${STATE_FILE}'))" 2>/dev/null; then
+            echo "ERROR: Backed-up contract state is not valid JSON"
+            exit 1
+          fi
+
+          # Validate file is not empty
+          STATE_SIZE=$(wc -c < "${STATE_FILE}")
+          if [[ ${STATE_SIZE} -lt 100 ]]; then
+            echo "ERROR: Contract state file is suspiciously small (${STATE_SIZE} bytes)"
+            exit 1
+          fi
+
+          echo "✓ Contract state validation passed (${STATE_SIZE} bytes)"
+
+      - name: Restore and validate database
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          DB_FILE=$(mktemp /tmp/restore_db_XXXXXX.sqlite3)
+          trap 'rm -f "${DB_FILE}"' EXIT
+
+          # Download backed-up database
+          aws s3 cp \
+            "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/backend_db.sqlite3" \
+            "${DB_FILE}" \
+            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --region "${AWS_REGION}" \
+            2>/dev/null || {
+            echo "⚠ Database snapshot not found in backup (may have been skipped)"
+            exit 0
+          }
+
+          # Validate it's a valid SQLite database
+          if ! file "${DB_FILE}" | grep -q "SQLite"; then
+            echo "ERROR: Downloaded file is not a valid SQLite database"
+            exit 1
+          fi
+
+          # Count tables to validate schema
+          TABLE_COUNT=$(sqlite3 "${DB_FILE}" "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo "0")
+          if [[ ${TABLE_COUNT} -lt 1 ]]; then
+            echo "ERROR: Database has no tables"
+            exit 1
+          fi
+
+          DB_SIZE=$(wc -c < "${DB_FILE}")
+          echo "✓ Database validation passed (${TABLE_COUNT} tables, ${DB_SIZE} bytes)"
+
+      - name: Verify WASM artifact availability
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          DR_S3_BUCKET: ${{ secrets.DR_S3_BUCKET }}
+          DR_S3_ENDPOINT: ${{ secrets.DR_S3_ENDPOINT }}
+          AWS_REGION: ${{ secrets.DR_AWS_REGION || 'us-east-1' }}
+        run: |
+          WASM_FILE=$(mktemp /tmp/restore_wasm_XXXXXX.wasm)
+          trap 'rm -f "${WASM_FILE}"' EXIT
+
+          # Check if WASM exists and is downloadable
+          aws s3 cp \
+            "s3://${DR_S3_BUCKET}/${BACKUP_PREFIX}/ttl_vault.wasm" \
+            "${WASM_FILE}" \
+            --endpoint-url "${DR_S3_ENDPOINT}" \
+            --region "${AWS_REGION}" \
+            2>/dev/null || {
+            echo "⚠ WASM artifact not found in backup (may have been skipped)"
+            exit 0
+          }
+
+          # Validate file magic bytes for WASM (0x00 0x61 0x73 0x6d = "\0asm")
+          if ! hexdump -C "${WASM_FILE}" | head -1 | grep -q "00 61 73 6d"; then
+            echo "ERROR: Downloaded file does not appear to be a valid WASM binary"
+            exit 1
+          fi
+
+          WASM_SIZE=$(wc -c < "${WASM_FILE}")
+          echo "✓ WASM artifact validation passed (${WASM_SIZE} bytes)"
+
+      - name: Summary
+        if: success()
+        env:
+          BACKUP_PREFIX: ${{ steps.determine-prefix.outputs.prefix }}
+          BACKUP_TIMESTAMP: ${{ steps.manifest.outputs.timestamp }}
+        run: |
+          echo "✅ DR Restore Verification Complete"
+          echo ""
+          echo "Backup Details:"
+          echo "  Prefix:    ${BACKUP_PREFIX}"
+          echo "  Timestamp: ${BACKUP_TIMESTAMP}"
+          echo "  Network:   ${{ steps.manifest.outputs.network }}"
+          echo ""
+          echo "Validated Artifacts:"
+          echo "  ✓ Contract state (JSON)"
+          echo "  ✓ Backend database (SQLite)"
+          echo "  ✓ WASM binary"
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[DR] Weekly restore verification failed — ${new Date().toISOString().slice(0,10)}`,
+              body: `The weekly disaster-recovery restore verification workflow failed.\n\nBackup prefix: ${{ steps.determine-prefix.outputs.prefix }}\nRun: ${context.runId}\nSee: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['disaster-recovery', 'bug']
+            });

@@ -1,6 +1,9 @@
-use crate::models::*;
 use crate::db::*;
+use crate::models::*;
+use crate::security_headers::CspNonce;
 use chrono::Utc;
+use std::fs;
+use std::path::Path;
 
 pub fn get_vault_templates() -> VaultTemplateList {
     VaultTemplateList {
@@ -56,8 +59,135 @@ pub fn create_vault_from_template(
         ttl_remaining: Some(template.check_in_interval),
     };
 
-    store.lock().unwrap().insert(vault.id.clone(), vault.clone());
+    store
+        .lock()
+        .unwrap()
+        .insert(vault.id.clone(), vault.clone());
     Ok(vault)
+}
+
+// ── Localized email templates ───────────────────────────────────────────────
+
+fn resolve_locale(locale: &Option<Locale>) -> &Locale {
+    static EN: Locale = Locale::En;
+    locale.as_ref().unwrap_or(&EN)
+}
+
+pub fn email_subject(
+    notification_type: &NotificationType,
+    locale: &Option<Locale>,
+) -> &'static str {
+    match (resolve_locale(locale), notification_type) {
+        // English
+        (Locale::En, NotificationType::ExpiryWarning) => "Your vault is expiring soon",
+        (Locale::En, NotificationType::CheckInReminder) => "Time to check in to your vault",
+        (Locale::En, NotificationType::VaultReleased) => "Your vault has been released",
+        (Locale::En, NotificationType::VaultPaused) => "Your vault has been paused",
+        (Locale::En, NotificationType::WithdrawalAlert) => {
+            "Withdrawal attempt detected on your vault"
+        }
+        // Spanish
+        (Locale::Es, NotificationType::ExpiryWarning) => "Tu bóveda está por vencer",
+        (Locale::Es, NotificationType::CheckInReminder) => "Es hora de registrarte en tu bóveda",
+        (Locale::Es, NotificationType::VaultReleased) => "Tu bóveda ha sido liberada",
+        (Locale::Es, NotificationType::VaultPaused) => "Tu bóveda ha sido pausada",
+        (Locale::Es, NotificationType::WithdrawalAlert) => {
+            "Intento de retiro detectado en tu bóveda"
+        }
+        // French
+        (Locale::Fr, NotificationType::ExpiryWarning) => "Votre coffre expire bientôt",
+        (Locale::Fr, NotificationType::CheckInReminder) => "Il est temps de vous enregistrer",
+        (Locale::Fr, NotificationType::VaultReleased) => "Votre coffre a été libéré",
+        (Locale::Fr, NotificationType::VaultPaused) => "Votre coffre a été mis en pause",
+        (Locale::Fr, NotificationType::WithdrawalAlert) => {
+            "Tentative de retrait détectée sur votre coffre"
+        }
+        // German
+        (Locale::De, NotificationType::ExpiryWarning) => "Ihr Tresor läuft bald ab",
+        (Locale::De, NotificationType::CheckInReminder) => "Zeit für Ihren Check-in",
+        (Locale::De, NotificationType::VaultReleased) => "Ihr Tresor wurde freigegeben",
+        (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert",
+        (Locale::De, NotificationType::WithdrawalAlert) => {
+            "Abhebungsversuch auf Ihrem Tresor erkannt"
+        }
+        // Passkey expiry — all locales (no locale-specific translations yet)
+        (_, NotificationType::PasskeyExpiringSoon) => "Passkey expiring soon",
+        (_, NotificationType::PasskeyExpired) => "Passkey has expired",
+        // Fallback
+        _ => "Notification from TTL-Legacy",
+    }
+}
+
+pub fn email_body(
+    notification_type: &NotificationType,
+    locale: &Option<Locale>,
+    _vault_id: &str,
+    hours_remaining: Option<u64>,
+) -> String {
+    match (resolve_locale(locale), notification_type) {
+        // English
+        (Locale::En, NotificationType::ExpiryWarning) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!(
+                "Your vault expires in approximately {h} hours. Check in now to keep it active."
+            )
+        }
+        (Locale::En, NotificationType::CheckInReminder) => {
+            "Please check in to your vault to keep it active.".to_string()
+        }
+        (Locale::En, NotificationType::VaultReleased) => {
+            "Your vault has been released to the designated beneficiary.".to_string()
+        }
+        (Locale::En, NotificationType::VaultPaused) => "Your vault has been paused.".to_string(),
+        // Spanish
+        (Locale::Es, NotificationType::ExpiryWarning) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!("Tu bóveda vence en aproximadamente {h} horas. Regístrate ahora para mantenerla activa.")
+        }
+        (Locale::Es, NotificationType::CheckInReminder) => {
+            "Por favor regístrate en tu bóveda para mantenerla activa.".to_string()
+        }
+        (Locale::Es, NotificationType::VaultReleased) => {
+            "Tu bóveda ha sido liberada al beneficiario designado.".to_string()
+        }
+        (Locale::Es, NotificationType::VaultPaused) => "Tu bóveda ha sido pausada.".to_string(),
+        // French
+        (Locale::Fr, NotificationType::ExpiryWarning) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!("Votre coffre expire dans environ {h} heures. Enregistrez-vous maintenant.")
+        }
+        (Locale::Fr, NotificationType::CheckInReminder) => {
+            "Veuillez vous enregistrer dans votre coffre pour le maintenir actif.".to_string()
+        }
+        (Locale::Fr, NotificationType::VaultReleased) => {
+            "Votre coffre a été libéré au bénéficiaire désigné.".to_string()
+        }
+        (Locale::Fr, NotificationType::VaultPaused) => {
+            "Votre coffre a été mis en pause.".to_string()
+        }
+        // German
+        (Locale::De, NotificationType::ExpiryWarning) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!("Ihr Tresor läuft in etwa {h} Stunden ab. Melden Sie sich jetzt an.")
+        }
+        (Locale::De, NotificationType::CheckInReminder) => {
+            "Bitte melden Sie sich bei Ihrem Tresor an, um ihn aktiv zu halten.".to_string()
+        }
+        (Locale::De, NotificationType::VaultReleased) => {
+            "Ihr Tresor wurde an den designierten Begünstigten freigegeben.".to_string()
+        }
+        (Locale::De, NotificationType::VaultPaused) => "Ihr Tresor wurde pausiert.".to_string(),
+        // Passkey expiry — all locales
+        (_, NotificationType::PasskeyExpiringSoon) => {
+            let h = hours_remaining.unwrap_or(24);
+            format!("A passkey on your vault expires in approximately {h} hours. Rotate or extend it to keep vault access.")
+        }
+        (_, NotificationType::PasskeyExpired) => {
+            "A passkey on your vault has expired. Rotate it now to restore check-in access.".to_string()
+        }
+        // Fallback for notification types without locale-specific email body templates.
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -68,9 +198,15 @@ mod tests {
     fn test_get_vault_templates() {
         let templates = get_vault_templates();
         assert_eq!(templates.templates.len(), 3);
-        assert!(templates.templates.iter().any(|t| t.id == "simple-inheritance"));
+        assert!(templates
+            .templates
+            .iter()
+            .any(|t| t.id == "simple-inheritance"));
         assert!(templates.templates.iter().any(|t| t.id == "family-trust"));
-        assert!(templates.templates.iter().any(|t| t.id == "business-succession"));
+        assert!(templates
+            .templates
+            .iter()
+            .any(|t| t.id == "business-succession"));
     }
 
     #[test]
@@ -151,4 +287,141 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
+
+    // ── Locale-aware email template tests ───────────────────────────────────
+
+    #[test]
+    fn test_english_expiry_subject() {
+        let subject = email_subject(&NotificationType::ExpiryWarning, &None);
+        assert!(subject.contains("expiring"));
+    }
+
+    #[test]
+    fn test_english_is_default_locale() {
+        let subject_none = email_subject(&NotificationType::ExpiryWarning, &None);
+        let subject_en = email_subject(&NotificationType::ExpiryWarning, &Some(Locale::En));
+        assert_eq!(subject_none, subject_en);
+    }
+
+    #[test]
+    fn test_spanish_templates() {
+        let locale = Some(Locale::Es);
+        let subject = email_subject(&NotificationType::ExpiryWarning, &locale);
+        assert!(subject.contains("vencer"));
+        let body = email_body(&NotificationType::ExpiryWarning, &locale, "v1", Some(12));
+        assert!(body.contains("12"));
+        assert!(!body.contains("v1"));
+    }
+
+    #[test]
+    fn test_french_templates() {
+        let locale = Some(Locale::Fr);
+        let subject = email_subject(&NotificationType::CheckInReminder, &locale);
+        assert!(subject.contains("enregistrer"));
+        let body = email_body(&NotificationType::CheckInReminder, &locale, "v1", None);
+        assert!(!body.contains("v1"));
+    }
+
+    #[test]
+    fn test_german_templates() {
+        let locale = Some(Locale::De);
+        let subject = email_subject(&NotificationType::VaultReleased, &locale);
+        assert!(subject.contains("freigegeben"));
+        let body = email_body(&NotificationType::VaultReleased, &locale, "v1", None);
+        assert!(!body.contains("v1"));
+    }
+
+    #[test]
+    fn test_all_notification_types_have_templates() {
+        let types = [
+            NotificationType::ExpiryWarning,
+            NotificationType::CheckInReminder,
+            NotificationType::VaultReleased,
+            NotificationType::VaultPaused,
+        ];
+        let locales = [
+            Some(Locale::En),
+            Some(Locale::Es),
+            Some(Locale::Fr),
+            Some(Locale::De),
+        ];
+        for locale in &locales {
+            for nt in &types {
+                let subject = email_subject(nt, locale);
+                assert!(!subject.is_empty());
+                let body = email_body(nt, locale, "v1", Some(24));
+                assert!(!body.is_empty());
+                assert!(!body.contains("v1"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fallback_to_english() {
+        let subject = email_subject(&NotificationType::VaultPaused, &None);
+        let subject_en = email_subject(&NotificationType::VaultPaused, &Some(Locale::En));
+        assert_eq!(subject, subject_en);
+    }
+
+    #[test]
+    fn test_expiry_body_includes_hours() {
+        let body = email_body(
+            &NotificationType::ExpiryWarning,
+            &Some(Locale::En),
+            "v1",
+            Some(6),
+        );
+        assert!(body.contains("6"));
+    }
+
+    #[test]
+    fn test_expiry_body_defaults_to_24_hours() {
+        let body = email_body(
+            &NotificationType::ExpiryWarning,
+            &Some(Locale::En),
+            "v1",
+            None,
+        );
+        assert!(body.contains("24"));
+    }
+
+    #[test]
+    fn test_email_body_does_not_contain_raw_vault_id() {
+        let raw_vault_id = "vault_secret_9999";
+        let types = [
+            NotificationType::ExpiryWarning,
+            NotificationType::CheckInReminder,
+            NotificationType::VaultReleased,
+            NotificationType::VaultPaused,
+        ];
+        let locales = [
+            Some(Locale::En),
+            Some(Locale::Es),
+            Some(Locale::Fr),
+            Some(Locale::De),
+            None,
+        ];
+        for locale in &locales {
+            for nt in &types {
+                let body = email_body(nt, locale, raw_vault_id, Some(48));
+                assert!(
+                    !body.contains(raw_vault_id),
+                    "Email body for {:?} with locale {:?} should not contain raw vault ID",
+                    nt,
+                    locale
+                );
+            }
+        }
+    }
+}
+
+/// Render the simulator HTML with the CSP nonce injected into inline
+/// `<script>` tags.  The `{{csp_nonce}}` placeholder in the raw HTML
+/// is replaced with the actual nonce value so that the browser allows
+/// the inline scripts to execute under the nonce-based CSP.
+pub fn render_simulator_html(nonce: &CspNonce) -> String {
+    let path = Path::new("backend/simulator.html");
+    let html = fs::read_to_string(path)
+        .unwrap_or_else(|_| panic!("simulator.html not found at {:?}", path));
+    html.replace("{{csp_nonce}}", &nonce.value)
 }

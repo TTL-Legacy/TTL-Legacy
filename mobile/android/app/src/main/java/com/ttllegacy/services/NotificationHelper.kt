@@ -17,33 +17,112 @@ class NotificationHelper @Inject constructor(@ApplicationContext private val con
     companion object {
         const val CHANNEL_ID = "ttl_reminders"
         const val CHANNEL_NAME = "Check-in Reminders"
+        const val QUEUED_CHANNEL_ID = "ttl_queued"
+        const val QUEUED_CHANNEL_NAME = "Queued Check-ins"
+        const val QUEUED_NOTIFICATION_ID = 9_001
+        private const val EXPIRED_QUEUE_NOTIFICATION_ID = 1003
+        private const val SYNC_SUCCESS_NOTIFICATION_ID = 1004
     }
 
-    init { createChannel() }
+    init {
+        createChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH)
+        createChannel(QUEUED_CHANNEL_ID, QUEUED_CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT)
+    }
 
     fun show(title: String, body: String, vaultId: String?) {
         val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-            vaultId?.let { putExtra("vault_id", it) }
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            vaultId?.let { data = android.net.Uri.parse("ttllegacy://vault/$it/check-in") }
         }
         val pi = PendingIntent.getActivity(context, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentTitle(title)
             .setContentText(body)
             .setAutoCancel(true)
             .setContentIntent(pi)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+
+        if (vaultId != null) {
+            val checkInIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                data = android.net.Uri.parse("ttllegacy://vault/$vaultId/check-in")
+            }
+            val checkInPi = PendingIntent.getActivity(
+                context, vaultId.hashCode() + 1, checkInIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_menu_rotate, "Check In Now", checkInPi)
+        }
 
         val nm = context.getSystemService(NotificationManager::class.java)
-        nm.notify(vaultId.hashCode(), notification)
+        nm.notify(vaultId.hashCode(), builder.build())
     }
 
-    private fun createChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH)
+    fun showQueuedCheckIn(count: Int) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pi = PendingIntent.getActivity(context, QUEUED_NOTIFICATION_ID, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+        val body = if (count == 1) "1 check-in will be submitted when back online"
+                   else "$count check-ins will be submitted when back online"
+
+        val notification = NotificationCompat.Builder(context, QUEUED_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+            .setContentTitle("Check-in queued")
+            .setContentText(body)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setContentIntent(pi)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+
+        context.getSystemService(NotificationManager::class.java)
+            .notify(QUEUED_NOTIFICATION_ID, notification)
+    }
+
+    fun cancelQueuedCheckIn() {
+        context.getSystemService(NotificationManager::class.java).cancel(QUEUED_NOTIFICATION_ID)
+    }
+
+    private fun createChannel(id: String, name: String, importance: Int) {
+        val channel = NotificationChannel(id, name, importance)
         context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    /**
+     * Shows a warning notification that one or more queued check-ins may have arrived
+     * after TTL expiry. Submission will still be attempted; the user should check vault status.
+     */
+    fun notifyExpiredCheckInsInQueue(vaultIds: List<String>) {
+        val ids = vaultIds.joinToString(", ")
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentTitle("⚠️ Check-in may be too late")
+            .setContentText("Vault(s) $ids: queued check-in arrived after TTL expiry. Attempting submission anyway.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+        context.getSystemService(NotificationManager::class.java)
+            .notify(EXPIRED_QUEUE_NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * Shows a confirmation notification that a queued check-in was successfully broadcast.
+     */
+    fun notifyCheckInSyncSuccess(vaultId: String) {
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("✅ Check-in synced")
+            .setContentText("Queued check-in for vault $vaultId was successfully submitted.")
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setAutoCancel(true)
+            .build()
+        context.getSystemService(NotificationManager::class.java)
+            .notify(SYNC_SUCCESS_NOTIFICATION_ID, notification)
     }
 }

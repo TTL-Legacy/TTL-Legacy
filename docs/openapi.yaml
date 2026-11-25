@@ -1,0 +1,2635 @@
+openapi: 3.1.0
+info:
+  title: TTL-Legacy Backend API
+  description: >
+    Backend API for TTL-Legacy, a decentralized "Dead Man's Switch" built on Stellar/Soroban.
+    This API provides endpoints for vault management, reminder preferences, notifications, and administrative operations.
+  version: 1.0.0
+  contact:
+    name: TTL-Legacy Team
+    url: https://github.com/TTL-Legacy/TTL-Legacy
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+  - url: https://api.ttl-legacy.app
+    description: Production server
+  - url: https://testnet-api.ttl-legacy.app
+    description: Testnet server
+
+tags:
+  - name: Health & Status
+    description: API health checks and status endpoints
+  - name: Reminder Preferences
+    description: Vault reminder notification preferences
+  - name: Notifications
+    description: Push notification and delivery management
+  - name: TTL Insurance
+    description: TTL insurance policy management
+  - name: Vaults
+    description: Vault query and analytics
+  - name: Vault Sharing
+    description: Share vault access with other users
+  - name: Vault Backup
+    description: Backup and recovery operations
+  - name: Release Simulator
+    description: Project vault release dates under different check-in behaviour scenarios
+  - name: Beneficiary
+    description: Beneficiary acceptance, decline, conflict resolution, auctions, and waterfall
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns API health status without requiring database connectivity
+      operationId: getHealth
+      tags:
+        - Health & Status
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: string
+                    description: Semantic version of the API
+                required:
+                  - status
+                  - version
+              examples:
+                success:
+                  value:
+                    status: ok
+                    version: 1.0.0
+
+  /ready:
+    get:
+      summary: Readiness check
+      description: Returns readiness status including database connectivity
+      operationId: getReady
+      tags:
+        - Health & Status
+      responses:
+        '200':
+          description: API is ready and database is connected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: string
+                  database:
+                    type: string
+                    enum: [connected]
+                required:
+                  - status
+                  - version
+                  - database
+        '503':
+          description: Service unavailable (database not connected)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/reminder-preferences:
+    parameters:
+      - name: vault_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Unique identifier of the vault
+    get:
+      summary: Get reminder preferences for a vault
+      description: Retrieve the current reminder notification preferences for a specific vault
+      operationId: getPreferences
+      tags:
+        - Reminder Preferences
+      responses:
+        '200':
+          description: Reminder preferences retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReminderPreferences'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      summary: Set reminder preferences for a vault
+      description: >
+        Update or create reminder notification preferences for a vault.
+        Supports idempotent requests via the `idempotency-key` header.
+      operationId: setPreferences
+      tags:
+        - Reminder Preferences
+      parameters:
+        - name: idempotency-key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: >
+            UUID to ensure idempotent requests. If provided, the same response will be returned
+            for identical requests within 24 hours.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPreferencesRequest'
+            examples:
+              emailOnly:
+                summary: Email-only reminders
+                value:
+                  channels:
+                    - email
+                  hours_before_expiry: 24
+                  frequency: daily
+                  timezone: America/New_York
+              multiChannel:
+                summary: Multiple notification channels
+                value:
+                  channels:
+                    - email
+                    - sms
+                    - push
+                  hours_before_expiry: 48
+                  frequency: weekly
+      responses:
+        '200':
+          description: Preferences set successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReminderPreferences'
+        '400':
+          description: Invalid request (empty channels or invalid hours_before_expiry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                emptyChannels:
+                  value:
+                    error: "channels must not be empty"
+                invalidHours:
+                  value:
+                    error: "hours_before_expiry must be > 0"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/notifications/register:
+    post:
+      summary: Register a device token for push notifications
+      description: Register a new device push token to receive vault-related notifications
+      operationId: registerDeviceToken
+      tags:
+        - Notifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterTokenRequest'
+      responses:
+        '201':
+          description: Device token registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceToken'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/notifications/preferences:
+    put:
+      summary: Update notification preferences
+      description: Update owner notification preferences (channels, frequency, locale)
+      operationId: updateNotificationPreferences
+      tags:
+        - Notifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePreferencesRequest'
+      responses:
+        '200':
+          description: Preferences updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPreferences'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/notifications/unsubscribe:
+    get:
+      summary: Unsubscribe from reminder emails
+      description: Unsubscribe an owner from all reminder email notifications using an unsubscribe token
+      operationId: unsubscribeReminders
+      tags:
+        - Notifications
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Unsubscribe token (provided in notification emails)
+      responses:
+        '200':
+          description: Successfully unsubscribed
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                success:
+                  value: "You (owner_address) have been unsubscribed from reminder emails."
+        '400':
+          description: Invalid or expired unsubscribe token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/ttl-insurance/purchase:
+    post:
+      summary: Purchase TTL insurance policy
+      description: >
+        Purchase a TTL insurance policy to automatically extend TTL when owner becomes inactive.
+        Requires owner authentication.
+      operationId: purchaseTtlInsurance
+      tags:
+        - TTL Insurance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PurchaseTtlInsuranceRequest'
+      responses:
+        '201':
+          description: TTL insurance policy purchased successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TtlInsurancePolicy'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/ttl-insurance/vaults/{vault_id}:
+    get:
+      summary: Get TTL insurance policy for a vault
+      description: Retrieve TTL insurance policy details for a specific vault
+      operationId: getTtlInsurancePolicy
+      tags:
+        - TTL Insurance
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Policy retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TtlInsurancePolicy'
+        '404':
+          description: Vault or policy not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/search:
+    get:
+      summary: Full-text search over vault tags and notes
+      description: >
+        Issue #2069. Searches the authenticated owner's vault tags and notes
+        using full-text search (SQLite FTS5 on the backend — the SQLite
+        equivalent of PostgreSQL tsvector/tsquery) and returns paginated vault
+        summaries with highlighted match snippets. Results are scoped to the
+        `owner` query parameter (supplied by auth middleware in production).
+      operationId: searchVaultsFulltext
+      tags:
+        - Vaults
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Free-text query matched against vault tags and notes.
+        - name: owner
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authenticated owner; results are scoped to this owner.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque cursor (offset) from a previous next_cursor.
+      responses:
+        '200':
+          description: Paginated search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultSearchResponse'
+        '422':
+          description: Invalid search parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      summary: Search vaults
+      description: Search for vaults based on owner, beneficiary, status, and date range with pagination
+      operationId: searchVaults
+      tags:
+        - Vaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchQuery'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResult'
+        '400':
+          description: Invalid search parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/metadata:
+    put:
+      summary: Set vault tags and notes
+      description: >
+        Issue #2069. Upserts searchable metadata (tags + notes) for a vault. The
+        FTS5 search index is refreshed synchronously.
+      operationId: setVaultMetadata
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetVaultMetadataRequest'
+      responses:
+        '200':
+          description: Stored metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultMetadata'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: Get vault tags and notes
+      operationId: getVaultMetadata
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Stored metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultMetadata'
+        '404':
+          description: No metadata for this vault
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/delegation:
+    post:
+      summary: Grant check-in delegation
+      description: >
+        Issue #2068. Authorises `delegate` to check in on the vault owner's
+        behalf. Updates current state only; the TTL watcher records the
+        grant/revoke event in the audit log.
+      operationId: grantCheckInDelegation
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantCheckInDelegationRequest'
+      responses:
+        '200':
+          description: Current delegation state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInDelegationState'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Revoke check-in delegation
+      description: >
+        Issue #2068. Clears the current check-in delegate. Only the vault owner
+        (passed as the `owner` query parameter) may revoke.
+      operationId: revokeCheckInDelegation
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: owner
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault owner requesting the revoke.
+      responses:
+        '200':
+          description: Current delegation state (delegate cleared)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInDelegationState'
+        '403':
+          description: Caller is not the vault owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/delegation-audit:
+    get:
+      summary: Check-in delegation audit trail
+      description: >
+        Issue #2068. Returns the grant/revoke audit log for a vault, populated
+        by the TTL watcher.
+      operationId: getCheckInDelegationAudit
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit trail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInDelegationAuditResponse'
+
+  /api/vaults/{vault_id}/withdrawal-approvals:
+    post:
+      summary: Request a multi-party withdrawal approval
+      description: >
+        Issue #2070. Creates a pending withdrawal approval workflow for a
+        high-value vault. Every address in `required_approvers` must approve
+        before the withdrawal may execute; a pending request auto-cancels
+        (`expired`) after `approval_ttl_seconds`.
+      operationId: createWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWithdrawalApprovalRequest'
+      responses:
+        '201':
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: List withdrawal approval workflows for a vault
+      operationId: listWithdrawalApprovals
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalListResponse'
+
+  /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id}:
+    get:
+      summary: Get a withdrawal approval workflow
+      description: >
+        Issue #2070. Returns a single workflow's status and recorded approvals.
+        A pending workflow whose TTL has elapsed is lazily expired on read.
+      operationId: getWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Cancel a pending withdrawal approval
+      operationId: cancelWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cancelled workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id}/approvals:
+    post:
+      summary: Submit a withdrawal approval
+      description: >
+        Issue #2070. Records `approver`'s approval. Only addresses listed in the
+        workflow's `required_approvers` may approve; once all of them have
+        approved, the workflow transitions to `approved`.
+      operationId: submitWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitWithdrawalApprovalRequest'
+      responses:
+        '200':
+          description: Updated workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '403':
+          description: Approver not authorised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Workflow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/compare:
+    post:
+      summary: Compare multiple vaults
+      description: Retrieve and compare multiple vaults by their IDs
+      operationId: compareVaults
+      tags:
+        - Vaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                vault_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Array of vault IDs to compare
+              required:
+                - vault_ids
+      responses:
+        '200':
+          description: Comparison results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComparisonResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/export:
+    get:
+      summary: Export vault data
+      description: Export vault data, history, and audit log in JSON or CSV format
+      operationId: exportVault
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+          description: Export format
+      responses:
+        '200':
+          description: Vault data exported successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportData'
+            text/csv:
+              schema:
+                type: string
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: Invalid format specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/analytics:
+    get:
+      summary: Get vault analytics
+      description: Retrieve analytics data for vault activity, TTL, and release rates
+      operationId: getVaultAnalytics
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Analytics data retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultAnalytics'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/hibernation:
+    parameters:
+      - name: vault_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: The vault ID
+    get:
+      summary: Get vault hibernation status
+      operationId: getVaultHibernation
+      tags:
+        - Vaults
+      responses:
+        '200':
+          description: Current hibernation entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HibernationEntry'
+        '404':
+          description: Vault or hibernation entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      summary: Enter vault hibernation
+      operationId: enterVaultHibernation
+      tags:
+        - Vaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HibernationRequest'
+      responses:
+        '201':
+          description: Hibernation started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HibernationEntry'
+        '400':
+          description: Invalid hibernation duration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not the vault owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Exit vault hibernation
+      operationId: exitVaultHibernation
+      tags:
+        - Vaults
+      parameters:
+        - name: caller
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault owner address
+      responses:
+        '204':
+          description: Hibernation ended and the entry TTL was restored
+        '403':
+          description: Caller is not the vault owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault or hibernation entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/share:
+    post:
+      summary: Share vault access
+      description: Grant another address access to view or edit vault with specified permissions
+      operationId: shareVault
+      tags:
+        - Vault Sharing
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShareRequest'
+      responses:
+        '201':
+          description: Vault shared successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultShare'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/backup:
+    post:
+      summary: Create vault backup
+      description: Create an encrypted backup of vault state for disaster recovery
+      operationId: createVaultBackup
+      tags:
+        - Vault Backup
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '201':
+          description: Backup created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultBackup'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      summary: List vault backups
+      description: List all backups for a specific vault
+      operationId: listVaultBackups
+      tags:
+        - Vault Backup
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Backups retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VaultBackup'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/restore:
+    post:
+      summary: Restore vault from backup
+      description: Restore a vault to a previous state using an encrypted backup and decryption key
+      operationId: restoreVaultBackup
+      tags:
+        - Vault Backup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+      responses:
+        '200':
+          description: Vault restored successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Vault'
+        '400':
+          description: Invalid request or decryption failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Backup not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/simulate-release:
+    get:
+      summary: Simulate vault release scenarios
+      description: >
+        Projects when a vault will release to its beneficiary under one or more
+        check-in behaviour scenarios. Useful for owners who want to understand
+        the impact of their check-in habits on release timing.
+      operationId: simulateVaultRelease
+      tags:
+        - Release Simulator
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          description: The ID of the vault to simulate
+          schema:
+            type: string
+          example: vault-abc-123
+        - name: scenarios
+          in: query
+          required: false
+          description: >
+            Comma-separated list of scenarios to run. Defaults to all three when
+            omitted. Valid values: `no_check_ins`, `consistent_check_ins`,
+            `missed_check_in_dates`.
+          schema:
+            type: string
+            example: "no_check_ins,missed_check_in_dates"
+        - name: missed_count
+          in: query
+          required: false
+          description: >
+            For the `missed_check_in_dates` scenario: number of consecutive
+            check-ins the owner misses before stopping entirely. Defaults to 1.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 2
+      responses:
+        '200':
+          description: Simulation results for the requested scenarios
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimulateReleaseResponse'
+              example:
+                vault_id: "vault-abc-123"
+                current_ttl_remaining: 86400
+                check_in_interval: 2592000
+                last_check_in: "2026-06-29T10:00:00Z"
+                simulated_at: "2026-06-30T06:39:00Z"
+                scenarios:
+                  - scenario: "no_check_ins"
+                    description: "Owner performs no further check-ins. Vault releases when the current TTL expires."
+                    projected_release_at: "2026-07-01T06:39:00Z"
+                    seconds_until_release: 86400
+                    confidence: "high"
+                    notes: "Current TTL remaining: 86400 seconds (1.0 days)."
+                  - scenario: "consistent_check_ins"
+                    description: "Owner checks in consistently at the configured interval. Vault does not release."
+                    projected_release_at: "2126-06-30T06:39:00Z"
+                    seconds_until_release: -1
+                    confidence: "high"
+                    notes: "With a check-in interval of 2592000 seconds (30.0 days), consistent check-ins prevent vault release indefinitely."
+                  - scenario: "missed_check_in_dates"
+                    description: "Owner misses 1 consecutive check-in(s), then stops entirely."
+                    projected_release_at: "2026-08-01T06:39:00Z"
+                    seconds_until_release: 2678400
+                    confidence: "medium"
+                    notes: "Each missed check-in adds 2592000 seconds (30.0 days) to the release window. 1 missed check-in(s) → 2592000 additional seconds."
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid scenario name(s) specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/accept:
+    post:
+      summary: Accept beneficiary designation
+      description: >
+        Beneficiary accepts their designation on a vault. Once accepted, the
+        beneficiary becomes eligible to receive the vault contents on release.
+      operationId: acceptBeneficiary
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeneficiaryActionRequest'
+      responses:
+        '200':
+          description: Beneficiary designation accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryStatus'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not the designated beneficiary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Beneficiary designation already accepted or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/decline:
+    post:
+      summary: Decline beneficiary designation
+      description: >
+        Beneficiary declines their designation on a vault. A declined
+        beneficiary is no longer eligible to receive the vault contents.
+      operationId: declineBeneficiary
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeneficiaryActionRequest'
+      responses:
+        '200':
+          description: Beneficiary designation declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryStatus'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not the designated beneficiary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Beneficiary designation already accepted or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/conflict:
+    get:
+      summary: Get beneficiary conflict status
+      description: >
+        Reports whether the vault has conflicting beneficiary designations
+        (for example, multiple accepted beneficiaries or an accepted
+        beneficiary that no longer matches the on-chain designation).
+      operationId: getBeneficiaryConflict
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Conflict status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryConflict'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/auction:
+    post:
+      summary: Start beneficiary auction
+      description: >
+        Starts an auction to resolve competing beneficiary claims on a vault.
+        The auction runs for the configured duration and the highest bidder
+        becomes the beneficiary.
+      operationId: startBeneficiaryAuction
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeneficiaryAuctionRequest'
+      responses:
+        '201':
+          description: Auction started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryAuction'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller is not permitted to start an auction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: An auction is already in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/beneficiary/waterfall:
+    get:
+      summary: Get beneficiary waterfall
+      description: >
+        Returns the ordered waterfall of beneficiaries and the share of the
+        vault each receives on release.
+      operationId: getBeneficiaryWaterfall
+      tags:
+        - Beneficiary
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The vault ID
+      responses:
+        '200':
+          description: Beneficiary waterfall retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BeneficiaryWaterfall'
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/vesting/bonus:
+    get:
+      summary: Get vesting bonus configuration
+      operationId: getVestingBonus
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Vesting bonus configuration for the vault
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [vault_id, configured]
+                properties:
+                  vault_id:
+                    type: string
+                  configured:
+                    type: boolean
+                  bonus_bps:
+                    type: integer
+                    nullable: true
+                  on_time_window_seconds:
+                    type: integer
+                    format: int64
+                    nullable: true
+        '404':
+          description: Vault not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/vesting/claim-bonus:
+    post:
+      summary: Submit a beneficiary-signed vesting bonus claim
+      description: >
+        Relays the signed Soroban transaction to the configured RPC endpoint and
+        returns the transaction hash reported by the network. The backend does
+        not sign transactions on behalf of beneficiaries.
+      operationId: claimVestingBonus
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [beneficiary, transaction_xdr]
+              properties:
+                beneficiary:
+                  type: string
+                  description: Stellar account address of the vault beneficiary
+                transaction_xdr:
+                  type: string
+                  maxLength: 2000000
+                  description: Base64-encoded, beneficiary-signed Soroban transaction XDR
+                memo:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Transaction accepted by Soroban RPC
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [vault_id, claimed_amount, bonus_amount, tx_hash, claimed_at]
+                properties:
+                  vault_id:
+                    type: string
+                  claimed_amount:
+                    type: integer
+                    format: int64
+                  bonus_amount:
+                    type: integer
+                    format: int64
+                  tx_hash:
+                    type: string
+                    pattern: '^[a-fA-F0-9]{64}$'
+                  claimed_at:
+                    type: string
+                    format: date-time
+        '403':
+          description: Caller is not the vault beneficiary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Vault or vesting bonus configuration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid transaction request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Soroban RPC rejected the transaction or could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Soroban RPC URL is not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+        status_code:
+          type: integer
+          description: HTTP status code
+      required:
+        - error
+
+    Locale:
+      type: string
+      enum: [en, es, fr, de]
+      description: Supported locales
+
+    Channel:
+      type: string
+      enum: [email, sms, push]
+      description: Notification delivery channel
+
+    Frequency:
+      type: string
+      enum: [once, daily, weekly, hourly, monthly]
+      description: Reminder frequency
+
+    ReminderPreferences:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          format: uuid
+          description: Vault ID
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Channel'
+          description: Notification channels enabled
+        hours_before_expiry:
+          type: integer
+          minimum: 1
+          description: Hours before expiry to send reminder
+        frequency:
+          $ref: '#/components/schemas/Frequency'
+        timezone:
+          type: string
+          default: UTC
+          description: >
+            IANA timezone used to resolve the 09:00 local reminder time
+            (issue #1752). The UTC offset is re-evaluated for every occurrence,
+            so DST transitions do not shift the reminder.
+          example: America/New_York
+      required:
+        - vault_id
+        - channels
+        - hours_before_expiry
+        - frequency
+        - timezone
+
+    SetPreferencesRequest:
+      type: object
+      properties:
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Channel'
+          minItems: 1
+          description: Notification channels to enable
+        hours_before_expiry:
+          type: integer
+          minimum: 1
+          description: Hours before expiry to send reminder
+        frequency:
+          $ref: '#/components/schemas/Frequency'
+        timezone:
+          type: string
+          description: >
+            IANA timezone for the local reminder time. Omit to keep the
+            backwards-compatible `UTC` default (issue #1752).
+          example: America/New_York
+      required:
+        - channels
+        - hours_before_expiry
+        - frequency
+
+    RegisterTokenRequest:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Owner address
+        token:
+          type: string
+          description: Device push token
+        platform:
+          type: string
+          enum: [ios, android, web]
+          description: Device platform
+      required:
+        - owner
+        - token
+        - platform
+
+    DeviceToken:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Owner address
+        token:
+          type: string
+          description: Device push token
+        platform:
+          type: string
+          enum: [ios, android, web]
+        registered_at:
+          type: string
+          format: date-time
+          description: Registration timestamp (RFC3339)
+      required:
+        - owner
+        - token
+        - platform
+        - registered_at
+
+    NotificationPreferences:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Owner address
+        expiry_warning_enabled:
+          type: boolean
+          default: true
+        check_in_reminder_enabled:
+          type: boolean
+          default: true
+        vault_released_enabled:
+          type: boolean
+          default: true
+        warning_hours_before:
+          type: integer
+          default: 24
+          description: Hours before expiry to warn
+        locale:
+          $ref: '#/components/schemas/Locale'
+      required:
+        - owner
+
+    UpdatePreferencesRequest:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Owner address
+        expiry_warning_enabled:
+          type: boolean
+        check_in_reminder_enabled:
+          type: boolean
+        vault_released_enabled:
+          type: boolean
+        warning_hours_before:
+          type: integer
+        locale:
+          $ref: '#/components/schemas/Locale'
+
+    TtlInsurancePolicy:
+      type: object
+      properties:
+        vault_id:
+          type: string
+          description: Associated vault ID
+        extension_seconds:
+          type: integer
+          description: Seconds to extend TTL when triggered
+        inactivity_threshold_seconds:
+          type: integer
+          description: Inactivity duration before triggering
+        enabled:
+          type: boolean
+        purchased_at:
+          type: string
+          format: date-time
+        last_extended_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - vault_id
+        - extension_seconds
+        - inactivity_threshold_seconds
+        - enabled
+        - purchased_at
+
+    PurchaseTtlInsuranceRequest:
+      type: object
+      properties:
+        extension_seconds:
+          type: integer
+          minimum: 1
+          description: Seconds to extend TTL
+        inactivity_threshold_seconds:
+          type: integer
+          minimum: 1
+          description: Inactivity threshold in seconds
+      required:
+        - extension_seconds
+        - inactivity_threshold_seconds
+
+    VaultStatus:
+      type: string
+      enum: [active, expired, released, paused]
+      description: Current vault status
+
+    Vault:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Vault ID
+        owner:
+          type: string
+          description: Vault owner address
+        beneficiary:
+          type: string
+          description: Beneficiary address
+        balance:
+          type: integer
+          format: int64
+          description: Vault balance in stroops
+        check_in_interval:
+          type: integer
+          description: Check-in interval in seconds
+        last_check_in:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/VaultStatus'
+        ttl_remaining:
+          type: integer
+          nullable: true
+          description: Remaining TTL in seconds
+      required:
+        - id
+        - owner
+        - beneficiary
+        - balance
+        - check_in_interval
+        - created_at
+        - status
+
+    HibernationRequest:
+      type: object
+      properties:
+        caller:
+          type: string
+          description: Vault owner address
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 3600
+          maximum: 15552000
+          description: Requested duration, bounded by the per-vault maximum
+      required:
+        - caller
+        - duration_seconds
+
+    HibernationEntry:
+      type: object
+      properties:
+        started_at:
+          type: integer
+          format: int64
+          description: Ledger timestamp when hibernation started
+        duration_seconds:
+          type: integer
+          format: int64
+          description: Configured hibernation duration in seconds
+        remaining_ttl_at_entry:
+          type: integer
+          format: int64
+          description: TTL remaining when hibernation started, restored on exit
+      required:
+        - started_at
+        - duration_seconds
+        - remaining_ttl_at_entry
+
+    SearchQuery:
+      type: object
+      properties:
+        owner:
+          type: string
+          description: Filter by owner address
+        beneficiary:
+          type: string
+          description: Filter by beneficiary address
+        status:
+          $ref: '#/components/schemas/VaultStatus'
+        created_after:
+          type: string
+          format: date-time
+          description: Filter vaults created after this date
+        created_before:
+          type: string
+          format: date-time
+          description: Filter vaults created before this date
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          description: Maximum number of results to return
+        cursor:
+          type: string
+          description: Opaque cursor from a previous response; omit for the first page
+
+    SearchResult:
+      type: object
+      properties:
+        vaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vault'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Cursor to pass in the next request; absent when there are no more results
+        limit:
+          type: integer
+      required:
+        - vaults
+        - limit
+
+    VaultMetadata:
+      type: object
+      required: [vault_id, owner, tags, notes, updated_at]
+      properties:
+        vault_id:
+          type: string
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    SetVaultMetadataRequest:
+      type: object
+      required: [owner]
+      properties:
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+          default: []
+        notes:
+          type: string
+          nullable: true
+
+    VaultSearchHit:
+      type: object
+      required: [vault_id, owner, tags, notes]
+      properties:
+        vault_id:
+          type: string
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string
+        snippet:
+          type: string
+          nullable: true
+          description: Matched-text snippet with <mark> highlights.
+        status:
+          allOf:
+            - $ref: '#/components/schemas/VaultStatus'
+          nullable: true
+        balance:
+          type: integer
+          format: int64
+          nullable: true
+        ttl_remaining:
+          type: integer
+          nullable: true
+
+    VaultSearchResponse:
+      type: object
+      required: [query, vaults, limit]
+      properties:
+        query:
+          type: string
+        vaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/VaultSearchHit'
+        next_cursor:
+          type: string
+          nullable: true
+        limit:
+          type: integer
+
+    CheckInDelegationEventKind:
+      type: string
+      enum: [grant, revoke]
+
+    CheckInDelegationAuditEntry:
+      type: object
+      required: [id, vault_id, event_kind, actor, timestamp]
+      properties:
+        id:
+          type: integer
+          format: int64
+        vault_id:
+          type: string
+        event_kind:
+          $ref: '#/components/schemas/CheckInDelegationEventKind'
+        delegate:
+          type: string
+          nullable: true
+        actor:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        details:
+          type: object
+          nullable: true
+
+    CheckInDelegationAuditResponse:
+      type: object
+      required: [vault_id, entries]
+      properties:
+        vault_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckInDelegationAuditEntry'
+
+    CheckInDelegationState:
+      type: object
+      required: [vault_id, owner]
+      properties:
+        vault_id:
+          type: string
+        owner:
+          type: string
+        delegate:
+          type: string
+          nullable: true
+        granted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    GrantCheckInDelegationRequest:
+      type: object
+      required: [owner, delegate]
+      properties:
+        owner:
+          type: string
+        delegate:
+          type: string
+
+    WithdrawalApprovalStatus:
+      type: string
+      enum: [pending, approved, cancelled, expired, executed]
+
+    WithdrawalApproval:
+      type: object
+      required: [withdrawal_id, approver, approved_at]
+      properties:
+        withdrawal_id:
+          type: string
+        approver:
+          type: string
+        approved_at:
+          type: string
+          format: date-time
+
+    WithdrawalApprovalWorkflow:
+      type: object
+      required:
+        - vault_id
+        - withdrawal_id
+        - amount
+        - requested_by
+        - required_approvers
+        - approval_ttl_seconds
+        - created_at
+        - expires_at
+        - status
+        - approvals
+      properties:
+        vault_id:
+          type: string
+        withdrawal_id:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        requested_by:
+          type: string
+        required_approvers:
+          type: array
+          items:
+            type: string
+        approval_ttl_seconds:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/WithdrawalApprovalStatus'
+        approvals:
+          type: array
+          items:
+            $ref: '#/components/schemas/WithdrawalApproval'
+        executed_tx_hash:
+          type: string
+          nullable: true
+
+    CreateWithdrawalApprovalRequest:
+      type: object
+      required: [requested_by, amount, required_approvers]
+      properties:
+        requested_by:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        required_approvers:
+          type: array
+          items:
+            type: string
+        approval_ttl_seconds:
+          type: integer
+          default: 172800
+          description: Seconds before a pending request auto-cancels (default 48h).
+
+    SubmitWithdrawalApprovalRequest:
+      type: object
+      required: [approver]
+      properties:
+        approver:
+          type: string
+
+    WithdrawalApprovalListResponse:
+      type: object
+      required: [vault_id, workflows]
+      properties:
+        vault_id:
+          type: string
+        workflows:
+          type: array
+          items:
+            $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+
+    ComparisonResult:
+      type: object
+      properties:
+        vaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/Vault'
+      required:
+        - vaults
+
+    EventType:
+      type: string
+      enum: [check_in, ttl_update, status_change, deposit, withdrawal, release]
+
+    VaultEvent:
+      type: object
+      properties:
+        vault_id:
+          type: string
+        event_type:
+          $ref: '#/components/schemas/EventType'
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - vault_id
+        - event_type
+        - timestamp
+
+    AuditEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        action:
+          type: string
+        actor:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+      required:
+        - timestamp
+        - action
+        - actor
+
+    ExportData:
+      type: object
+      properties:
+        vault:
+          $ref: '#/components/schemas/Vault'
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/VaultEvent'
+        audit_log:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+      required:
+        - vault
+        - history
+        - audit_log
+
+    TimeSeriesPoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+          description: Date in ISO-8601 format (YYYY-MM-DD)
+        vaults_created:
+          type: integer
+        vaults_released:
+          type: integer
+      required:
+        - date
+        - vaults_created
+        - vaults_released
+
+    VaultAnalytics:
+      type: object
+      properties:
+        total_vaults:
+          type: integer
+        active_vaults:
+          type: integer
+        average_ttl_seconds:
+          type: number
+          format: double
+        release_rate:
+          type: number
+          format: double
+          description: Fraction of vaults that are released
+        time_series:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimeSeriesPoint'
+      required:
+        - total_vaults
+        - active_vaults
+        - average_ttl_seconds
+        - release_rate
+        - time_series
+
+    SharePermission:
+      type: string
+      enum: [view_only, edit, admin]
+
+    VaultShare:
+      type: object
+      properties:
+        share_id:
+          type: string
+          format: uuid
+        vault_id:
+          type: string
+        shared_with:
+          type: string
+          description: Address or email vault is shared with
+        permission:
+          $ref: '#/components/schemas/SharePermission'
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - share_id
+        - vault_id
+        - shared_with
+        - permission
+        - created_at
+
+    ShareRequest:
+      type: object
+      properties:
+        shared_with:
+          type: string
+          description: Address or email to share with
+        permission:
+          $ref: '#/components/schemas/SharePermission'
+      required:
+        - shared_with
+        - permission
+
+    VaultBackup:
+      type: object
+      properties:
+        backup_id:
+          type: string
+          format: uuid
+        vault_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        encrypted_payload:
+          type: string
+          description: Base64-encoded AES-GCM encrypted vault state JSON
+      required:
+        - backup_id
+        - vault_id
+        - created_at
+        - encrypted_payload
+
+    RestoreRequest:
+      type: object
+      properties:
+        backup_id:
+          type: string
+          format: uuid
+        encryption_key:
+          type: string
+          description: Base64-encoded 32-byte AES key used during backup
+      required:
+        - backup_id
+        - encryption_key
+
+    ScenarioType:
+      type: string
+      enum:
+        - no_check_ins
+        - consistent_check_ins
+        - missed_check_in_dates
+      description: >
+        The check-in behaviour scenario to simulate.
+
+        - `no_check_ins` — owner never checks in again; vault releases when current TTL expires.
+        - `consistent_check_ins` — owner checks in at every interval indefinitely; vault never releases.
+        - `missed_check_in_dates` — owner misses N consecutive check-ins, then stops.
+
+    ScenarioResult:
+      type: object
+      description: Projected release outcome for a single scenario
+      properties:
+        scenario:
+          $ref: '#/components/schemas/ScenarioType'
+        description:
+          type: string
+          description: Human-readable description of the scenario assumptions
+        projected_release_at:
+          type: string
+          format: date-time
+          description: >
+            Projected UTC timestamp when the vault will release under this scenario.
+            For `consistent_check_ins`, this is a far-future sentinel value.
+        seconds_until_release:
+          type: integer
+          format: int64
+          description: >
+            Seconds from simulation time until projected release.
+            -1 means the vault will never release under this scenario.
+        confidence:
+          type: string
+          enum: [high, medium, low]
+          description: >
+            Confidence in the projection.
+            `high` — deterministic given vault state.
+            `medium` — 1–2 missed check-ins assumed.
+            `low` — 3+ missed check-ins assumed (higher uncertainty).
+        notes:
+          type: string
+          description: Additional context about the scenario's assumptions and calculations
+      required:
+        - scenario
+        - description
+        - projected_release_at
+        - seconds_until_release
+        - confidence
+        - notes
+
+    BeneficiaryStatus:
+      type: string
+      enum: [pending, accepted, declined]
+      description: Current beneficiary designation status
+
+    BeneficiaryActionRequest:
+      type: object
+      properties:
+        beneficiary:
+          type: string
+          description: Stellar account address of the beneficiary performing the action
+        signature:
+          type: string
+          description: Optional signed proof of beneficiary ownership
+      required:
+        - beneficiary
+
+    BeneficiaryConflict:
+      type: object
+      properties:
+        vault_id:
+          type: string
+        has_conflict:
+          type: boolean
+        conflicting_beneficiaries:
+          type: array
+          items:
+            type: string
+          description: Beneficiary addresses involved in the conflict
+        reason:
+          type: string
+          nullable: true
+          description: Human-readable explanation of the conflict
+      required:
+        - vault_id
+        - has_conflict
+        - conflicting_beneficiaries
+
+    BeneficiaryAuctionRequest:
+      type: object
+      properties:
+        initiator:
+          type: string
+          description: Address starting the auction
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          description: Auction duration in seconds
+        reserve_price:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Minimum bid in stroops
+      required:
+        - initiator
+        - duration_seconds
+
+    BeneficiaryAuction:
+      type: object
+      properties:
+        auction_id:
+          type: string
+          format: uuid
+        vault_id:
+          type: string
+        initiator:
+          type: string
+        status:
+          type: string
+          enum: [open, closed, cancelled]
+        reserve_price:
+          type: integer
+          format: int64
+        highest_bid:
+          type: integer
+          format: int64
+          nullable: true
+        highest_bidder:
+          type: string
+          nullable: true
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+      required:
+        - auction_id
+        - vault_id
+        - initiator
+        - status
+        - starts_at
+        - ends_at
+
+    BeneficiaryWaterfallEntry:
+      type: object
+      properties:
+        beneficiary:
+          type: string
+          description: Beneficiary address
+        rank:
+          type: integer
+          minimum: 1
+          description: Position in the waterfall (1 = first to receive)
+        share_bps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          description: Share of the vault in basis points
+        status:
+          $ref: '#/components/schemas/BeneficiaryStatus'
+      required:
+        - beneficiary
+        - rank
+        - share_bps
+        - status
+
+    BeneficiaryWaterfall:
+      type: object
+      properties:
+        vault_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/BeneficiaryWaterfallEntry'
+      required:
+        - vault_id
+        - entries
+
+    SimulateReleaseResponse:
+      type: object
+      description: Response containing simulation results for one or more release scenarios
+      properties:
+        vault_id:
+          type: string
+          description: The ID of the vault that was simulated
+        current_ttl_remaining:
+          type: integer
+          format: int64
+          nullable: true
+          description: Current TTL remaining in seconds; null if not known or already expired
+        check_in_interval:
+          type: integer
+          format: int64
+          description: The vault's configured check-in interval in seconds
+        last_check_in:
+          type: string
+          format: date-time
+          description: Timestamp of the last recorded check-in
+        scenarios:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScenarioResult'
+          description: Simulation results, one per requested scenario
+        simulated_at:
+          type: string
+          format: date-time
+          description: Timestamp when this simulation was generated
+      required:
+        - vault_id
+        - check_in_interval
+        - last_check_in
+        - scenarios
+        - simulated_at
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer token authentication for passkey-authenticated requests
+
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []

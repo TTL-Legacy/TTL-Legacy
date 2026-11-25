@@ -1,0 +1,40 @@
+name: Lint Commits & PR Title (Conventional Commits)
+
+# Runs on every pull request to enforce conventional commit format on both
+# commit messages (via commitlint.config.js) and the PR title.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    name: Check Commits & PR Title
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+
+      - name: Install commitlint CLI and conventional-commits config
+        run: |
+          npm install --no-save \
+            @commitlint/cli@19 \
+            @commitlint/config-conventional@19
+
+      - name: Lint commit messages
+        run: |
+          npx commitlint --config commitlint.config.js --from HEAD~1 --to HEAD --verbose
+
+      - name: Lint PR title
+        run: |
+          echo "${{ github.event.pull_request.title }}" | npx commitlint --config commitlint.config.js

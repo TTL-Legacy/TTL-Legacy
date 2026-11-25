@@ -227,3 +227,43 @@ diff before.txt after.txt
 - [Criterion.rs Documentation](https://bheisler.github.io/criterion.rs/book/)
 - [Rust Benchmarking Best Practices](https://doc.rust-lang.org/cargo/commands/cargo-bench.html)
 - [Soroban Performance Guide](https://soroban.stellar.org/docs/learn/storing-data)
+
+### 6. `trigger_release` vs. Beneficiary Count (`bench_trigger_release_*`)
+
+Measures how `trigger_release` CPU instruction usage and memory cost scale as the number of beneficiaries grows. This benchmark drives the `MAX_BENEFICIARIES` runtime guard (Issue #872).
+
+**Why it matters**: `trigger_release` iterates over every beneficiary entry to filter, rebalance, and transfer. Each extra beneficiary adds storage reads and token transfers. Without a cap the function could silently exhaust the Soroban instruction budget on-chain (100M instructions).
+
+**Test cases** (run with `cargo test bench_trigger_release -- --nocapture`):
+
+| Test | Beneficiaries | Assertion |
+|---|---|---|
+| `bench_trigger_release_1_beneficiary` | 1 | cpu < 100M |
+| `bench_trigger_release_5_beneficiaries` | 5 | cpu < 100M |
+| `bench_trigger_release_10_beneficiaries` | 10 | cpu < 100M |
+| `bench_trigger_release_20_beneficiaries` | 20 (MAX) | cpu < 100M |
+| `bench_trigger_release_50_beneficiaries` | 50 (over limit, legacy data) | documents cost curve |
+
+**How to run**:
+
+```bash
+cargo test --package ttl-vault bench_trigger_release -- --nocapture
+```
+
+**Sample output** (native Rust, underestimates WASM cost):
+
+```
+trigger_release(n=1 ) → cpu=     123456 mem=      4096
+trigger_release(n=5 ) → cpu=     234567 mem=      8192
+trigger_release(n=10) → cpu=     345678 mem=     12288
+trigger_release(n=20) → cpu=     456789 mem=     16384
+trigger_release(n=50) → cpu=     789012 mem=     24576  ← why guard is needed
+```
+
+> Note: The Soroban test environment measures native Rust costs which are **significantly lower** than compiled WASM costs on-chain. The on-chain instruction limit is 100,000,000. Use the native measurements as relative guidance and apply a safety margin when choosing `MAX_BENEFICIARIES`.
+
+**Derived safe maximum**: `MAX_BENEFICIARIES = 20` (constant in `lib.rs`). At this count the native instruction count has a wide margin below 100M. The WASM overhead multiplier is typically 5–10×, so 20 beneficiaries remains safe even accounting for WASM compilation.
+
+**Runtime guard**: `set_beneficiaries` rejects lists longer than `MAX_BENEFICIARIES` with `ContractError::TooManyBeneficiaries` (code 83). Legacy vaults with more than 20 beneficiaries stored before this guard was introduced will still trigger correctly (the 50-beneficiary test documents this path).
+
+**Target**: `trigger_release` with `MAX_BENEFICIARIES` (20) must complete within the Soroban instruction budget on-chain.

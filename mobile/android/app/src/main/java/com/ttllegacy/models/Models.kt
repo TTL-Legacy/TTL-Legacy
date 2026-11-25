@@ -58,3 +58,36 @@ data class PasskeyRegisterRequest(
     @SerialName("public_key") val publicKey: String,
     @SerialName("client_data_json") val clientDataJson: String
 )
+
+// MARK: - 2FA Models
+
+@Serializable
+enum class TwoFactorMethod { totp, sms, email }
+
+@Serializable
+data class TwoFactorStatus(
+    @SerialName("vault_id") val vaultId: String,
+    val enabled: Boolean,
+    val method: TwoFactorMethod? = null,
+    val verified: Boolean = false,
+    val phone: String? = null,
+    val email: String? = null
+)
+
+@Serializable
+data class Enable2FARequest(
+    val method: TwoFactorMethod,
+    val phone: String? = null,
+    val email: String? = null
+)
+
+@Serializable
+data class Enable2FAResponse(
+    @SerialName("vault_id") val vaultId: String,
+    val method: TwoFactorMethod,
+    val secret: String? = null,
+    @SerialName("provisioning_uri") val provisioningUri: String? = null
+)
+
+@Serializable
+data class Verify2FARequest(val otp: String)

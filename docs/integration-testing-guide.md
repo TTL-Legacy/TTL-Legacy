@@ -48,6 +48,31 @@ stellar keys show test-account
 
 ## Running Integration Tests
 
+### Oracle-triggered Release on Testnet
+
+This flow deploys both the vault and verifier contracts, attests a fixed-shape
+proof using the verifier's current test stub, and verifies that the vault
+releases to its beneficiary. It spends testnet XLM for fees and transfers one
+unit of the configured token; use funded test accounts only.
+
+Prerequisites:
+- Stellar CLI configured for testnet with funded admin and owner identities
+- `wasm32-unknown-unknown` Rust target installed
+- A testnet SEP-41 token contract ID in `TESTNET_TOKEN_ID`
+- A beneficiary Stellar account address
+
+```bash
+export TESTNET_ADMIN_IDENTITY=admin
+export TESTNET_OWNER_IDENTITY=owner
+export TESTNET_BENEFICIARY_ADDRESS=<beneficiary-address>
+export TESTNET_TOKEN_ID=<testnet-token-contract-id>
+bash scripts/oracle_release_testnet.sh
+```
+
+The proof used here exercises only the verifier's fixed-shape attestation flow;
+it is not a cryptographic proof. The verifier implementation must be replaced
+with the production proof system before treating this flow as a security test.
+
 ### Run All Integration Tests
 
 ```bash
@@ -70,6 +95,20 @@ cargo test --package ttl-vault --test integration_tests -- --ignored --nocapture
 ```
 
 ## Test Suites
+
+### 20-Beneficiary Varying-BPS Testnet Release
+
+The `test_full_lifecycle_twenty_beneficiary_varying_bps_split` lifecycle test
+creates the contract's maximum 20 beneficiaries with unequal allocations,
+deposits 1 XLM in the local SDK environment, advances past expiry, triggers
+release, and asserts every beneficiary receives its exact BPS share.
+
+The `testnet-smoke.yml` workflow runs the equivalent release scenario against
+Stellar Testnet. It funds 20 beneficiary accounts, sets a varying-BPS split,
+deposits 10 XLM, waits for the 1-hour minimum inactivity interval, triggers
+release, and verifies each Horizon account balance increase within the
+transaction verification window. This is a live-network end-to-end test and
+requires testnet credentials only for the owner/admin transaction sources.
 
 ### 1. Full Vault Lifecycle (`integration_full_vault_lifecycle`)
 
@@ -336,3 +375,215 @@ Times include network latency and ledger confirmation.
 - [Soroban Testing Guide](https://soroban.stellar.org/docs/learn/testing)
 - [Stellar Testnet](https://developers.stellar.org/docs/learn/networks)
 - [Soroban RPC API](https://soroban-rpc.stellar.org/)
+
+---
+
+## Property-Based Test Suite
+
+> Issue #1148: Add Property-Based Tests for TTL Extension Calculation
+
+Property-based tests use [`proptest`](https://github.com/proptest-rs/proptest) to
+generate thousands of random inputs and verify that key invariants hold across the
+entire input space. This catches edge cases — such as overflow near u32/u64
+boundaries — that hand-picked unit tests miss.
+
+### Location
+
+```
+contracts/ttl_vault/tests/property_tests.rs
+```
+
+### Running Property Tests
+
+```bash
+# Run all property tests for ttl-vault
+cargo test --package ttl-vault --test property_tests
+
+# Run a specific property test
+cargo test --package ttl-vault --test property_tests prop_vault_ttl_never_exceeds_max
+
+# Increase the number of test cases (default: 256)
+PROPTEST_CASES=10000 cargo test --package ttl-vault --test property_tests
+```
+
+### Invariants Verified
+
+#### `vault_ttl_ledgers` function
+
+The `vault_ttl_ledgers(check_in_interval)` function converts a check-in interval
+(seconds) to a ledger count. The following invariants are verified across all
+possible `u64` inputs:
+
+| Test | Invariant |
+|---|---|
+| `prop_vault_ttl_never_exceeds_max` | Result never exceeds `MAX_PERSISTENT_TTL` (3,110,400 ledgers) and never overflows `u32::MAX` |
+| `prop_vault_ttl_always_meets_minimum` | Result always ≥ `VAULT_TTL_LEDGERS_MIN` (200,000 ledgers) |
+| `prop_vault_ttl_monotonically_non_decreasing` | Larger interval always produces ≥ ledger count |
+| `prop_vault_ttl_within_one_ledger_of_expected` | Result is within ±1 ledger of analytical value (linear range) |
+| `prop_vault_ttl_zero_interval_returns_floor` | Zero interval returns the minimum floor |
+| `prop_vault_ttl_large_interval_returns_ceiling` | Very large interval returns the maximum ceiling |
+
+#### TTL / check-in invariants
+
+| Test | Invariant |
+|---|---|
+| `prop_ttl_always_increases_on_check_in` | TTL is monotonically non-decreasing after every check-in |
+| `prop_ttl_post_checkin_equals_old_plus_interval` | New TTL equals old + interval (saturating) |
+| `prop_ttl_after_checkin_gte_current_ledger` | Post-check-in TTL is always ≥ current ledger |
+
+#### Balance invariants
+
+| Test | Invariant |
+|---|---|
+| `prop_vault_balance_never_exceeds_deposits` | Balance never exceeds initial + total deposits |
+
+#### Lifecycle / state-machine invariants
+
+| Test | Invariant |
+|---|---|
+| `prop_vault_status_transitions_valid` | Vault always ends in a valid state; active vault TTL never falls below initial |
+| `prop_no_double_release` | Funds are released at most once |
+
+### CI Integration
+
+Property tests run as part of the existing `./scripts/test.sh` and the CI workflow:
+
+```yaml
+- name: Run tests
+  run: cargo test --package ttl-vault
+```
+
+The `proptest` dev-dependency is already declared in
+`contracts/ttl_vault/Cargo.toml` under `[dev-dependencies]`.
+
+---
+
+## Full Vault Lifecycle Test (Issue #1178)
+
+The `lifecycle_full_flow` test in `contracts/ttl_vault/tests/integration_tests.rs`
+is a **non-ignored, in-process Soroban test** that exercises the complete vault
+lifecycle without requiring a live Stellar node.
+
+### What it tests
+
+The test covers the following sequence end-to-end:
+
+1. **`create_vault`** — Creates a new vault with a designated owner and beneficiary.
+2. **`deposit`** — Transfers XLM from the owner to the vault contract.
+3. **`check_in`** — Owner checks in to reset the countdown timer.
+4. **Ledger advance** — Simulates the passage of time past the TTL using
+   `env.ledger().with_mut(|l| l.timestamp += interval + 1)`.
+5. **`trigger_release`** — Anyone calls trigger after expiry; funds flow to
+   the beneficiary.
+
+### Assertions
+
+| Assertion | Verifies |
+|---|---|
+| `balance_after - balance_before == deposit_amount` | Beneficiary receives exactly the deposited amount |
+| `vault.status == ReleaseStatus::Released` | Vault is in the `Released` state post-trigger |
+| `vault.balance == 0` | Contract holds no residual funds after full release |
+
+### Running the test
+
+```bash
+# Run only the lifecycle integration test
+cargo test --package ttl-vault --test integration_tests lifecycle_full_flow
+
+# Run all non-ignored tests in the integration test file
+cargo test --package ttl-vault --test integration_tests
+```
+
+### Live testnet stubs
+
+The `#[ignore]`-annotated stubs in the same file (e.g., `integration_full_vault_lifecycle`)
+are placeholders for future live-network tests that require a funded account and
+a deployed contract. Run them with:
+
+```bash
+cargo test --package ttl-vault --test integration_tests -- --ignored --test-threads=1
+```
+
+---
+
+## Mutation Testing Workflow (Issue #1180)
+
+### What is mutation testing and why it matters
+
+Mutation testing automatically introduces small syntactic changes (_mutants_)
+into the source code — such as flipping `>=` to `>`, negating a boolean, or
+removing a function call — and then runs the full test suite against each
+mutant. If the tests **pass** with the mutated code, that mutant **survives**,
+indicating that no test is sensitive enough to detect the change.
+
+For a financial smart contract like TTL-Legacy, surviving mutants are
+particularly dangerous:
+
+- A mutant in `trigger_release` could allow funds to be released prematurely
+  or withheld indefinitely.
+- A mutant in `check_in` could bypass the liveness countdown.
+- A mutant in `withdraw` could allow over-withdrawal or bypass auth checks.
+
+### Installation and usage
+
+```bash
+# Install cargo-mutants
+cargo install cargo-mutants
+
+# Run against the entire contract source
+cargo mutants --package ttl-vault -- contracts/ttl_vault/src/
+
+# Run against a specific file to speed up iteration
+cargo mutants --package ttl-vault -- contracts/ttl_vault/src/lib.rs
+```
+
+Output summary example:
+
+```
+42 mutants tested in 8m 02s. 39 killed, 3 survived, 0 unviable.
+```
+
+Open `mutants.out/outcomes.json` for the full machine-readable results.
+
+### Critical paths to focus on
+
+| Function | Mutation risk | Recommended test approach |
+|---|---|---|
+| `trigger_release` | Funds sent to wrong address or wrong amount | Assert exact beneficiary delta + vault balance 0 |
+| `check_in` | TTL not extended, or extended by wrong amount | Assert `last_check_in` updated; assert not expired after check-in |
+| `withdraw` | Balance not debited, or auth not enforced | Assert balance decreases; assert non-owner fails |
+| `is_expired` | Wrong boundary condition (`>=` vs `>`) | Test at exact expiry timestamp boundary |
+| `deposit` | Amount not added, or wrong vault credited | Assert vault.balance == previous + amount |
+
+### Suggested CI step (GitHub Actions)
+
+Add the following job to your workflow to report mutant survival rate per PR
+as a downloadable artifact. Results are **informational** and non-blocking
+(`continue-on-error: true`).
+
+```yaml
+mutation-testing:
+  name: Mutation Testing (informational)
+  runs-on: ubuntu-latest
+  continue-on-error: true   # Results are informational — do not block merges.
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-mutants
+      run: cargo install cargo-mutants
+
+    - name: Run mutation tests
+      run: cargo mutants --package ttl-vault 2>&1 | tee mutants-report.txt
+
+    - name: Upload mutant survival report
+      uses: actions/upload-artifact@v4
+      with:
+        name: mutant-survival-report
+        path: mutants-report.txt
+        retention-days: 14
+```
+
+See also `.github/workflows/mutation-testing.yml` for the full standalone workflow file.

@@ -1,0 +1,165 @@
+name: Nightly Fuzz Testing
+
+# Run nightly at 2 AM UTC to test contract entry points with fuzzing
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  # Allow manual triggering for debugging
+  workflow_dispatch:
+    inputs:
+      fuzz_time:
+        description: 'Fuzzing time in seconds (default: 600 for 10 minutes)'
+        required: false
+        default: '600'
+      max_len:
+        description: 'Maximum input length (default: 1024)'
+        required: false
+        default: '1024'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fuzz_target:
+          - fuzz_vesting
+          - fuzz_create_vault
+          - fuzz_deposit
+          - fuzz_withdraw
+          - fuzz_check_in
+          - fuzz_xdr_scval
+          - fuzz_contract_xdr
+          - fuzz_withdrawal_splitting   # Issue #1523: withdrawal BPS split rounding invariants
+          - fuzz_passkey_signature       # Issue #1524: passkey/WebAuthn authenticator data parsing
+      # Continue fuzzing other targets even if one fails
+      fail-fast: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rust-src
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Cache cargo build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/
+          key: ${{ runner.os }}-fuzz-${{ matrix.fuzz_target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-fuzz-
+
+      - name: Build fuzz target
+        working-directory: contracts/ttl_vault/fuzz
+        run: cargo +nightly fuzz build ${{ matrix.fuzz_target }}
+        env:
+          RUSTFLAGS: -C debug-assertions
+
+      - name: Run fuzz testing
+        working-directory: contracts/ttl_vault/fuzz
+        run: |
+          # Determine fuzzing time: use workflow input if provided, else default to 600 seconds (10 minutes)
+          FUZZ_TIME="${{ github.event.inputs.fuzz_time }}"
+          if [ -z "$FUZZ_TIME" ] || [ "$FUZZ_TIME" = "null" ]; then
+            FUZZ_TIME=600
+          fi
+          
+          # Determine max length: use workflow input if provided, else default to 1024
+          MAX_LEN="${{ github.event.inputs.max_len }}"
+          if [ -z "$MAX_LEN" ] || [ "$MAX_LEN" = "null" ]; then
+            MAX_LEN=1024
+          fi
+          
+          echo "Fuzzing ${{ matrix.fuzz_target }} for $FUZZ_TIME seconds with max_len=$MAX_LEN"
+          
+          # Run fuzzer with corpus (if it exists) and sensible limits
+          if [ -d "corpus/${{ matrix.fuzz_target }}" ]; then
+            cargo +nightly fuzz run ${{ matrix.fuzz_target }} \
+              corpus/${{ matrix.fuzz_target }} \
+              -- \
+              -max_len=$MAX_LEN \
+              -timeout=10 \
+              -rss_limit_mb=2048 \
+              -max_total_time=$FUZZ_TIME
+          else
+            # Create empty corpus directory if it doesn't exist
+            mkdir -p "corpus/${{ matrix.fuzz_target }}"
+            cargo +nightly fuzz run ${{ matrix.fuzz_target }} \
+              corpus/${{ matrix.fuzz_target }} \
+              -- \
+              -max_len=$MAX_LEN \
+              -timeout=10 \
+              -rss_limit_mb=2048 \
+              -max_total_time=$FUZZ_TIME
+          fi
+
+      - name: Archive fuzzer results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fuzz-results-${{ matrix.fuzz_target }}
+          path: |
+            contracts/ttl_vault/fuzz/corpus/${{ matrix.fuzz_target }}/
+            contracts/ttl_vault/fuzz/artifacts/
+          retention-days: 30
+
+      - name: Check for crashes
+        if: always()
+        working-directory: contracts/ttl_vault/fuzz
+        run: |
+          # Check if any crash/oom/leak artifacts were produced
+          if find corpus/${{ matrix.fuzz_target }}/ -name "crash-*" -o -name "oom-*" -o -name "leak-*" | grep -q .; then
+            echo "::warning::Fuzz testing found potential issues in ${{ matrix.fuzz_target }}"
+            find corpus/${{ matrix.fuzz_target }}/ -type f \( -name "crash-*" -o -name "oom-*" -o -name "leak-*" \) -print
+            exit 1
+          else
+            echo "✓ No crashes detected in ${{ matrix.fuzz_target }}"
+          fi
+
+      - name: Report corpus stats
+        if: always()
+        working-directory: contracts/ttl_vault/fuzz
+        run: |
+          echo "Corpus statistics for ${{ matrix.fuzz_target }}:"
+          if [ -d "corpus/${{ matrix.fuzz_target }}" ]; then
+            COUNT=$(find corpus/${{ matrix.fuzz_target }}/ -type f | wc -l)
+            SIZE=$(du -sh corpus/${{ matrix.fuzz_target }}/ | cut -f1)
+            echo "  Files: $COUNT"
+            echo "  Total size: $SIZE"
+          else
+            echo "  No corpus directory"
+          fi
+
+  summarize:
+    name: Fuzz Testing Summary
+    runs-on: ubuntu-latest
+    needs: fuzz
+    if: always()
+    steps:
+      - name: Check fuzz results
+        run: |
+          echo "Fuzz testing job status: ${{ needs.fuzz.result }}"
+          if [ "${{ needs.fuzz.result }}" != "success" ]; then
+            echo "::error::Fuzz testing detected issues. Review artifacts for details."
+            exit 1
+          else
+            echo "✓ All fuzz targets completed successfully"
+          fi

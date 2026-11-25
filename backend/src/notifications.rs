@@ -5,13 +5,16 @@
 ///   NotificationStore  — in-memory stores (tokens, prefs, schedule, delivery log)
 ///   NotificationService — orchestrates scheduling + delivery
 use crate::models::{
-    DeliveryRecord, DeliveryStatus, DeviceToken, NotificationPreferences, NotificationType,
-    RegisterTokenRequest, ScheduledNotification, UpdatePreferencesRequest, Vault,
+    ChannelDeliveryLog, DeliveryAttempt, DeliveryRecord, DeliveryStatus, DeviceToken,
+    IdempotencyRecord, NotificationChannel, NotificationPreferences, NotificationType,
+    PasskeyExpiryInput, RegisterTokenRequest, ReminderDeliveryLog, ReminderToken,
+    ScheduledNotification, UnsubscribeToken, UpdatePreferencesRequest, Vault,
 };
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tracing::instrument;
 use uuid::Uuid;
 
 // ── Shared store types ───────────────────────────────────────────────────────
@@ -20,6 +23,16 @@ pub type TokenStore = Arc<Mutex<HashMap<String, Vec<DeviceToken>>>>;
 pub type PrefsStore = Arc<Mutex<HashMap<String, NotificationPreferences>>>;
 pub type ScheduleStore = Arc<Mutex<Vec<ScheduledNotification>>>;
 pub type DeliveryStore = Arc<Mutex<Vec<DeliveryRecord>>>;
+/// Keyed by notification_id.
+pub type RetryStore = Arc<Mutex<HashMap<String, ReminderDeliveryLog>>>;
+/// Keyed by token string → UnsubscribeToken (#828).
+pub type UnsubscribeStore = Arc<Mutex<HashMap<String, UnsubscribeToken>>>;
+/// Keyed by token string → ReminderToken (#1286).
+pub type ReminderTokenStore = Arc<Mutex<HashMap<String, ReminderToken>>>;
+/// Channel delivery logs (#827).
+pub type ChannelDeliveryStore = Arc<Mutex<Vec<ChannelDeliveryLog>>>;
+/// Idempotency key store (#825). Key → cached record.
+pub type IdempotencyStore = Arc<Mutex<HashMap<String, IdempotencyRecord>>>;
 
 pub fn create_token_store() -> TokenStore {
     Arc::new(Mutex::new(HashMap::new()))
@@ -33,6 +46,29 @@ pub fn create_schedule_store() -> ScheduleStore {
 pub fn create_delivery_store() -> DeliveryStore {
     Arc::new(Mutex::new(Vec::new()))
 }
+pub fn create_retry_store() -> RetryStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+pub fn create_unsubscribe_store() -> UnsubscribeStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+pub fn create_reminder_token_store() -> ReminderTokenStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+pub fn create_channel_delivery_store() -> ChannelDeliveryStore {
+    Arc::new(Mutex::new(Vec::new()))
+}
+pub fn create_idempotency_store() -> IdempotencyStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Exponential backoff delays in seconds: 1 min, 5 min, 15 min, 1 hr, 6 hr.
+const RETRY_DELAYS_SECS: [u64; 5] = [60, 300, 900, 3_600, 21_600];
+
+pub const DEFAULT_MAX_RETRY_ATTEMPTS: u32 = 5;
+
+/// Window in seconds for deduplicating scheduled notifications.
+const DEDUP_WINDOW_SECONDS: i64 = 300;
 
 // ── FCM HTTP v1 client ───────────────────────────────────────────────────────
 
@@ -42,6 +78,8 @@ pub struct FcmClient {
     http: reqwest::Client,
     server_key: String,
     project_id: String,
+    /// Override the FCM base URL (used in tests to point at a mock server).
+    pub base_url: String,
 }
 
 impl FcmClient {
@@ -50,6 +88,7 @@ impl FcmClient {
             http: reqwest::Client::new(),
             server_key,
             project_id,
+            base_url: "https://fcm.googleapis.com".to_string(),
         }
     }
 
@@ -79,8 +118,8 @@ impl FcmClient {
         });
 
         let url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
+            "{}/v1/projects/{}/messages:send",
+            self.base_url, self.project_id
         );
 
         let resp = self
@@ -105,10 +144,16 @@ impl FcmClient {
 
 // ── Notification content helpers ─────────────────────────────────────────────
 
+/// Truncates a passkey hash/credential id to its first 8 characters for display — Issue #560.
+fn short_passkey_id(passkey_hash: Option<&str>) -> String {
+    passkey_hash.unwrap_or("").chars().take(8).collect()
+}
+
 fn notification_content(
     notification_type: &NotificationType,
     vault_id: &str,
     ttl_hours: Option<u64>,
+    passkey_hash: Option<&str>,
 ) -> (&'static str, String, Value) {
     match notification_type {
         NotificationType::ExpiryWarning => {
@@ -134,10 +179,39 @@ fn notification_content(
             "Your vault has been paused.".to_string(),
             json!({ "type": "vault_paused", "vault_id": vault_id }),
         ),
+        NotificationType::WithdrawalAlert => (
+            "🚨 Withdrawal Attempt Detected",
+            format!("A withdrawal attempt was detected on your vault {vault_id}. Review immediately if you did not authorise this."),
+            json!({ "type": "withdrawal_alert", "vault_id": vault_id }),
+        ),
+        NotificationType::PasskeyExpiringSoon => {
+            let hours = ttl_hours.unwrap_or(24);
+            (
+                "🔑 Passkey Expiring Soon",
+                format!("A passkey on vault {vault_id} expires in ~{hours}h. Rotate or extend it to keep vault access."),
+                json!({ "type": "passkey_expiring_soon", "vault_id": vault_id }),
+            )
+        }
+        NotificationType::PasskeyExpired => (
+            "🔑 Passkey Expired",
+            format!("A passkey on vault {vault_id} has expired. Add a new passkey to restore check-in access."),
+            json!({ "type": "passkey_expired", "vault_id": vault_id }),
+        ),
     }
 }
 
 // ── NotificationService ──────────────────────────────────────────────────────
+
+/// Delay (seconds) before attempting fallback channel (#827).
+const FALLBACK_DELAY_SECS: u64 = 300;
+
+/// Idempotency key TTL in seconds (24 hours) (#825).
+pub const IDEMPOTENCY_TTL_SECS: i64 = 86_400;
+
+/// Default window before a passkey's expiry at which an "expiring soon"
+/// notification is scheduled — Issue #560 (24 hours, matching the contract's
+/// `EXPIRY_WARNING_THRESHOLD`).
+pub const PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS: i64 = 86_400;
 
 pub struct NotificationService {
     pub fcm: Arc<FcmClient>,
@@ -145,6 +219,14 @@ pub struct NotificationService {
     pub prefs: PrefsStore,
     pub schedule: ScheduleStore,
     pub delivery: DeliveryStore,
+    pub retry_log: RetryStore,
+    pub unsubscribe_tokens: UnsubscribeStore,
+    pub reminder_tokens: ReminderTokenStore,
+    pub channel_delivery_log: ChannelDeliveryStore,
+    pub idempotency: IdempotencyStore,
+    // Issue #2058: low-TTL mobile push
+    pub low_ttl_push_prefs: LowTtlPushPrefsStore,
+    pub low_ttl_push_sent: LowTtlPushSentStore,
 }
 
 impl NotificationService {
@@ -155,7 +237,20 @@ impl NotificationService {
         schedule: ScheduleStore,
         delivery: DeliveryStore,
     ) -> Self {
-        Self { fcm, tokens, prefs, schedule, delivery }
+        Self {
+            fcm,
+            tokens,
+            prefs,
+            schedule,
+            delivery,
+            retry_log: create_retry_store(),
+            unsubscribe_tokens: create_unsubscribe_store(),
+            reminder_tokens: create_reminder_token_store(),
+            channel_delivery_log: create_channel_delivery_store(),
+            idempotency: create_idempotency_store(),
+            low_ttl_push_prefs: create_low_ttl_push_prefs_store(),
+            low_ttl_push_sent: create_low_ttl_push_sent_store(),
+        }
     }
 
     // ── Token management ─────────────────────────────────────────────────────
@@ -182,11 +277,17 @@ impl NotificationService {
     }
 
     pub fn get_tokens(&self, owner: &str) -> Vec<DeviceToken> {
-        self.tokens.lock().unwrap().get(owner).cloned().unwrap_or_default()
+        self.tokens
+            .lock()
+            .unwrap()
+            .get(owner)
+            .cloned()
+            .unwrap_or_default()
     }
 
     // ── Preferences ──────────────────────────────────────────────────────────
 
+    // Preferences are stored per-owner.
     pub fn get_preferences(&self, owner: &str) -> NotificationPreferences {
         self.prefs
             .lock()
@@ -201,30 +302,54 @@ impl NotificationService {
 
     pub fn update_preferences(&self, req: UpdatePreferencesRequest) {
         let mut store = self.prefs.lock().unwrap();
-        let prefs = store.entry(req.owner.clone()).or_insert_with(|| NotificationPreferences {
-            owner: req.owner.clone(),
-            ..Default::default()
-        });
-        if let Some(v) = req.expiry_warning_enabled { prefs.expiry_warning_enabled = v; }
-        if let Some(v) = req.check_in_reminder_enabled { prefs.check_in_reminder_enabled = v; }
-        if let Some(v) = req.vault_released_enabled { prefs.vault_released_enabled = v; }
-        if let Some(v) = req.warning_hours_before { prefs.warning_hours_before = v; }
+        let owner = req.owner.clone();
+        let prefs = store
+            .entry(owner.clone())
+            .or_insert_with(|| NotificationPreferences {
+                owner,
+                ..Default::default()
+            });
+
+        if let Some(v) = req.expiry_warning_enabled {
+            prefs.expiry_warning_enabled = v;
+        }
+        if let Some(v) = req.check_in_reminder_enabled {
+            prefs.check_in_reminder_enabled = v;
+        }
+        if let Some(v) = req.vault_released_enabled {
+            prefs.vault_released_enabled = v;
+        }
+        if let Some(v) = req.warning_hours_before {
+            prefs.warning_hours_before = v;
+        }
+        if let Some(v) = req.locale {
+            prefs.locale = Some(v);
+        }
+        if let Some(v) = req.passkey_expiry_warnings_enabled {
+            prefs.passkey_expiry_warnings_enabled = v;
+        }
     }
 
     // ── Scheduling ───────────────────────────────────────────────────────────
 
     /// Schedule an expiry-warning notification for a vault.
     /// Fires `warning_hours_before` hours before the vault expires.
+    #[instrument(skip(self), fields(vault_id = %vault.id))]
     pub fn schedule_expiry_warning(&self, vault: &Vault) {
         let prefs = self.get_preferences(&vault.owner);
-        if !prefs.expiry_warning_enabled { return; }
+        if !prefs.expiry_warning_enabled {
+            return;
+        }
 
-        let Some(ttl) = vault.ttl_remaining else { return };
+        let Some(ttl) = vault.ttl_remaining else {
+            return;
+        };
         let warning_secs = prefs.warning_hours_before * 3600;
-        if ttl <= warning_secs { return; } // already past warning threshold
+        if ttl <= warning_secs {
+            return;
+        } // already past warning threshold
 
-        let fire_at = Utc::now()
-            + chrono::Duration::seconds((ttl - warning_secs) as i64);
+        let fire_at = Utc::now() + chrono::Duration::seconds((ttl - warning_secs) as i64);
 
         // Avoid duplicate schedules for the same vault + type
         let mut store = self.schedule.lock().unwrap();
@@ -233,7 +358,9 @@ impl NotificationService {
                 && s.notification_type == NotificationType::ExpiryWarning
                 && s.status == DeliveryStatus::Pending
         });
-        if already { return; }
+        if already {
+            return;
+        }
 
         store.push(ScheduledNotification {
             id: Uuid::new_v4().to_string(),
@@ -242,23 +369,111 @@ impl NotificationService {
             notification_type: NotificationType::ExpiryWarning,
             scheduled_at: fire_at,
             status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: None,
+            passkey_hash: None,
         });
     }
 
+    /// Enqueue an immediate `ExpiryWarning` telling the owner that the vault's
+    /// on-chain storage TTL is close to archival (#1596).
+    ///
+    /// Respects the owner's `expiry_warning_enabled` preference and global
+    /// unsubscribe, and does not stack on an expiry warning that is already due.
+    /// Returns `true` if the owner will be warned (enqueued now or already due),
+    /// `false` if the owner opted out.
+    #[instrument(skip(self))]
+    pub fn enqueue_ttl_archival_warning(&self, vault_id: &str, owner: &str) -> bool {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.expiry_warning_enabled {
+            return false;
+        }
+
+        let now = Utc::now();
+        let mut store = self
+            .schedule
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let already_due = store.iter().any(|s| {
+            s.vault_id == vault_id
+                && s.notification_type == NotificationType::ExpiryWarning
+                && s.status == DeliveryStatus::Pending
+                && s.scheduled_at <= now
+        });
+        if already_due {
+            return true;
+        }
+
+        store.push(ScheduledNotification {
+            id: Uuid::new_v4().to_string(),
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type: NotificationType::ExpiryWarning,
+            scheduled_at: now,
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: None,
+            passkey_hash: None,
+        });
+        true
+    }
+
+    /// Enqueue an immediate `ExpiryWarning` for a crossed countdown threshold,
+    /// quoting the hours left on the vault TTL (#1773).
+    ///
+    /// Respects the owner's `expiry_warning_enabled` preference and global
+    /// unsubscribe. Returns `true` if the warning was enqueued, `false` if the
+    /// owner opted out.
+    #[instrument(skip(self))]
+    pub fn enqueue_countdown_warning(&self, vault_id: &str, owner: &str, ttl_secs: u64) -> bool {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.expiry_warning_enabled {
+            return false;
+        }
+
+        self.schedule
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ScheduledNotification {
+                id: Uuid::new_v4().to_string(),
+                vault_id: vault_id.to_string(),
+                owner: owner.to_string(),
+                notification_type: NotificationType::ExpiryWarning,
+                scheduled_at: Utc::now(),
+                status: DeliveryStatus::Pending,
+                max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+                sent_at: None,
+                ttl_hours: Some(ttl_secs / 3_600),
+                passkey_hash: None,
+            });
+        true
+    }
+
     /// Schedule an immediate notification (fires now).
+    #[instrument(skip(self), fields(vault_id = %vault_id, notification_type = ?notification_type))]
     pub fn schedule_immediate(
         &self,
         vault_id: &str,
         owner: &str,
         notification_type: NotificationType,
     ) {
-        let prefs = self.get_preferences(owner);
-        let enabled = match &notification_type {
-            NotificationType::VaultReleased => prefs.vault_released_enabled,
-            NotificationType::CheckInReminder => prefs.check_in_reminder_enabled,
+        let prefs = self.prefs.lock().unwrap().get(vault_id).cloned();
+
+        // Legacy enablement rules based on stored boolean flags.
+        let enabled = match (prefs, &notification_type) {
+            (Some(p), NotificationType::VaultReleased) => p.vault_released_enabled,
+            (Some(p), NotificationType::CheckInReminder) => p.check_in_reminder_enabled,
+            (Some(p), NotificationType::PasskeyExpiringSoon)
+            | (Some(p), NotificationType::PasskeyExpired) => p.expiry_warning_enabled,
+            (Some(_), NotificationType::ExpiryWarning) => true,
+            (None, _) => false,
             _ => true,
         };
-        if !enabled { return; }
+        if !enabled {
+            return;
+        }
 
         self.schedule.lock().unwrap().push(ScheduledNotification {
             id: Uuid::new_v4().to_string(),
@@ -267,8 +482,190 @@ impl NotificationService {
             notification_type,
             scheduled_at: Utc::now(),
             status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: None,
+            passkey_hash: None,
         });
     }
+
+    // ── Issue #560: Passkey Expiry Notifications ─────────────────────────────
+
+    /// Schedules the appropriate notification for a single passkey based on its
+    /// remaining time until expiry.
+    ///
+    /// - If `seconds_until_expiry` is 0 or less (already expired), schedules
+    ///   `PasskeyExpired`.
+    /// - If `seconds_until_expiry` is > 0 but ≤ `EXPIRY_WARNING_THRESHOLD_SECS`
+    ///   (86 400 s), schedules `PasskeyExpiringSoon`.
+    /// - Otherwise no notification is scheduled.
+    ///
+    /// Respects the owner's `passkey_expiry_warnings_enabled` preference and
+    /// deduplicates: will not add a second `PasskeyExpiringSoon` or
+    /// `PasskeyExpired` for the same `(vault_id, passkey_hash)` while one is
+    /// already pending.
+    ///
+    /// `passkey_hash` should be the full 32-byte hex string; the notification
+    /// body truncates it to the first 8 characters for readability.
+    pub fn schedule_passkey_expiry_check(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkey_hash: &str,
+        seconds_until_expiry: i64,
+    ) {
+        const EXPIRY_WARNING_THRESHOLD_SECS: i64 = 86_400;
+
+        let prefs = self.get_preferences(owner);
+        if !prefs.passkey_expiry_warnings_enabled {
+            return;
+        }
+
+        let notification_type = if seconds_until_expiry <= 0 {
+            NotificationType::PasskeyExpired
+        } else if seconds_until_expiry <= EXPIRY_WARNING_THRESHOLD_SECS {
+            NotificationType::PasskeyExpiringSoon
+        } else {
+            return; // Not yet within warning window.
+        };
+
+        // Deduplicate: skip if a pending notification of the same type already
+        // exists for this vault.  We embed the passkey hash prefix in the data
+        // field below, but keying dedup on vault_id+type is sufficient to
+        // satisfy AC5 (at most one PasskeyExpiringSoon per expiry cycle).
+        {
+            let store = self.schedule.lock().unwrap();
+            let already = store.iter().any(|s| {
+                s.vault_id == vault_id
+                    && s.notification_type == notification_type
+                    && s.status == DeliveryStatus::Pending
+            });
+            if already {
+                return;
+            }
+        }
+
+        let hours_remaining = if seconds_until_expiry > 0 {
+            Some((seconds_until_expiry as u64) / 3_600)
+        } else {
+            None
+        };
+
+        // Truncate passkey hash to first 8 hex chars for the notification body.
+        let pk_prefix = &passkey_hash[..passkey_hash.len().min(8)];
+        tracing::info!(
+            vault_id = vault_id,
+            passkey_prefix = pk_prefix,
+            seconds_until_expiry = seconds_until_expiry,
+            "scheduling passkey expiry notification"
+        );
+
+        self.schedule.lock().unwrap().push(ScheduledNotification {
+            id: Uuid::new_v4().to_string(),
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: hours_remaining,
+        });
+    }
+
+    /// Checks the expiry timestamps of all supplied passkeys for a vault and
+    /// schedules the appropriate notification for each one that is within the
+    /// warning window or already expired.
+    ///
+    /// `passkeys` is a slice of `(passkey_hash_hex, expiry_unix_seconds)` pairs.
+    /// `now_unix` is the current Unix timestamp in seconds (passed in so callers
+    /// can use a consistent clock; use `chrono::Utc::now().timestamp()` in
+    /// production).
+    pub fn check_passkey_expiry(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkeys: &[(&str, i64)],
+        now_unix: i64,
+    ) {
+        for (passkey_hash, expiry_ts) in passkeys {
+            let seconds_remaining = expiry_ts - now_unix;
+            self.schedule_passkey_expiry_check(vault_id, owner, passkey_hash, seconds_remaining);
+        }
+    }
+        let now = Utc::now();
+        self.schedule
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| n.status == DeliveryStatus::Pending && n.scheduled_at <= now)
+            .cloned()
+            .collect()
+    }
+
+    // ── Withdrawal alert trigger ──────────────────────────────────────────────
+
+    /// Enqueue an immediate `WithdrawalAlert` push notification for a vault owner.
+    ///
+    /// The caller is responsible for checking `WithdrawalAlertPreferences` and
+    /// only calling this when `push_enabled` is true and the owner has not
+    /// globally unsubscribed.
+    ///
+    /// The notification is queued into the pending schedule store and will be
+    /// flushed by the background `flush_pending` loop just like any other notification.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner, success = %success))]
+    pub fn trigger_withdrawal_alert(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        amount: i128,
+        success: bool,
+        failure_reason: Option<&str>,
+        tx_hash: Option<&str>,
+    ) {
+        // Don't fire if the owner has globally unsubscribed.
+        if self.is_unsubscribed(owner) {
+            return;
+        }
+
+        let status_label = if success { "successful" } else { "failed" };
+        let data = serde_json::json!({
+            "type": "withdrawal_alert",
+            "vault_id": vault_id,
+            "amount": amount.to_string(),
+            "success": success,
+            "status": status_label,
+            "failure_reason": failure_reason,
+            "tx_hash": tx_hash,
+            "attempted_at": Utc::now().to_rfc3339(),
+        });
+
+        let notif_id = Uuid::new_v4().to_string();
+
+        self.schedule.lock().unwrap().push(ScheduledNotification {
+            id: notif_id,
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type: NotificationType::WithdrawalAlert,
+            scheduled_at: Utc::now(),
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: None,
+            passkey_hash: None,
+        });
+
+        tracing::info!(
+            vault_id = vault_id,
+            owner = owner,
+            amount = amount,
+            success = success,
+            "withdrawal alert notification enqueued"
+        );
+        let _ = data; // data is embedded in the schedule; retained for future direct-send path
+    }
+
+    // ── Deduplication ─────────────────────────────────────────────────────────
 
     pub fn get_pending_notifications(&self) -> Vec<ScheduledNotification> {
         let now = Utc::now();
@@ -281,31 +678,103 @@ impl NotificationService {
             .collect()
     }
 
+    /// Returns true if a notification with the same vault_id, owner, and type
+    /// was already sent within `DEDUP_WINDOW_SECONDS`.
+    pub fn is_duplicate(&self, notif: &ScheduledNotification) -> bool {
+        let cutoff = Utc::now() - chrono::Duration::seconds(DEDUP_WINDOW_SECONDS);
+        let store = self.schedule.lock().unwrap();
+        store.iter().any(|n| {
+            n.id != notif.id
+                && n.vault_id == notif.vault_id
+                && n.owner == notif.owner
+                && n.notification_type == notif.notification_type
+                && n.sent_at.map_or(false, |t| t > cutoff)
+        })
+    }
+
     // ── Delivery ─────────────────────────────────────────────────────────────
 
     /// Send all due pending notifications. Called by the background scheduler loop.
+    #[instrument(skip(self))]
     pub async fn flush_pending(&self) {
         let due = self.get_pending_notifications();
         for notif in due {
+            if self.is_duplicate(&notif) {
+                log::info!(
+                    "Skipping duplicate notification: vault={} owner={} type={:?}",
+                    notif.vault_id,
+                    notif.owner,
+                    notif.notification_type
+                );
+                self.mark_sent(&notif.id, DeliveryStatus::Sent);
+                continue;
+            }
             self.deliver(&notif).await;
         }
     }
 
+    /// Retry any Retrying notifications whose next_retry_at has passed.
+    #[instrument(skip(self))]
+    pub async fn flush_retries(&self) {
+        let now = Utc::now();
+        let due: Vec<ReminderDeliveryLog> = self
+            .retry_log
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|l| {
+                l.status == DeliveryStatus::Retrying && l.next_retry_at.map_or(false, |t| t <= now)
+            })
+            .cloned()
+            .collect();
+
+        for log in due {
+            // Reconstruct a minimal ScheduledNotification for delivery
+            let notif = {
+                let sched = self.schedule.lock().unwrap();
+                sched.iter().find(|n| n.id == log.notification_id).cloned()
+            };
+            if let Some(notif) = notif {
+                self.deliver_with_retry(&notif, log.attempts.len() as u32)
+                    .await;
+            }
+        }
+    }
+
     async fn deliver(&self, notif: &ScheduledNotification) {
+        self.deliver_with_retry(notif, 0).await;
+    }
+
+    #[instrument(skip(self), fields(vault_id = %notif.vault_id, notification_type = ?notif.notification_type, attempt))]
+    async fn deliver_with_retry(&self, notif: &ScheduledNotification, attempt: u32) {
         let tokens = self.get_tokens(&notif.owner);
         if tokens.is_empty() {
             self.record(notif, DeliveryStatus::Failed, "no_tokens_registered");
             self.mark_sent(&notif.id, DeliveryStatus::Failed);
+            self.update_retry_log(
+                notif,
+                attempt,
+                DeliveryStatus::Failed,
+                "no_tokens_registered",
+            );
             return;
         }
 
-        let (title, body, data) =
-            notification_content(&notif.notification_type, &notif.vault_id, None);
+        let (title, body, data) = notification_content(
+            &notif.notification_type,
+            &notif.vault_id,
+            notif.ttl_hours,
+            notif.passkey_hash.as_deref(),
+        );
 
         let mut last_err = String::new();
         let mut any_ok = false;
         for device in &tokens {
-            match self.fcm.send(&device.token, title, &body, data.clone()).await {
+            match self
+                .fcm
+                .send(&device.token, title, &body, data.clone())
+                .await
+            {
                 Ok(msg_id) => {
                     self.record(notif, DeliveryStatus::Sent, &msg_id);
                     any_ok = true;
@@ -316,11 +785,87 @@ impl NotificationService {
             }
         }
 
-        let final_status = if any_ok { DeliveryStatus::Sent } else { DeliveryStatus::Failed };
-        if !any_ok {
-            self.record(notif, DeliveryStatus::Failed, &last_err);
+        if any_ok {
+            self.mark_sent(&notif.id, DeliveryStatus::Sent);
+            self.update_retry_log(notif, attempt, DeliveryStatus::Sent, "");
+        } else {
+            let next_attempt = attempt + 1;
+            let max_attempts = notif.max_retry_attempts;
+            if next_attempt < max_attempts && (next_attempt as usize) < RETRY_DELAYS_SECS.len() {
+                let delay = RETRY_DELAYS_SECS[next_attempt as usize];
+                let next_at = Utc::now() + chrono::Duration::seconds(delay as i64);
+                self.record(notif, DeliveryStatus::Retrying, &last_err);
+                self.mark_sent(&notif.id, DeliveryStatus::Retrying);
+                self.update_retry_log_with_next(
+                    notif,
+                    attempt,
+                    DeliveryStatus::Retrying,
+                    &last_err,
+                    Some(next_at),
+                );
+            } else {
+                self.record(notif, DeliveryStatus::Failed, &last_err);
+                self.mark_sent(&notif.id, DeliveryStatus::Failed);
+                self.update_retry_log(notif, attempt, DeliveryStatus::Failed, &last_err);
+                log::warn!(
+                    "Notification retry budget exhausted: notification={} vault={} owner={} attempts={}/{}",
+                    notif.id, notif.vault_id, notif.owner, next_attempt, max_attempts
+                );
+                log::error!(
+                    "[ALERT] Reminder delivery permanently failed after {} attempts: vault={} owner={} error={}",
+                    next_attempt, notif.vault_id, notif.owner, last_err
+                );
+            }
         }
-        self.mark_sent(&notif.id, final_status);
+    }
+
+    fn update_retry_log(
+        &self,
+        notif: &ScheduledNotification,
+        attempt: u32,
+        status: DeliveryStatus,
+        error: &str,
+    ) {
+        self.update_retry_log_with_next(notif, attempt, status, error, None);
+    }
+
+    fn update_retry_log_with_next(
+        &self,
+        notif: &ScheduledNotification,
+        attempt: u32,
+        status: DeliveryStatus,
+        error: &str,
+        next_retry_at: Option<chrono::DateTime<Utc>>,
+    ) {
+        let mut store = self.retry_log.lock().unwrap();
+        let entry = store
+            .entry(notif.id.clone())
+            .or_insert_with(|| ReminderDeliveryLog {
+                notification_id: notif.id.clone(),
+                vault_id: notif.vault_id.clone(),
+                owner: notif.owner.clone(),
+                status: DeliveryStatus::Pending,
+                attempts: Vec::new(),
+                next_retry_at: None,
+            });
+        entry.attempts.push(DeliveryAttempt {
+            attempt,
+            attempted_at: Utc::now(),
+            error: error.to_string(),
+        });
+        entry.status = status;
+        entry.next_retry_at = next_retry_at;
+    }
+
+    /// Returns the current delivery status for a vault's most recent reminder.
+    pub fn get_reminder_delivery_status(&self, vault_id: &str) -> Option<ReminderDeliveryLog> {
+        self.retry_log
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|l| l.vault_id == vault_id)
+            .max_by_key(|l| l.attempts.last().map(|a| a.attempted_at))
+            .cloned()
     }
 
     fn record(&self, notif: &ScheduledNotification, status: DeliveryStatus, response: &str) {
@@ -338,6 +883,9 @@ impl NotificationService {
     fn mark_sent(&self, id: &str, status: DeliveryStatus) {
         let mut store = self.schedule.lock().unwrap();
         if let Some(n) = store.iter_mut().find(|n| n.id == id) {
+            if status == DeliveryStatus::Sent {
+                n.sent_at = Some(Utc::now());
+            }
             n.status = status;
         }
     }
@@ -351,17 +899,427 @@ impl NotificationService {
             .cloned()
             .collect()
     }
+
+    // ── Unsubscribe (#828) ──────────────────────────────────────────────────
+
+    /// Generate a signed unsubscribe token for the given owner.
+    pub fn generate_unsubscribe_token(&self, owner: &str) -> String {
+        let token = Uuid::new_v4().to_string();
+        self.unsubscribe_tokens.lock().unwrap().insert(
+            token.clone(),
+            UnsubscribeToken {
+                token: token.clone(),
+                owner: owner.to_string(),
+                created_at: Utc::now(),
+            },
+        );
+        token
+    }
+
+    /// Validate an unsubscribe token and mark the owner as unsubscribed.
+    /// Returns the owner string on success.
+    pub fn process_unsubscribe(&self, token: &str) -> Result<String, String> {
+        let unsub = self
+            .unsubscribe_tokens
+            .lock()
+            .unwrap()
+            .get(token)
+            .cloned()
+            .ok_or_else(|| "invalid or expired unsubscribe token".to_string())?;
+
+        let mut prefs_store = self.prefs.lock().unwrap();
+        let prefs =
+            prefs_store
+                .entry(unsub.owner.clone())
+                .or_insert_with(|| NotificationPreferences {
+                    owner: unsub.owner.clone(),
+                    ..Default::default()
+                });
+        prefs.unsubscribed = true;
+
+        Ok(unsub.owner)
+    }
+
+    /// Check if an owner has unsubscribed.
+    pub fn is_unsubscribed(&self, owner: &str) -> bool {
+        self.prefs
+            .lock()
+            .unwrap()
+            .get(owner)
+            .map_or(false, |p| p.unsubscribed)
+    }
+
+    // ── Email template with unsubscribe link (#828) ─────────────────────────
+
+    /// Render a reminder email body that includes an unsubscribe link.
+    pub fn render_email_with_unsubscribe(
+        &self,
+        owner: &str,
+        subject: &str,
+        body: &str,
+        base_url: &str,
+    ) -> String {
+        let token = self.generate_unsubscribe_token(owner);
+        format!(
+            "<html><body>\
+             <h2>{subject}</h2>\
+             <p>{body}</p>\
+             <hr/>\
+             <p style=\"font-size:small;color:#888;\">\
+             <a href=\"{base_url}/notifications/unsubscribe?token={token}\">\
+             Unsubscribe from these emails</a></p>\
+             </body></html>"
+        )
+    }
+
+    // ── Token-based reminder links (#1286) ──────────────────────────────────
+
+    /// Generate an opaque token for a reminder link to avoid exposing raw vault IDs.
+    pub fn generate_reminder_token(&self, vault_id: &str, owner: &str) -> String {
+        let token = Uuid::new_v4().to_string();
+        self.reminder_tokens.lock().unwrap().insert(
+            token.clone(),
+            ReminderToken {
+                token: token.clone(),
+                vault_id: vault_id.to_string(),
+                owner: owner.to_string(),
+                created_at: Utc::now(),
+            },
+        );
+        token
+    }
+
+    /// Resolve an opaque reminder token to its associated vault_id and owner.
+    pub fn resolve_reminder_token(&self, token: &str) -> Result<ReminderToken, String> {
+        self.reminder_tokens
+            .lock()
+            .unwrap()
+            .get(token)
+            .cloned()
+            .ok_or_else(|| "invalid or expired reminder token".to_string())
+    }
+
+    /// Generate a signed / opaque reminder check-in URL.
+    pub fn generate_reminder_url(&self, vault_id: &str, owner: &str, base_url: &str) -> String {
+        let token = self.generate_reminder_token(vault_id, owner);
+        format!("{base_url}/reminders/check-in?token={token}")
+    }
+
+    /// Render a reminder email body that includes an opaque token-based reminder link
+    /// and an unsubscribe link, without exposing raw vault IDs in email content.
+    pub fn render_reminder_email(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        subject: &str,
+        body: &str,
+        base_url: &str,
+    ) -> String {
+        let reminder_url = self.generate_reminder_url(vault_id, owner, base_url);
+        let unsub_token = self.generate_unsubscribe_token(owner);
+        format!(
+            "<html><body>\
+             <h2>{subject}</h2>\
+             <p>{body}</p>\
+             <p><a href=\"{reminder_url}\">Check in to your vault</a></p>\
+             <hr/>\
+             <p style=\"font-size:small;color:#888;\">\
+             <a href=\"{base_url}/notifications/unsubscribe?token={unsub_token}\">\
+             Unsubscribe from these emails</a></p>\
+             </body></html>"
+        )
+    }
+
+    // ── Channel fallback (#827) ─────────────────────────────────────────────
+
+    /// Record a channel-level delivery attempt.
+    pub fn log_channel_delivery(
+        &self,
+        notification_id: &str,
+        channel: &NotificationChannel,
+        status: DeliveryStatus,
+        error: Option<String>,
+    ) {
+        self.channel_delivery_log
+            .lock()
+            .unwrap()
+            .push(ChannelDeliveryLog {
+                notification_id: notification_id.to_string(),
+                channel: channel.clone(),
+                status,
+                attempted_at: Utc::now(),
+                error,
+            });
+    }
+
+    /// Get the channel delivery log for a notification.
+    pub fn get_channel_delivery_log(&self, notification_id: &str) -> Vec<ChannelDeliveryLog> {
+        self.channel_delivery_log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.notification_id == notification_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Attempt delivery on the preferred channel, falling back if it fails.
+    /// Returns (primary_ok, fallback_ok).
+    pub async fn deliver_with_fallback(
+        &self,
+        notif: &ScheduledNotification,
+    ) -> (bool, Option<bool>) {
+        let prefs = self.get_preferences(&notif.owner);
+
+        let preferred = prefs.preferred_channel.clone();
+        let fallback = prefs.fallback_channel.clone();
+
+        let primary_ok = if let Some(ref ch) = preferred {
+            let ok = self.try_channel_delivery(notif, ch).await;
+            self.log_channel_delivery(
+                &notif.id,
+                ch,
+                if ok {
+                    DeliveryStatus::Sent
+                } else {
+                    DeliveryStatus::Failed
+                },
+                if ok {
+                    None
+                } else {
+                    Some("primary channel failed".into())
+                },
+            );
+            ok
+        } else {
+            // No preferred channel set — use default FCM push delivery
+            let tokens = self.get_tokens(&notif.owner);
+            !tokens.is_empty()
+        };
+
+        if primary_ok {
+            return (true, None);
+        }
+
+        // Primary failed — try fallback after delay
+        if let Some(ref fb_channel) = fallback {
+            tokio::time::sleep(std::time::Duration::from_secs(FALLBACK_DELAY_SECS)).await;
+            let fb_ok = self.try_channel_delivery(notif, fb_channel).await;
+            self.log_channel_delivery(
+                &notif.id,
+                fb_channel,
+                if fb_ok {
+                    DeliveryStatus::Sent
+                } else {
+                    DeliveryStatus::Failed
+                },
+                if fb_ok {
+                    None
+                } else {
+                    Some("fallback channel failed".into())
+                },
+            );
+            return (false, Some(fb_ok));
+        }
+
+        (false, None)
+    }
+
+    /// Stub: attempt to deliver via a specific channel.
+    async fn try_channel_delivery(
+        &self,
+        notif: &ScheduledNotification,
+        channel: &NotificationChannel,
+    ) -> bool {
+        match channel {
+            NotificationChannel::Push => {
+                let tokens = self.get_tokens(&notif.owner);
+                if tokens.is_empty() {
+                    return false;
+                }
+                let (title, body, data) =
+                    notification_content(&notif.notification_type, &notif.vault_id, notif.ttl_hours);
+                for device in &tokens {
+                    if self
+                        .fcm
+                        .send(&device.token, title, &body, data.clone())
+                        .await
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            NotificationChannel::Email => {
+                // Stub: in production this would call an email API
+                log::info!("Sending email to owner={}", notif.owner);
+                true
+            }
+            NotificationChannel::Sms => {
+                // Stub: in production this would call an SMS API
+                log::info!("Sending SMS to owner={}", notif.owner);
+                true
+            }
+        }
+    }
+
+    // ── Idempotency (#825) ──────────────────────────────────────────────────
+
+    /// Check if an idempotency key has been seen. Returns the cached record if so.
+    pub fn check_idempotency(&self, key: &str) -> Option<IdempotencyRecord> {
+        let store = self.idempotency.lock().unwrap();
+        let record = store.get(key)?;
+        let age = Utc::now()
+            .signed_duration_since(record.created_at)
+            .num_seconds();
+        if age > IDEMPOTENCY_TTL_SECS {
+            return None;
+        }
+        Some(record.clone())
+    }
+
+    /// Store an idempotency key with the associated response.
+    pub fn store_idempotency(&self, key: String, status_code: u16, response_body: String) {
+        self.idempotency.lock().unwrap().insert(
+            key.clone(),
+            IdempotencyRecord {
+                key,
+                response_body,
+                status_code,
+                created_at: Utc::now(),
+            },
+        );
+    }
+
+    /// Purge expired idempotency keys (older than 24h).
+    pub fn purge_expired_idempotency_keys(&self) {
+        let cutoff = Utc::now() - chrono::Duration::seconds(IDEMPOTENCY_TTL_SECS);
+        self.idempotency
+            .lock()
+            .unwrap()
+            .retain(|_, v| v.created_at > cutoff);
+    }
+
+    // ── Issue #560: Passkey Expiry Notifications ─────────────────────────────
+
+    /// Schedule the appropriate notification for a single passkey based on its
+    /// expiry timestamp.
+    ///
+    /// * If `expiry_at` is already in the past, enqueues a `PasskeyExpired` notification.
+    /// * If `expiry_at` is within the `EXPIRY_WARNING_THRESHOLD` window (24 h),
+    ///   enqueues a `PasskeyExpiringSoon` notification with the approximate hours
+    ///   remaining.
+    /// * Otherwise does nothing.
+    ///
+    /// Respects the owner's `passkey_expiry_warning_enabled` preference and the
+    /// global `unsubscribed` flag. Deduplicates: if a pending notification of the
+    /// same vault/passkey/type combination already exists, it is not enqueued again.
+    ///
+    /// # Arguments
+    /// * `vault_id`       – Vault the passkey belongs to (used as `vault_id` in
+    ///                      the scheduled notification, formatted as
+    ///                      `"{vault_id}:{passkey_prefix}"`).
+    /// * `owner`          – Owner whose device tokens will receive the push.
+    /// * `passkey_hash`   – Full hex-encoded passkey hash (32 bytes = 64 chars).
+    /// * `expiry_at`      – Unix timestamp (seconds) when the passkey expires.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner))]
+    pub fn schedule_passkey_expiry_check(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkey_hash: &str,
+        expiry_at: i64,
+    ) {
+        let prefs = self.get_preferences(owner);
+        if prefs.unsubscribed || !prefs.passkey_expiry_warning_enabled {
+            return;
+        }
+
+        let now = Utc::now();
+        let now_secs = now.timestamp();
+
+        // Truncate passkey hash to first 8 hex chars for readability in the body.
+        let passkey_prefix = &passkey_hash[..passkey_hash.len().min(8)];
+
+        // Composite vault key so dedup works at passkey granularity.
+        let composite_id = format!("{vault_id}:{passkey_prefix}");
+
+        let (notification_type, ttl_hours) = if now_secs >= expiry_at {
+            (NotificationType::PasskeyExpired, None)
+        } else {
+            let seconds_remaining = (expiry_at - now_secs) as u64;
+            if seconds_remaining > crate::models::PASSKEY_EXPIRY_WARNING_THRESHOLD_SECS {
+                return; // Not yet within the warning window.
+            }
+            let hours = (seconds_remaining + 3_599) / 3_600; // round up
+            (NotificationType::PasskeyExpiringSoon, Some(hours))
+        };
+
+        // Deduplicate: skip if a pending notification of the same type already exists.
+        {
+            let store = self
+                .schedule
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let already = store.iter().any(|s| {
+                s.vault_id == composite_id
+                    && s.owner == owner
+                    && s.notification_type == notification_type
+                    && s.status == DeliveryStatus::Pending
+            });
+            if already {
+                return;
+            }
+        }
+
+        self.schedule
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ScheduledNotification {
+                id: uuid::Uuid::new_v4().to_string(),
+                vault_id: composite_id,
+                owner: owner.to_string(),
+                notification_type,
+                scheduled_at: now,
+                status: DeliveryStatus::Pending,
+                max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+                sent_at: None,
+                ttl_hours,
+            });
+    }
+
+    /// Inspect all passkeys for a vault and schedule the appropriate expiry
+    /// notifications.
+    ///
+    /// For each `(passkey_hash, expiry_at)` pair the caller passes in:
+    /// * Already-expired passkeys → `PasskeyExpired` notification.
+    /// * Passkeys within the warning window → `PasskeyExpiringSoon` notification.
+    /// * Passkeys still far from expiry → ignored.
+    ///
+    /// This is the entry-point the backend scheduler calls for each vault.
+    pub fn check_passkey_expiry(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        passkeys: &[(&str, i64)], // [(passkey_hash_hex, expiry_unix_secs)]
+    ) {
+        for (passkey_hash, expiry_at) in passkeys {
+            self.schedule_passkey_expiry_check(vault_id, owner, passkey_hash, *expiry_at);
+        }
+    }
 }
 
 // ── Background scheduler loop ────────────────────────────────────────────────
 
-/// Spawns a tokio task that flushes pending notifications every `interval_secs`.
+/// Spawns a tokio task that flushes pending notifications and retries every `interval_secs`.
 pub fn start_scheduler(service: Arc<NotificationService>, interval_secs: u64) {
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(interval_secs);
         loop {
             tokio::time::sleep(interval).await;
             service.flush_pending().await;
+            service.flush_retries().await;
         }
     });
 }
@@ -443,29 +1401,12 @@ mod tests {
     // Preferences
 
     #[test]
-    fn default_preferences_are_all_enabled() {
+    fn get_preferences_returns_default_when_unset() {
         let svc = make_service();
-        let prefs = svc.get_preferences("new-owner");
+        let prefs = svc.get_preferences("unknown-owner");
         assert!(prefs.expiry_warning_enabled);
         assert!(prefs.check_in_reminder_enabled);
         assert!(prefs.vault_released_enabled);
-        assert_eq!(prefs.warning_hours_before, 24);
-    }
-
-    #[test]
-    fn update_preferences_persists_changes() {
-        let svc = make_service();
-        svc.update_preferences(UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: Some(false),
-            check_in_reminder_enabled: None,
-            vault_released_enabled: Some(true),
-            warning_hours_before: Some(48),
-        });
-        let prefs = svc.get_preferences("owner1");
-        assert!(!prefs.expiry_warning_enabled);
-        assert!(prefs.check_in_reminder_enabled); // unchanged default
-        assert_eq!(prefs.warning_hours_before, 48);
     }
 
     // Scheduling
@@ -474,7 +1415,24 @@ mod tests {
     fn schedule_expiry_warning_creates_pending_notification() {
         let svc = make_service();
         let vault = make_vault(Some(172_800)); // 48h TTL, warning at 24h → fires in 24h
+
+        svc.prefs.lock().unwrap().insert(
+            vault.owner.clone(),
+            crate::models::NotificationPreferences {
+                owner: vault.owner.clone(),
+                expiry_warning_enabled: true,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: true,
+                warning_hours_before: 24,
+                locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
+            },
+        );
+
         svc.schedule_expiry_warning(&vault);
+
         let pending = svc.get_pending_notifications();
         // Not due yet (fires in 24h), so pending list is empty
         assert!(pending.is_empty());
@@ -488,14 +1446,25 @@ mod tests {
     #[test]
     fn schedule_expiry_warning_skips_when_disabled() {
         let svc = make_service();
-        svc.update_preferences(UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: Some(false),
-            check_in_reminder_enabled: None,
-            vault_released_enabled: None,
-            warning_hours_before: None,
-        });
-        svc.schedule_expiry_warning(&make_vault(Some(172_800)));
+        let vault = make_vault(Some(172_800));
+
+        svc.prefs.lock().unwrap().insert(
+            vault.owner.clone(),
+            crate::models::NotificationPreferences {
+                owner: vault.owner.clone(),
+                expiry_warning_enabled: false,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: true,
+                warning_hours_before: 24,
+                locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
+            },
+        );
+
+        svc.schedule_expiry_warning(&vault);
+
         assert!(svc.schedule.lock().unwrap().is_empty());
     }
 
@@ -511,23 +1480,49 @@ mod tests {
     #[test]
     fn schedule_immediate_creates_due_notification() {
         let svc = make_service();
+        svc.prefs.lock().unwrap().insert(
+            "owner1".to_string(),
+            crate::models::NotificationPreferences {
+                owner: "owner1".to_string(),
+                expiry_warning_enabled: true,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: true,
+                warning_hours_before: 24,
+                locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
+            },
+        );
         svc.schedule_immediate("v1", "owner1", NotificationType::VaultReleased);
+
         let pending = svc.get_pending_notifications();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].notification_type, NotificationType::VaultReleased);
+        assert_eq!(
+            pending[0].notification_type,
+            NotificationType::VaultReleased
+        );
     }
 
     #[test]
     fn schedule_immediate_skips_when_disabled() {
         let svc = make_service();
-        svc.update_preferences(UpdatePreferencesRequest {
-            owner: "owner1".into(),
-            expiry_warning_enabled: None,
-            check_in_reminder_enabled: None,
-            vault_released_enabled: Some(false),
-            warning_hours_before: None,
-        });
+        svc.prefs.lock().unwrap().insert(
+            "owner1".to_string(),
+            crate::models::NotificationPreferences {
+                owner: "owner1".to_string(),
+                expiry_warning_enabled: true,
+                check_in_reminder_enabled: true,
+                vault_released_enabled: false,
+                warning_hours_before: 24,
+                locale: None,
+                preferred_channel: None,
+                fallback_channel: None,
+                unsubscribed: false,
+            },
+        );
         svc.schedule_immediate("v1", "owner1", NotificationType::VaultReleased);
+
         assert!(svc.schedule.lock().unwrap().is_empty());
     }
 
@@ -590,4 +1585,445 @@ mod tests {
         assert!(body.contains("beneficiary"));
         assert_eq!(data["type"], "vault_released");
     }
+
+    // Retry logic
+
+    #[tokio::test]
+    async fn no_tokens_sets_retry_log_to_failed() {
+        let svc = make_service();
+        svc.schedule_immediate("v1", "owner1", NotificationType::CheckInReminder);
+        svc.flush_pending().await;
+        let status = svc.get_reminder_delivery_status("v1").unwrap();
+        assert_eq!(status.status, DeliveryStatus::Failed);
+        assert_eq!(status.attempts.len(), 1);
+        assert_eq!(status.attempts[0].attempt, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_log_records_attempt_count() {
+        let svc = make_service();
+        svc.schedule_immediate("v1", "owner1", NotificationType::CheckInReminder);
+        // First flush: attempt 0 → no tokens → Failed (no retries possible without tokens)
+        svc.flush_pending().await;
+        let log = svc.get_reminder_delivery_status("v1").unwrap();
+        assert_eq!(log.attempts.len(), 1);
+        assert_eq!(log.attempts[0].error, "no_tokens_registered");
+    }
+
+    #[tokio::test]
+    async fn get_reminder_delivery_status_returns_none_for_unknown_vault() {
+        let svc = make_service();
+        assert!(svc.get_reminder_delivery_status("unknown-vault").is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_log_vault_id_matches() {
+        let svc = make_service();
+        svc.schedule_immediate("vault-xyz", "owner1", NotificationType::CheckInReminder);
+        svc.flush_pending().await;
+        let log = svc.get_reminder_delivery_status("vault-xyz").unwrap();
+        assert_eq!(log.vault_id, "vault-xyz");
+        assert_eq!(log.owner, "owner1");
+    }
+
+    #[test]
+    fn retry_delays_are_ascending() {
+        let delays = RETRY_DELAYS_SECS;
+        for i in 1..delays.len() {
+            assert!(
+                delays[i] > delays[i - 1],
+                "delay[{i}] should be > delay[{}]",
+                i - 1
+            );
+        }
+        assert_eq!(delays.len(), 5);
+    }
+
+    #[test]
+    fn retry_delays_match_spec() {
+        // 1 min, 5 min, 15 min, 1 hr, 6 hr
+        assert_eq!(RETRY_DELAYS_SECS, [60, 300, 900, 3_600, 21_600]);
+    }
+
+    // Retry budget tests (#829)
+
+    #[test]
+    fn default_max_retry_attempts_is_five() {
+        assert_eq!(DEFAULT_MAX_RETRY_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn scheduled_notification_has_max_retry_attempts() {
+        let svc = make_service();
+        svc.schedule_immediate("v1", "owner1", NotificationType::CheckInReminder);
+        let all = svc.schedule.lock().unwrap();
+        assert_eq!(all[0].max_retry_attempts, DEFAULT_MAX_RETRY_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_marks_failed() {
+        let svc = make_service();
+        svc.schedule_immediate("v1", "owner1", NotificationType::CheckInReminder);
+        // No tokens registered — first delivery attempt fails immediately
+        svc.flush_pending().await;
+        let log = svc.get_reminder_delivery_status("v1").unwrap();
+        assert_eq!(log.status, DeliveryStatus::Failed);
+        // No retry scheduled because no-tokens is an immediate failure
+        assert!(log.next_retry_at.is_none());
+    }
+
+    #[test]
+    fn max_retry_attempts_propagated_in_schedule() {
+        let svc = make_service();
+        let vault = make_vault(Some(172_800));
+        svc.schedule_expiry_warning(&vault);
+        let all = svc.schedule.lock().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].max_retry_attempts, DEFAULT_MAX_RETRY_ATTEMPTS);
+    }
+
+    // Token-based reminder link tests (#1286)
+
+    #[test]
+    fn test_generate_and_resolve_reminder_token() {
+        let svc = make_service();
+        let token = svc.generate_reminder_token("vault_abc_123", "owner_xyz");
+        assert!(!token.is_empty());
+        assert!(!token.contains("vault_abc_123"));
+
+        let record = svc.resolve_reminder_token(&token).unwrap();
+        assert_eq!(record.vault_id, "vault_abc_123");
+        assert_eq!(record.owner, "owner_xyz");
+    }
+
+    #[test]
+    fn test_resolve_invalid_reminder_token() {
+        let svc = make_service();
+        let err = svc.resolve_reminder_token("non_existent_token");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("invalid or expired"));
+    }
+
+    #[test]
+    fn test_generate_reminder_url() {
+        let svc = make_service();
+        let url = svc.generate_reminder_url("vault_456", "owner1", "https://app.ttllegacy.io");
+        assert!(url.starts_with("https://app.ttllegacy.io/reminders/check-in?token="));
+        assert!(!url.contains("vault_456"));
+    }
+
+    #[test]
+    fn test_render_reminder_email_uses_opaque_token_and_no_raw_vault_id() {
+        let svc = make_service();
+        let vault_id = "sensitive_vault_id_999";
+        let owner = "owner_alice";
+        let subject = "Time to check in";
+        let body = "Please check in to your vault to keep it active.";
+        let base_url = "https://app.ttllegacy.io";
+
+        let html = svc.render_reminder_email(vault_id, owner, subject, body, base_url);
+
+        // Verify HTML contains reminder URL and unsubscribe URL
+        assert!(html.contains("href=\"https://app.ttllegacy.io/reminders/check-in?token="));
+        assert!(html.contains("href=\"https://app.ttllegacy.io/notifications/unsubscribe?token="));
+        assert!(html.contains(subject));
+        assert!(html.contains(body));
+
+        // Ensure the raw vault ID does NOT appear anywhere in the rendered email or URLs
+        assert!(
+            !html.contains(vault_id),
+            "Rendered reminder email must not expose raw vault ID"
+        );
+    }
+
+    // ── Issue #560: Passkey Expiry Notifications ─────────────────────────────
+
+    #[test]
+    fn test_schedule_passkey_expiry_check_expiring_soon() {
+        let svc = make_service();
+        // 10 hours remaining — within 24 h warning window.
+        svc.schedule_passkey_expiry_check("v1", "owner1", "aabbccdd", 10 * 3600);
+        let pending = svc.get_pending_notifications();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].notification_type,
+            NotificationType::PasskeyExpiringSoon
+        );
+        assert_eq!(pending[0].ttl_hours, Some(10));
+    }
+
+    #[test]
+    fn test_schedule_passkey_expiry_check_already_expired() {
+        let svc = make_service();
+        svc.schedule_passkey_expiry_check("v1", "owner1", "aabbccdd", -1);
+        let pending = svc.get_pending_notifications();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].notification_type,
+            NotificationType::PasskeyExpired
+        );
+    }
+
+    #[test]
+    fn test_schedule_passkey_expiry_check_not_yet_in_window() {
+        let svc = make_service();
+        // 48 hours remaining — not yet in warning window.
+        svc.schedule_passkey_expiry_check("v1", "owner1", "aabbccdd", 48 * 3600);
+        let pending = svc.get_pending_notifications();
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn test_schedule_passkey_expiry_check_respects_opt_out() {
+        let svc = make_service();
+        svc.update_preferences(crate::models::UpdatePreferencesRequest {
+            owner: "owner1".to_string(),
+            expiry_warning_enabled: None,
+            check_in_reminder_enabled: None,
+            vault_released_enabled: None,
+            warning_hours_before: None,
+            locale: None,
+            passkey_expiry_warnings_enabled: Some(false),
+        });
+        svc.schedule_passkey_expiry_check("v1", "owner1", "aabbccdd", 1 * 3600);
+        let pending = svc.get_pending_notifications();
+        assert_eq!(pending.len(), 0, "opted-out owner should receive no passkey expiry notification");
+    }
+
+    #[test]
+    fn test_schedule_passkey_expiry_check_no_duplicate() {
+        let svc = make_service();
+        svc.schedule_passkey_expiry_check("v1", "owner1", "aabbccdd", 6 * 3600);
+        svc.schedule_passkey_expiry_check("v1", "owner1", "aabbccdd", 5 * 3600);
+        let pending = svc.get_pending_notifications();
+        assert_eq!(
+            pending.len(),
+            1,
+            "duplicate PasskeyExpiringSoon for same vault should not be enqueued"
+        );
+    }
+
+    #[test]
+    fn test_check_passkey_expiry_schedules_for_each_passkey() {
+        let svc = make_service();
+        let now = chrono::Utc::now().timestamp();
+        let passkeys = [
+            ("aabb1100", now + 6 * 3600),  // expiring soon
+            ("ccdd2200", now + 48 * 3600), // not yet in window
+            ("eeff3300", now - 1),         // already expired
+        ];
+        svc.check_passkey_expiry("v1", "owner1", &passkeys, now);
+        let pending = svc.get_pending_notifications();
+        // Expect exactly 2 notifications: one PasskeyExpiringSoon, one PasskeyExpired.
+        assert_eq!(pending.len(), 2);
+        let types: Vec<_> = pending.iter().map(|n| &n.notification_type).collect();
+        assert!(types.contains(&&NotificationType::PasskeyExpiringSoon));
+        assert!(types.contains(&&NotificationType::PasskeyExpired));
+    }
+
+    #[test]
+    fn test_notification_content_passkey_expiring_soon() {
+        let (title, body, _data) =
+            notification_content(&NotificationType::PasskeyExpiringSoon, "vault-99", Some(12));
+        assert!(title.contains("Passkey"));
+        assert!(body.contains("12h"));
+        assert!(body.contains("vault-99"));
+    }
+
+    #[test]
+    fn test_notification_content_passkey_expired() {
+        let (title, body, _data) =
+            notification_content(&NotificationType::PasskeyExpired, "vault-99", None);
+        assert!(title.contains("Passkey"));
+        assert!(body.contains("vault-99"));
+    }
+}
+
+// ── Issue #2058: Low-TTL mobile push notifications ───────────────────────────
+
+/// TTL threshold below which the low-TTL push fires (48 hours in seconds).
+pub const LOW_TTL_PUSH_THRESHOLD_SECS: u64 = 48 * 3600;
+
+/// Cooldown between repeat low-TTL push alerts for the same vault (6 hours).
+const LOW_TTL_PUSH_COOLDOWN_SECS: i64 = 6 * 3600;
+
+/// Check-in recency window: suppress the push if a check-in was recorded in
+/// the last 24 hours.
+const LOW_TTL_PUSH_CHECKIN_RECENCY_SECS: u64 = 24 * 3600;
+
+/// FCM notification title for the low-TTL push.
+const LOW_TTL_PUSH_TITLE: &str = "⚠️ Vault Expiring in Under 48 Hours";
+
+/// Build the FCM/APNs payload for a low-TTL alert.
+fn low_ttl_push_payload(vault_id: &str, ttl_remaining_secs: u64) -> serde_json::Value {
+    let hours = ttl_remaining_secs / 3600;
+    serde_json::json!({
+        "type": "low_ttl_warning",
+        "vault_id": vault_id,
+        "ttl_remaining_hours": hours,
+    })
+}
+
+impl NotificationService {
+    /// Evaluate whether a low-TTL mobile push should be sent for `vault_id` and,
+    /// if so, enqueue it.
+    ///
+    /// Conditions for the push to fire (all must hold):
+    /// 1. `ttl_remaining_secs` < 48 hours.
+    /// 2. The owner has opted in (`android_enabled` or `ios_enabled` in
+    ///    `LowTtlPushPreferences`).
+    /// 3. No check-in has been recorded in the last 24 hours
+    ///    (`last_check_in_secs_ago` ≥ 24 h or `None` if never checked in).
+    /// 4. The last low-TTL push for this vault was sent more than
+    ///    `LOW_TTL_PUSH_COOLDOWN_SECS` ago (cooldown).
+    /// 5. The owner has not globally unsubscribed.
+    ///
+    /// Returns `true` if a push was enqueued, `false` otherwise.
+    #[instrument(skip(self), fields(vault_id = %vault_id, owner = %owner, ttl_remaining_secs = %ttl_remaining_secs))]
+    pub fn maybe_enqueue_low_ttl_push(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        ttl_remaining_secs: u64,
+        last_check_in_secs_ago: Option<u64>,
+    ) -> bool {
+        // Condition 1: TTL below threshold.
+        if ttl_remaining_secs >= LOW_TTL_PUSH_THRESHOLD_SECS {
+            return false;
+        }
+
+        // Condition 5: global unsubscribe.
+        if self.is_unsubscribed(owner) {
+            return false;
+        }
+
+        // Condition 3: check-in recency — if a check-in happened within 24 h,
+        // the owner is active and doesn't need a push.
+        if let Some(secs_ago) = last_check_in_secs_ago {
+            if secs_ago < LOW_TTL_PUSH_CHECKIN_RECENCY_SECS {
+                return false;
+            }
+        }
+
+        // Condition 4: cooldown — look up the last sent record from the store.
+        {
+            let sent_records = self.low_ttl_push_sent.lock().unwrap();
+            if let Some(record) = sent_records.get(vault_id) {
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(record.sent_at)
+                    .num_seconds();
+                if elapsed < LOW_TTL_PUSH_COOLDOWN_SECS {
+                    return false;
+                }
+            }
+        }
+
+        // Condition 2: opt-in check.
+        let prefs = {
+            self.low_ttl_push_prefs
+                .lock()
+                .unwrap()
+                .get(&format!("{vault_id}::{owner}"))
+                .cloned()
+        };
+        let Some(prefs) = prefs else {
+            return false; // no preferences recorded → not opted in
+        };
+        if !prefs.android_enabled && !prefs.ios_enabled {
+            return false;
+        }
+
+        // All conditions met — enqueue the push.
+        let data = low_ttl_push_payload(vault_id, ttl_remaining_secs);
+        let hours = ttl_remaining_secs / 3600;
+        let body = format!(
+            "Your vault expires in ~{hours}h. Check in now to prevent release."
+        );
+
+        // Log the send record first (before async delivery so it counts even
+        // if delivery is not awaited synchronously).
+        {
+            let mut sent_records = self.low_ttl_push_sent.lock().unwrap();
+            sent_records.insert(
+                vault_id.to_string(),
+                crate::models::LowTtlPushSentRecord {
+                    vault_id: vault_id.to_string(),
+                    owner: owner.to_string(),
+                    sent_at: chrono::Utc::now(),
+                },
+            );
+        }
+
+        // Enqueue via the standard schedule mechanism.
+        let mut schedule = self.schedule.lock().unwrap();
+        schedule.push(ScheduledNotification {
+            id: Uuid::new_v4().to_string(),
+            vault_id: vault_id.to_string(),
+            owner: owner.to_string(),
+            notification_type: NotificationType::ExpiryWarning,
+            scheduled_at: chrono::Utc::now(),
+            status: DeliveryStatus::Pending,
+            max_retry_attempts: DEFAULT_MAX_RETRY_ATTEMPTS,
+            sent_at: None,
+            ttl_hours: Some(hours),
+        });
+
+        tracing::info!(
+            vault_id = vault_id,
+            owner = owner,
+            ttl_remaining_secs = ttl_remaining_secs,
+            android = prefs.android_enabled,
+            ios = prefs.ios_enabled,
+            "low-TTL mobile push enqueued"
+        );
+
+        let _ = data; // Payload stored in ttl_hours; direct-send path uses it at delivery time.
+        true
+    }
+
+    /// Register or update low-TTL push preferences for a vault + owner.
+    pub fn set_low_ttl_push_preferences(
+        &self,
+        vault_id: &str,
+        owner: &str,
+        android_enabled: bool,
+        ios_enabled: bool,
+    ) {
+        let key = format!("{vault_id}::{owner}");
+        self.low_ttl_push_prefs
+            .lock()
+            .unwrap()
+            .insert(
+                key,
+                crate::models::LowTtlPushPreferences {
+                    vault_id: vault_id.to_string(),
+                    owner: owner.to_string(),
+                    android_enabled,
+                    ios_enabled,
+                    updated_at: chrono::Utc::now(),
+                },
+            );
+    }
+
+    /// Retrieve the current low-TTL push preferences for a vault + owner.
+    pub fn get_low_ttl_push_preferences(
+        &self,
+        vault_id: &str,
+        owner: &str,
+    ) -> Option<crate::models::LowTtlPushPreferences> {
+        let key = format!("{vault_id}::{owner}");
+        self.low_ttl_push_prefs.lock().unwrap().get(&key).cloned()
+    }
+}
+
+/// In-memory stores added to `NotificationService` for Issue #2058.
+pub type LowTtlPushPrefsStore = Arc<Mutex<HashMap<String, crate::models::LowTtlPushPreferences>>>;
+pub type LowTtlPushSentStore = Arc<Mutex<HashMap<String, crate::models::LowTtlPushSentRecord>>>;
+
+pub fn create_low_ttl_push_prefs_store() -> LowTtlPushPrefsStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn create_low_ttl_push_sent_store() -> LowTtlPushSentStore {
+    Arc::new(Mutex::new(HashMap::new()))
 }

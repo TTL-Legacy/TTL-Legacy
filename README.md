@@ -1,6 +1,8 @@
 # TTL-Legacy — Micro-Endowment Check-In Vault on Stellar
 
 [![CI](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg)](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml)
+[![Coverage](https://codecov.io/gh/OxDev-max/TTL-Legacy/branch/main/graph/badge.svg)](https://codecov.io/gh/OxDev-max/TTL-Legacy)
+[![OpenAPI Valid](https://github.com/OxDev-max/TTL-Legacy/actions/workflows/ci.yml/badge.svg?label=OpenAPI)](docs/openapi.yaml)
 
 A decentralized "Dead Man's Switch" built on Stellar/Soroban smart contracts.
 
@@ -13,6 +15,7 @@ TTL-Legacy turns Stellar's native state archival mechanics into a programmable i
 - Deposit funds into a personal vault contract
 - Periodically "check in" to extend the contract's TTL and prove liveness
 - Designate a beneficiary address for automatic release
+- Optionally use a hashed beneficiary commitment with reveal-on-release to reduce pre-release targeting exposure
 - Authenticate exclusively via Passkeys (WebAuthn) — no seed phrases
 
 If the owner stops checking in, the contract's TTL expires and the vault automatically releases funds to the beneficiary.
@@ -24,16 +27,27 @@ This Soroban implementation makes TTL-Legacy:
 ✅ Secure (Passkey/WebAuthn authentication, no exposed seed phrases)  
 ✅ Automated (TTL expiry triggers transfer without manual intervention)
 
+## 📝 Documentation
+
+The `ranking.rs` and `matching.rs` modules include full rustdoc comments on all public items. Run `cargo doc --no-deps --open` to browse the generated documentation locally.
+
 ## 🚀 Features
 
 - **Create a Vault**: Set a beneficiary address and check-in interval
+- **Privacy Layer**: Optional beneficiary hash commitment with reveal-on-release for privacy-sensitive vaults
 - **Check-In**: Extend the contract TTL to reset the countdown
 - **Automatic Release**: Funds transfer to beneficiary when TTL lapses
+- **Beneficiary Conditional Acceptance**: Beneficiary can accept role only if funds exceed threshold
+- **Beneficiary Conflict Resolution**: Automated conflict resolution when multiple beneficiaries claim same vault
 - **Passkey Auth**: WebAuthn-based authentication for all owner actions
 - **Reminder System**: Backend sends encrypted email/SMS check-in reminders
 - **Legacy Dashboard**: Minimalist frontend to manage vault state and history
 - **Native XLM Support**: Built-in support for Stellar Lumens
 - **Token Ready**: Architecture supports custom Stellar tokens (roadmap item)
+- **Withdrawal Audit Trail**: Track all withdrawal attempts (successful and failed) with comprehensive details
+- **Withdrawal Batching**: Batch multiple small withdrawals into single transaction for efficiency
+- **Withdrawal Notifications**: Real-time alerts to vault owners for all withdrawal attempts
+- **Withdrawal Dispute**: Allow disputing unauthorized withdrawals within 24-hour grace period
 
 ## 🛠️ Quick Start
 
@@ -42,18 +56,62 @@ This Soroban implementation makes TTL-Legacy:
 - Rust (1.70+)
 - Soroban CLI
 - Stellar CLI
+- [just](https://just.systems/man/en/packages.html) (optional but recommended — centralizes all dev commands)
+
+### Using just
+
+Install `just` once, then run `just --list` to see every available target:
+
+```
+Available recipes:
+    audit               # Run cargo-audit (install with: cargo install cargo-audit)
+    build               # Build both Soroban contracts for wasm32 release
+    ci                  # Run build + test + clippy in one shot (useful before opening a PR)
+    clippy              # Run clippy (warnings treated as errors, matching CI)
+    deploy-mainnet      # Deploy to Stellar mainnet (requires STELLAR_MAINNET_RPC_URL; prompts for confirmation)
+    deploy-mainnet-force# Force-redeploy to mainnet without the existing-contract prompt
+    deploy-testnet      # Deploy to Stellar testnet (prompts if a contract already exists)
+    deploy-testnet-force# Force-redeploy to testnet without confirmation prompt
+    docker-down         # Stop and remove local dev stack containers
+    docker-up           # Start local dev stack (PostgreSQL, backend, Stellar Quickstart)
+    env-setup           # Copy .env.example to .env (skips if .env already exists)
+    fmt                 # Auto-format all code
+    fmt-check           # Check code formatting
+    test                # Run the full ttl_vault test suite
+```
 
 ### Build
 
 ```bash
+just build
+# or without just:
 ./scripts/build.sh
 ```
 
 ### Test
 
 ```bash
+just test
+# or without just:
 ./scripts/test.sh
 ```
+
+### Local Development Setup (Docker)
+
+For fastest local setup, use Docker Compose:
+
+```bash
+docker-compose up -d
+```
+
+This will start:
+- **PostgreSQL** on `localhost:5432`
+- **Backend** on `localhost:3000`
+- **Stellar Quickstart** on `localhost:8000`
+
+The `docker-compose.override.yml` configures development-specific settings (standalone Stellar, loose auth, mounted volumes).
+
+Database health check ensures the service is ready before the backend starts.
 
 ### Setup Environment
 
@@ -125,11 +183,16 @@ The script will display the target network and identity, then require you to typ
 
 - [Architecture Overview](docs/architecture.md)
 - [TTL & State Archival Logic](docs/ttl-logic.md)
+- [Vault Hibernation](docs/hibernation.md)
 - [Passkey Integration](docs/passkeys.md)
+- [Beneficiary Conditional Acceptance](docs/beneficiary-conditional-acceptance.md)
+- [Beneficiary Conflict Resolution](docs/beneficiary-conflict-resolution.md)
+- [Withdrawal Features](docs/withdrawal-features.md)
 - [Threat Model & Security](docs/security.md)
 - [Security Policy & Vulnerability Disclosure](SECURITY.md)
 - [Roadmap](docs/roadmap.md)
 - [Vesting Schedules](docs/vesting-schedules.md)
+- [Beneficiary Advanced Features](docs/beneficiary-advanced-features.md)
 
 ## 🎓 Smart Contract API
 
@@ -138,6 +201,7 @@ The script will display the target network and identity, then require you to typ
 ```rust
 create_vault(beneficiary: Address, check_in_interval: u64) -> u64
 get_vault(vault_id: u64) -> Vault
+get_deposit_total(vault_id: u64) -> Result<i128, ContractError>
 get_ttl_remaining(vault_id: u64) -> Option<u64>
 ```
 
@@ -156,6 +220,14 @@ update_beneficiary(vault_id: u64, new_beneficiary: Address)
 trigger_release(vault_id: u64)
 is_expired(vault_id: u64) -> bool
 get_release_status(vault_id: u64) -> ReleaseStatus
+```
+
+### Hibernation
+
+```rust
+enter_hibernation(vault_id: u64, caller: Address, duration_seconds: u64)
+exit_hibernation(vault_id: u64, caller: Address)
+get_hibernation(vault_id: u64) -> Option<HibernationEntry>
 ```
 
 ## 🧪 Testing
@@ -213,6 +285,8 @@ We welcome contributions! Please:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+For a full local dev setup walkthrough and troubleshooting FAQ, see the [Contributing Guide](CONTRIBUTING.md).
+
 See our [Code of Conduct](CODE_OF_CONDUCT.md) and [Contributing Guidelines](CONTRIBUTING.md).
 
 ## 📄 License
@@ -225,5 +299,13 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - The WebAuthn/Passkey standards community
 - Everyone building toward self-sovereign financial tools
 
+## Handsoff notes
 
+<!-- handsoff-issue-1477 -->
+- #1477: Fix: beneficiary claim handler returns a mock transaction hash
 
+<!-- handsoff-issue-1514 -->
+- #1514: Enhancement: add view function returning vault health summary
+
+<!-- handsoff-issue-1515 -->
+- #1515: Fix: ensure all persistent entries extend TTL on read paths

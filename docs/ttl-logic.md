@@ -26,6 +26,18 @@ pub fn is_expired(env: Env, vault_id: u64) -> bool {
 2. Contract updates `last_check_in` to current timestamp
 3. TTL countdown resets
 
+### Emitted Events
+
+| Event | Topic | When | Data |
+|-------|-------|------|------|
+| `CheckInRecorded` | `ci_rec` | On every successful check-in | `(owner, new_expiry)` |
+| `CheckIn` | `check_in` | On every successful check-in | `timestamp` |
+| `CheckInGeo` | `ci_geo` | On geo check-in | `(lat, lon, country, timestamp)` |
+| `CheckInPoW` | `ci_pow` | On PoW check-in | `(nonce, difficulty, timestamp)` |
+| `CheckInRateLimited` | `ci_rl` | When rate-limited | `cooldown_remaining` |
+
+The `CheckInRecorded` event (`ci_rec`) is emitted immediately after the `check_in` topic in all check-in paths: `check_in`, `batch_check_in`, `sync_vault_ttls`, and `batch_check_in_v2`.
+
 ## Release Flow
 
 1. Anyone calls `trigger_release(vault_id)`

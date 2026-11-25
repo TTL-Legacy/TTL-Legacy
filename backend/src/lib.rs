@@ -1,13 +1,45 @@
-pub mod models;
-pub mod handlers;
-pub mod websocket;
+pub mod audit;
+pub mod auth;
+pub mod cache;
+pub mod consensus;
+pub mod contract_version_check;
 pub mod db;
-pub mod templates;
+/// Issue #2073: dead-letter queue for permanently failed reminder dispatches.
+pub mod dead_letter;
+pub mod error;
+pub mod escalation;
+pub mod fee_sponsorship;
+pub mod handlers;
+pub mod metrics;
+pub mod models;
 pub mod notifications;
+pub mod otel;
+/// Issue #1482: shared notification provider abstraction
+pub mod providers;
+pub mod rate_limit;
+/// Issue #1752: timezone-aware (DST-safe) reminder scheduling.
+pub mod reminder_time;
+pub mod routes;
+/// Issue #1199: request input sanitization middleware
+pub mod sanitization;
+pub mod scheduler;
+pub mod security_headers;
+pub mod templates;
+/// Issue #2066: token price oracle config and vault value estimation.
+pub mod token_price_oracle;
+/// Issue #1596: owner warning when storage TTL nears archival
+pub mod ttl_watch;
+pub mod two_factor;
+pub mod webhook_retry;
+pub mod websocket;
 
-pub use models::*;
-pub use handlers::*;
-pub use websocket::*;
+pub use audit::*;
 pub use db::*;
-pub use templates::*;
+pub use fee_sponsorship::*;
+pub use handlers::*;
+pub use models::*;
 pub use notifications::*;
+pub use providers::*;
+pub use sms::*;
+pub use templates::*;
+pub use websocket::*;

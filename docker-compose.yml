@@ -1,0 +1,83 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ttl-legacy-db
+    environment:
+      POSTGRES_USER: ttl_user
+      POSTGRES_PASSWORD: ttl_password
+      POSTGRES_DB: ttl_legacy
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ttl_user -d ttl_legacy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ttl-legacy-backend
+    environment:
+      DATABASE_URL: postgres://ttl_user:ttl_password@db:5432/ttl_legacy
+      REDIS_URL: redis://redis:6379
+      # Share rate-limit counters across backend replicas (issue #2134).
+      RATE_LIMIT_STORE: redis
+      RATE_LIMIT_FAIL_MODE: local
+      NODE_ID: backend-primary
+      CONSENSUS_STRATEGY: last_write_wins
+      RUST_LOG: info
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      stellar-quickstart:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      - ./backend/src:/app/src
+
+  redis:
+    image: redis:7-alpine
+    container_name: ttl-legacy-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  stellar-quickstart:
+    image: stellar/quickstart:latest
+    container_name: stellar-quickstart
+    environment:
+      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+    ports:
+      - "8000:8000"
+      - "11626:11626"
+    volumes:
+      - quickstart_data:/var/lib/stellar
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8000/rpc -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLatestLedger\"}' | jq -e '.result.sequence > 0' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  quickstart_data:
