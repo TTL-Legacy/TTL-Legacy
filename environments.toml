@@ -19,3 +19,8 @@ CHECKIN_LATENCY_BUCKETS_MS=10,50,100,500,1000,5000
 # Backend (rate limiting) - comma-separated list of trusted reverse proxy IPs/CIDRs
 # whose X-Forwarded-For header is honored when extracting the client IP
 TRUSTED_PROXIES=127.0.0.1/32,::1/128
+
+# MFA enforcement policy - USD threshold for high-value vaults
+# When a vault's estimated value (balance in stroops / 10_000_000 * 0.30 USD)
+# exceeds this threshold, state-changing API calls require a fresh TOTP code.
+MFA_THRESHOLD_USD=10000

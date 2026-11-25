@@ -388,6 +388,57 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
   /api/vaults/search:
+    get:
+      summary: Full-text search over vault tags and notes
+      description: >
+        Issue #2069. Searches the authenticated owner's vault tags and notes
+        using full-text search (SQLite FTS5 on the backend — the SQLite
+        equivalent of PostgreSQL tsvector/tsquery) and returns paginated vault
+        summaries with highlighted match snippets. Results are scoped to the
+        `owner` query parameter (supplied by auth middleware in production).
+      operationId: searchVaultsFulltext
+      tags:
+        - Vaults
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Free-text query matched against vault tags and notes.
+        - name: owner
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authenticated owner; results are scoped to this owner.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque cursor (offset) from a previous next_cursor.
+      responses:
+        '200':
+          description: Paginated search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultSearchResponse'
+        '422':
+          description: Invalid search parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     post:
       summary: Search vaults
       description: Search for vaults based on owner, beneficiary, status, and date range with pagination
@@ -415,6 +466,322 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/metadata:
+    put:
+      summary: Set vault tags and notes
+      description: >
+        Issue #2069. Upserts searchable metadata (tags + notes) for a vault. The
+        FTS5 search index is refreshed synchronously.
+      operationId: setVaultMetadata
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetVaultMetadataRequest'
+      responses:
+        '200':
+          description: Stored metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultMetadata'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: Get vault tags and notes
+      operationId: getVaultMetadata
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Stored metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultMetadata'
+        '404':
+          description: No metadata for this vault
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/delegation:
+    post:
+      summary: Grant check-in delegation
+      description: >
+        Issue #2068. Authorises `delegate` to check in on the vault owner's
+        behalf. Updates current state only; the TTL watcher records the
+        grant/revoke event in the audit log.
+      operationId: grantCheckInDelegation
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantCheckInDelegationRequest'
+      responses:
+        '200':
+          description: Current delegation state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInDelegationState'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Revoke check-in delegation
+      description: >
+        Issue #2068. Clears the current check-in delegate. Only the vault owner
+        (passed as the `owner` query parameter) may revoke.
+      operationId: revokeCheckInDelegation
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: owner
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Vault owner requesting the revoke.
+      responses:
+        '200':
+          description: Current delegation state (delegate cleared)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInDelegationState'
+        '403':
+          description: Caller is not the vault owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/delegation-audit:
+    get:
+      summary: Check-in delegation audit trail
+      description: >
+        Issue #2068. Returns the grant/revoke audit log for a vault, populated
+        by the TTL watcher.
+      operationId: getCheckInDelegationAudit
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit trail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInDelegationAuditResponse'
+
+  /api/vaults/{vault_id}/withdrawal-approvals:
+    post:
+      summary: Request a multi-party withdrawal approval
+      description: >
+        Issue #2070. Creates a pending withdrawal approval workflow for a
+        high-value vault. Every address in `required_approvers` must approve
+        before the withdrawal may execute; a pending request auto-cancels
+        (`expired`) after `approval_ttl_seconds`.
+      operationId: createWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWithdrawalApprovalRequest'
+      responses:
+        '201':
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '422':
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: List withdrawal approval workflows for a vault
+      operationId: listWithdrawalApprovals
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalListResponse'
+
+  /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id}:
+    get:
+      summary: Get a withdrawal approval workflow
+      description: >
+        Issue #2070. Returns a single workflow's status and recorded approvals.
+        A pending workflow whose TTL has elapsed is lazily expired on read.
+      operationId: getWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Cancel a pending withdrawal approval
+      operationId: cancelWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cancelled workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/vaults/{vault_id}/withdrawal-approvals/{withdrawal_id}/approvals:
+    post:
+      summary: Submit a withdrawal approval
+      description: >
+        Issue #2070. Records `approver`'s approval. Only addresses listed in the
+        workflow's `required_approvers` may approve; once all of them have
+        approved, the workflow transitions to `approved`.
+      operationId: submitWithdrawalApproval
+      tags:
+        - Vaults
+      parameters:
+        - name: vault_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: withdrawal_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitWithdrawalApprovalRequest'
+      responses:
+        '200':
+          description: Updated workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
+        '403':
+          description: Approver not authorised
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Workflow not found
           content:
             application/json:
               schema:
@@ -1610,6 +1977,245 @@ components:
       required:
         - vaults
         - limit
+
+    VaultMetadata:
+      type: object
+      required: [vault_id, owner, tags, notes, updated_at]
+      properties:
+        vault_id:
+          type: string
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    SetVaultMetadataRequest:
+      type: object
+      required: [owner]
+      properties:
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+          default: []
+        notes:
+          type: string
+          nullable: true
+
+    VaultSearchHit:
+      type: object
+      required: [vault_id, owner, tags, notes]
+      properties:
+        vault_id:
+          type: string
+        owner:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string
+        snippet:
+          type: string
+          nullable: true
+          description: Matched-text snippet with <mark> highlights.
+        status:
+          allOf:
+            - $ref: '#/components/schemas/VaultStatus'
+          nullable: true
+        balance:
+          type: integer
+          format: int64
+          nullable: true
+        ttl_remaining:
+          type: integer
+          nullable: true
+
+    VaultSearchResponse:
+      type: object
+      required: [query, vaults, limit]
+      properties:
+        query:
+          type: string
+        vaults:
+          type: array
+          items:
+            $ref: '#/components/schemas/VaultSearchHit'
+        next_cursor:
+          type: string
+          nullable: true
+        limit:
+          type: integer
+
+    CheckInDelegationEventKind:
+      type: string
+      enum: [grant, revoke]
+
+    CheckInDelegationAuditEntry:
+      type: object
+      required: [id, vault_id, event_kind, actor, timestamp]
+      properties:
+        id:
+          type: integer
+          format: int64
+        vault_id:
+          type: string
+        event_kind:
+          $ref: '#/components/schemas/CheckInDelegationEventKind'
+        delegate:
+          type: string
+          nullable: true
+        actor:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        details:
+          type: object
+          nullable: true
+
+    CheckInDelegationAuditResponse:
+      type: object
+      required: [vault_id, entries]
+      properties:
+        vault_id:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckInDelegationAuditEntry'
+
+    CheckInDelegationState:
+      type: object
+      required: [vault_id, owner]
+      properties:
+        vault_id:
+          type: string
+        owner:
+          type: string
+        delegate:
+          type: string
+          nullable: true
+        granted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    GrantCheckInDelegationRequest:
+      type: object
+      required: [owner, delegate]
+      properties:
+        owner:
+          type: string
+        delegate:
+          type: string
+
+    WithdrawalApprovalStatus:
+      type: string
+      enum: [pending, approved, cancelled, expired, executed]
+
+    WithdrawalApproval:
+      type: object
+      required: [withdrawal_id, approver, approved_at]
+      properties:
+        withdrawal_id:
+          type: string
+        approver:
+          type: string
+        approved_at:
+          type: string
+          format: date-time
+
+    WithdrawalApprovalWorkflow:
+      type: object
+      required:
+        - vault_id
+        - withdrawal_id
+        - amount
+        - requested_by
+        - required_approvers
+        - approval_ttl_seconds
+        - created_at
+        - expires_at
+        - status
+        - approvals
+      properties:
+        vault_id:
+          type: string
+        withdrawal_id:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        requested_by:
+          type: string
+        required_approvers:
+          type: array
+          items:
+            type: string
+        approval_ttl_seconds:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/WithdrawalApprovalStatus'
+        approvals:
+          type: array
+          items:
+            $ref: '#/components/schemas/WithdrawalApproval'
+        executed_tx_hash:
+          type: string
+          nullable: true
+
+    CreateWithdrawalApprovalRequest:
+      type: object
+      required: [requested_by, amount, required_approvers]
+      properties:
+        requested_by:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        required_approvers:
+          type: array
+          items:
+            type: string
+        approval_ttl_seconds:
+          type: integer
+          default: 172800
+          description: Seconds before a pending request auto-cancels (default 48h).
+
+    SubmitWithdrawalApprovalRequest:
+      type: object
+      required: [approver]
+      properties:
+        approver:
+          type: string
+
+    WithdrawalApprovalListResponse:
+      type: object
+      required: [vault_id, workflows]
+      properties:
+        vault_id:
+          type: string
+        workflows:
+          type: array
+          items:
+            $ref: '#/components/schemas/WithdrawalApprovalWorkflow'
 
     ComparisonResult:
       type: object

@@ -50,6 +50,13 @@ once_cell = "1"
 # (Issue #1176) both run through sqlx-sqlite, so rusqlite is no longer needed.
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
 
+# rusqlite powers the Db helpers in db.rs (open/migrate/upsert/get) and the
+# FTS5 full-text search index introduced by issue #2069. The `bundled`
+# feature compiles SQLite from source with FTS5 enabled, so the
+# `vault_search_fts` virtual table works regardless of the system libsqlite3
+# build. Compatible with the libsqlite3-sys 0.27 already pulled in by sqlx.
+rusqlite = { version = "0.30", features = ["bundled"] }
+
 # Push notifications (FCM via HTTP v1 API)
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
@@ -57,11 +64,18 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 jsonwebtoken = "9"
 
 # Distributed cache for multi-node consensus checks
-redis = "0.27"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # Recovery code generation and hashing
 rand = "0.8"
 sha2 = "0.10"
+base64 = "0.22"
+
+# URL encoding/decoding for form field values
+urlencoding = "2"
+
+# Multipart form parsing for CSRF validation of file-upload requests
+multer = "3"
 
 [dev-dependencies]
 tokio-test = "0.4"

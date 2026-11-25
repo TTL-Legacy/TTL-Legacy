@@ -30,10 +30,11 @@ impl RateLimitConfig {
 
 /// Selects which backend the rate limiter uses to persist counters.
 ///
-/// Defaults to [`RateLimitStore::Memory`] so local development keeps working
-/// without any external dependency. Set `RATE_LIMIT_STORE=redis` (and
-/// `REDIS_URL`) to share counters across processes/replicas so limits survive
-/// restarts.
+/// `RATE_LIMIT_STORE=memory` forces per-process counters (local development,
+/// single replica). `RATE_LIMIT_STORE=redis` shares counters across every
+/// replica through `REDIS_URL`. When `RATE_LIMIT_STORE` is unset, Redis is used
+/// automatically if `REDIS_URL` is set, because counters held in process memory
+/// are independent per replica and make the limit ineffective (issue #2134).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RateLimitStore {
     Memory,
@@ -43,19 +44,58 @@ pub enum RateLimitStore {
 impl RateLimitStore {
     /// Resolve the store from the environment.
     ///
-    /// `RATE_LIMIT_STORE` accepts `memory` (default) or `redis`. When `redis`
-    /// is selected, `REDIS_URL` must be set; otherwise we fall back to the
-    /// in-memory store so a misconfiguration never disables rate limiting.
+    /// | `RATE_LIMIT_STORE` | `REDIS_URL` | Result  |
+    /// |--------------------|-------------|---------|
+    /// | `memory`           | any         | Memory  |
+    /// | `redis`            | set         | Redis   |
+    /// | `redis`            | unset       | Memory (so a misconfiguration never disables rate limiting) |
+    /// | unset              | set         | Redis   |
+    /// | unset              | unset       | Memory  |
     pub fn from_env() -> Self {
+        let redis_url = std::env::var("REDIS_URL").ok().filter(|u| !u.is_empty());
         match std::env::var("RATE_LIMIT_STORE").as_deref() {
-            Ok("redis") => match std::env::var("REDIS_URL") {
-                Ok(url) if !url.is_empty() => RateLimitStore::Redis { url },
-                _ => RateLimitStore::Memory,
+            Ok("memory") => RateLimitStore::Memory,
+            Ok("redis") | Err(_) => match redis_url {
+                Some(url) => RateLimitStore::Redis { url },
+                None => RateLimitStore::Memory,
             },
-            _ => RateLimitStore::Memory,
+            Ok(_) => RateLimitStore::Memory,
         }
     }
 }
+
+/// What the limiter does when the Redis store is selected but unreachable.
+///
+/// Set with `RATE_LIMIT_FAIL_MODE`: `local` (default) or `deny`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RateLimitFailMode {
+    /// Fall back to the per-process counter. Requests keep flowing, but limits
+    /// are only enforced per replica until Redis recovers.
+    #[default]
+    Local,
+    /// Reject the request (HTTP 429). Strictest option for security-sensitive
+    /// deployments; an outage in Redis becomes an outage for rate-limited routes.
+    Deny,
+}
+
+impl RateLimitFailMode {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deny" | "closed" | "fail-closed" => RateLimitFailMode::Deny,
+            _ => RateLimitFailMode::Local,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        std::env::var("RATE_LIMIT_FAIL_MODE")
+            .map(|v| Self::parse(&v))
+            .unwrap_or_default()
+    }
+}
+
+/// Upper bound for any single Redis round trip, so a hung Redis cannot stall
+/// every request that passes through the limiter.
+const REDIS_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// In-memory sliding-window counter store. Per-process only; used as the
 /// default backend for development.
@@ -93,58 +133,95 @@ impl MemoryStore {
 }
 
 /// Redis-backed counter store so limits are shared across replicas and survive
-/// restarts. Uses a fixed-window counter keyed by `key` with a TTL equal to the
-/// configured window.
+/// restarts. Uses a fixed-window counter keyed by `key`.
+///
+/// A single auto-reconnecting multiplexed connection is created lazily and
+/// reused for every check, instead of opening a new TCP connection per request.
 #[derive(Clone)]
 pub struct RedisStore {
     client: redis::Client,
+    conn: Arc<tokio::sync::OnceCell<redis::aio::ConnectionManager>>,
 }
+
+/// Increments the counter and sets its expiry in one atomic step, so a key can
+/// never be left behind without a TTL.
+const RATE_LIMIT_SCRIPT: &str = r#"
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+return {count, ttl}
+"#;
 
 impl RedisStore {
     pub fn new(url: &str) -> Result<Self, redis::RedisError> {
         Ok(Self {
             client: redis::Client::open(url)?,
+            conn: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
-    /// Increment `key` and return `Ok(())` when the request is allowed, or
-    /// `Err(retry_after_secs)` when the window quota is exhausted.
-    ///
-    /// On any Redis error we fail open (allow the request) so a transient
-    /// outage does not take down the API.
+    fn redis_key(key: &str) -> String {
+        format!("rate_limit:{key}")
+    }
+
+    async fn connection(&self) -> Option<redis::aio::ConnectionManager> {
+        let client = self.client.clone();
+        let init = self.conn.get_or_try_init(|| async move {
+            redis::aio::ConnectionManager::new(client).await
+        });
+        match tokio::time::timeout(REDIS_TIMEOUT, init).await {
+            Ok(Ok(conn)) => Some(conn.clone()),
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "rate limiter: cannot connect to Redis");
+                None
+            }
+            Err(_) => {
+                tracing::warn!("rate limiter: timed out connecting to Redis");
+                None
+            }
+        }
+    }
+
+    /// Returns `None` when Redis cannot be reached, so the caller can apply the
+    /// configured [`RateLimitFailMode`]. Otherwise returns `Some(Ok(()))` when
+    /// the request is allowed, or `Some(Err(retry_after_secs))` when the quota
+    /// is exhausted.
     pub async fn check(
         &self,
         key: &str,
         max_requests: u32,
         window_secs: u64,
-    ) -> Result<(), u64> {
-        let mut conn = match self.client.get_async_connection().await {
-            Ok(conn) => conn,
-            Err(_) => return Ok(()),
-        };
+    ) -> Option<Result<(), u64>> {
+        let mut conn = self.connection().await?;
+        let redis_key = Self::redis_key(key);
 
-        let redis_key = format!("rate_limit:{key}");
-        let count: u32 = match redis::cmd("INCR")
-            .arg(&redis_key)
-            .query_async(&mut conn)
-            .await
-        {
-            Ok(count) => count,
-            Err(_) => return Ok(()),
+        let script = redis::Script::new(RATE_LIMIT_SCRIPT);
+        let mut invocation = script.key(&redis_key);
+        invocation.arg(window_secs);
+        let reply = tokio::time::timeout(REDIS_TIMEOUT, invocation.invoke_async(&mut conn)).await;
+        let (count, ttl): (u32, i64) = match reply {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "rate limiter: Redis script failed");
+                return None;
+            }
+            Err(_) => {
+                tracing::warn!("rate limiter: Redis script timed out");
+                return None;
+            }
         };
-
-        if count == 1 {
-            let _: Result<(), _> = redis::cmd("EXPIRE")
-                .arg(&redis_key)
-                .arg(window_secs)
-                .query_async(&mut conn)
-                .await;
-        }
 
         if count > max_requests {
-            Err(window_secs)
+            let retry_after = if ttl > 0 { ttl as u64 } else { window_secs };
+            Some(Err(retry_after))
         } else {
-            Ok(())
+            Some(Ok(()))
         }
     }
 }
@@ -239,6 +316,7 @@ pub struct RateLimiter {
     store: RateLimitStore,
     memory: MemoryStore,
     redis: Option<RedisStore>,
+    fail_mode: RateLimitFailMode,
     trusted_proxies: Arc<Vec<TrustedProxy>>,
 }
 
@@ -266,8 +344,16 @@ impl RateLimiter {
             store,
             memory: MemoryStore::new(),
             redis,
+            fail_mode: RateLimitFailMode::default(),
             trusted_proxies: Arc::new(trusted_proxies),
         }
+    }
+
+    /// Choose what happens when Redis is selected but unreachable.
+    #[must_use]
+    pub fn with_fail_mode(mut self, fail_mode: RateLimitFailMode) -> Self {
+        self.fail_mode = fail_mode;
+        self
     }
 
     /// Build a limiter using the store selected from the environment.
@@ -277,6 +363,7 @@ impl RateLimiter {
             RateLimitStore::from_env(),
             trusted_proxies_from_env(),
         )
+        .with_fail_mode(RateLimitFailMode::from_env())
     }
 
     /// Returns true when `ip` is one of the configured trusted proxies.
@@ -285,19 +372,37 @@ impl RateLimiter {
     }
 
     /// Check a single key against the configured quota.
+    ///
+    /// With the Redis store the counter is shared by every replica. If Redis is
+    /// selected but unreachable, the configured [`RateLimitFailMode`] decides
+    /// between the local per-process counter (default) and rejecting the
+    /// request.
     pub async fn check(&self, key: &str) -> Result<(), u64> {
-        match (&self.store, &self.redis) {
-            (RateLimitStore::Redis { .. }, Some(redis)) => {
-                redis
-                    .check(key, self.config.max_requests, self.config.window_secs)
-                    .await
-            }
-            _ => {
-                self.memory
-                    .check(key, self.config.max_requests, self.config.window_secs)
-                    .await
+        if matches!(self.store, RateLimitStore::Redis { .. }) {
+            let outcome = match &self.redis {
+                Some(redis) => {
+                    redis
+                        .check(key, self.config.max_requests, self.config.window_secs)
+                        .await
+                }
+                None => None,
+            };
+            match outcome {
+                Some(result) => return result,
+                None => {
+                    tracing::warn!(
+                        fail_mode = ?self.fail_mode,
+                        "rate limiter: Redis unavailable; applying fail mode"
+                    );
+                    if self.fail_mode == RateLimitFailMode::Deny {
+                        return Err(self.config.window_secs);
+                    }
+                }
             }
         }
+        self.memory
+            .check(key, self.config.max_requests, self.config.window_secs)
+            .await
     }
 }
 
@@ -459,17 +564,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn redis_store_fails_open_when_unreachable() {
-        // Point at an unreachable Redis; the store must fail open so a Redis
-        // outage does not take down the API.
+    async fn redis_store_returns_none_when_unreachable() {
+        // Point at an unreachable Redis; the store reports "unavailable" so the
+        // limiter can fall back to the local counter.
         let store = RedisStore::new("redis://127.0.0.1:1").expect("client builds");
-        assert!(store.check("k", 1, 60).await.is_ok());
+        assert!(store.check("k", 1, 60).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn limiter_falls_back_to_memory_when_redis_unreachable() {
+        let limiter = RateLimiter::with_store(
+            RateLimitConfig::new(1, 60),
+            RateLimitStore::Redis {
+                url: "redis://127.0.0.1:1".to_string(),
+            },
+        );
+        assert!(limiter.check("ip").await.is_ok());
+        assert_eq!(limiter.check("ip").await, Err(60));
+    }
+
+    #[tokio::test]
+    async fn limiter_denies_when_redis_unreachable_in_deny_mode() {
+        let limiter = RateLimiter::with_store(
+            RateLimitConfig::new(5, 60),
+            RateLimitStore::Redis {
+                url: "redis://127.0.0.1:1".to_string(),
+            },
+        )
+        .with_fail_mode(RateLimitFailMode::Deny);
+        assert_eq!(limiter.check("ip").await, Err(60));
     }
 
     #[test]
-    fn store_from_env_defaults_to_memory() {
+    fn fail_mode_parse() {
+        assert_eq!(RateLimitFailMode::parse("deny"), RateLimitFailMode::Deny);
+        assert_eq!(RateLimitFailMode::parse(" Closed "), RateLimitFailMode::Deny);
+        assert_eq!(RateLimitFailMode::parse("local"), RateLimitFailMode::Local);
+        assert_eq!(RateLimitFailMode::parse("garbage"), RateLimitFailMode::Local);
+    }
+
+    #[test]
+    fn redis_key_is_namespaced() {
+        assert_eq!(RedisStore::redis_key("1.2.3.4"), "rate_limit:1.2.3.4");
+    }
+
+    /// Environment-variable cases live in one test because the process
+    /// environment is shared between tests running in parallel.
+    #[test]
+    fn store_from_env_selection() {
         std::env::remove_var("RATE_LIMIT_STORE");
+        std::env::remove_var("REDIS_URL");
         assert_eq!(RateLimitStore::from_env(), RateLimitStore::Memory);
+
+        std::env::set_var("REDIS_URL", "redis://cache:6379");
+        let redis = RateLimitStore::Redis {
+            url: "redis://cache:6379".to_string(),
+        };
+        // Unset RATE_LIMIT_STORE + REDIS_URL => shared Redis counters.
+        assert_eq!(RateLimitStore::from_env(), redis);
+
+        std::env::set_var("RATE_LIMIT_STORE", "redis");
+        assert_eq!(RateLimitStore::from_env(), redis);
+
+        // An explicit opt-out still wins.
+        std::env::set_var("RATE_LIMIT_STORE", "memory");
+        assert_eq!(RateLimitStore::from_env(), RateLimitStore::Memory);
+
+        // redis requested but no URL: never disable limiting.
+        std::env::set_var("RATE_LIMIT_STORE", "redis");
+        std::env::remove_var("REDIS_URL");
+        assert_eq!(RateLimitStore::from_env(), RateLimitStore::Memory);
+
+        std::env::remove_var("RATE_LIMIT_STORE");
+    }
+
+    /// Acceptance test for issue #2134: two limiter instances (standing in for
+    /// two backend replicas) must share one counter.
+    ///
+    /// Requires a running Redis: `REDIS_URL=redis://127.0.0.1:6379 cargo test
+    /// -p ttl-legacy-backend -- --ignored shared_counter`.
+    #[tokio::test]
+    #[ignore = "requires a running Redis (set REDIS_URL)"]
+    async fn shared_counter_across_limiter_instances() {
+        let url = std::env::var("REDIS_URL").expect("REDIS_URL must be set");
+        let store = RateLimitStore::Redis { url };
+        let replica_a = RateLimiter::with_store(RateLimitConfig::new(2, 30), store.clone())
+            .with_fail_mode(RateLimitFailMode::Deny);
+        let replica_b = RateLimiter::with_store(RateLimitConfig::new(2, 30), store)
+            .with_fail_mode(RateLimitFailMode::Deny);
+        let key = format!("test-{}", uuid::Uuid::new_v4());
+
+        assert!(replica_a.check(&key).await.is_ok());
+        assert!(replica_b.check(&key).await.is_ok());
+        // Third request lands on either replica and must be rejected.
+        assert!(replica_a.check(&key).await.is_err());
+        assert!(replica_b.check(&key).await.is_err());
     }
 
     use axum::http::HeaderMap;

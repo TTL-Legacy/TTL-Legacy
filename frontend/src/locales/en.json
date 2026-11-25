@@ -17,6 +17,29 @@
     "checkInIntervalLabel": "Check-in interval (seconds)",
     "idLabel": "Vault ID"
   },
+  "vaultWizard": {
+    "stepBasic": "Basic Config",
+    "stepBeneficiaries": "Beneficiaries",
+    "stepReleaseConditions": "Release Conditions",
+    "stepVesting": "Vesting",
+    "stepReview": "Review & Sign",
+    "resumeDraft": "You have an unsaved vault creation draft. Resume or start fresh?",
+    "resume": "Resume",
+    "discard": "Discard",
+    "back": "← Back",
+    "next": "Next →",
+    "cancel": "Cancel",
+    "signAndCreate": "Sign and Create Vault",
+    "submitting": "Submitting…",
+    "draftSaved": "Draft saved",
+    "totalMustBe100": "(must equal 100)",
+    "noBeneficiaries": "Add at least one beneficiary",
+    "releaseConditionTtl": "TTL expiry",
+    "releaseConditionOwner": "Owner initiated",
+    "releaseConditionOracle": "Oracle",
+    "vestingEnabled": "Enable vesting schedule",
+    "cliffGraceHint": "Claims within this window after the cliff date incur no late-claim penalty."
+  },
   "upgradeProposal": {
     "title": "Upgrade Proposals",
     "pending": "Pending",
@@ -38,5 +61,18 @@
     "retry": "Retry",
     "confirm": "Confirm",
     "cancel": "Cancel"
+  },
+  "vaultNotes": {
+    "heading": "Vault notes",
+    "edit": "Edit",
+    "save": "Save",
+    "cancel": "Cancel",
+    "saving": "Saving…",
+    "noNotes": "No notes yet.",
+    "markdownLabel": "Markdown",
+    "previewLabel": "Preview",
+    "charCount": "{{current}} / {{max}}",
+    "saveError": "Save failed. Please try again.",
+    "ariaLabel": "Notes for vault {{vaultId}}"
   }
 }

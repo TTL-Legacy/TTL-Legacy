@@ -14,6 +14,31 @@ import type {
 
 export type ApiMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
 
+export type RestoreVerificationStatus = "passed" | "failed" | "unknown";
+
+export interface RestoreVerificationResult {
+  status: RestoreVerificationStatus;
+  verified_at: string | null;
+  backup_prefix: string | null;
+  details: string | null;
+}
+
+export type DrAlertSeverity = "warning" | "critical";
+
+export interface DrAlert {
+  id: string;
+  severity: DrAlertSeverity;
+  message: string;
+  triggered_at: string;
+}
+
+export interface DrStatusResponse {
+  last_successful_backup_at: string | null;
+  last_restore_verification: RestoreVerificationResult;
+  active_alerts: DrAlert[];
+  checked_at: string;
+}
+
 export interface ApiClientOptions {
   baseUrl?: string;
   credentials?: RequestCredentials;
@@ -161,6 +186,68 @@ export class ApiClient {
   public async getContractAdmin(): Promise<string> {
     const response = await this.request<{ admin: string }>("/api/admin/contract-admin");
     return response.admin;
+  }
+
+  // ── Vault notes (Issue #2055) ──────────────────────────────────────────────
+
+  /**
+   * Fetches the notes for a vault via `get_vault_notes`.
+   */
+  public async getVaultNotes(vaultId: string | number): Promise<GetVaultNotesResponse> {
+    return this.request<GetVaultNotesResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/notes`,
+    );
+  }
+
+  /**
+   * Persists vault notes via `set_vault_notes`.
+   */
+  public async setVaultNotes(
+    vaultId: string | number,
+    payload: SetVaultNotesRequest,
+  ): Promise<GetVaultNotesResponse> {
+    return this.request<GetVaultNotesResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/notes`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  }
+
+  // ── Check-in history (Issue #2052) ────────────────────────────────────────
+
+  /**
+   * Returns a paginated list of check-in records for a vault.
+   */
+  public async getCheckInHistory(
+    vaultId: string | number,
+    page = 0,
+    pageSize = 20,
+  ): Promise<CheckInHistoryResponse> {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return this.request<CheckInHistoryResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/check-in-history?${params}`,
+    );
+  }
+
+  // ── Vault pause history (Issue #2053) ─────────────────────────────────────
+
+  /**
+   * Returns paginated pause/resume events for a vault.
+   */
+  public async getVaultPauseHistory(
+    vaultId: string | number,
+    page = 0,
+    pageSize = 20,
+  ): Promise<PauseHistoryResponse> {
+    const params = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    return this.request<PauseHistoryResponse>(
+      `/api/vaults/${encodeURIComponent(String(vaultId))}/pause-history?${params}`,
+    );
   }
 
   public async request<T>(path: string, init: RequestInit = {}): Promise<T> {

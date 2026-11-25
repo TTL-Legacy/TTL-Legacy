@@ -1,4 +1,5 @@
 use crate::db::*;
+use crate::error::{ApiError, ApiErrorKind};
 use crate::models::*;
 use chrono::Utc;
 
@@ -6,12 +7,14 @@ pub fn generate_compliance_report(
     store: &VaultStore,
     event_store: &EventStore,
     vault_id: &str,
-) -> Result<ComplianceReport, String> {
+) -> Result<ComplianceReport, ApiError> {
     let vaults = store.lock().unwrap();
-    let vault = vaults
-        .get(vault_id)
-        .cloned()
-        .ok_or_else(|| "Vault not found".to_string())?;
+    let vault = vaults.get(vault_id).cloned().ok_or_else(|| {
+        ApiError::from_kind(
+            ApiErrorKind::VaultNotFound,
+            format!("Vault '{}' not found", vault_id),
+        )
+    })?;
 
     let history = get_vault_history(event_store, vault_id);
 
@@ -85,9 +88,13 @@ pub fn generate_compliance_report(
     })
 }
 
-pub fn export_compliance_report(report: &ComplianceReport, format: &str) -> Result<String, String> {
+pub fn export_compliance_report(
+    report: &ComplianceReport,
+    format: &str,
+) -> Result<String, ApiError> {
     match format {
-        "json" => Ok(serde_json::to_string_pretty(report).map_err(|e| e.to_string())?),
+        "json" => Ok(serde_json::to_string_pretty(report)
+            .map_err(|e| ApiError::from_kind(ApiErrorKind::Internal, e.to_string()))?),
         "pdf" => {
             // Minimal PDF export as text representation
             let mut pdf_content = String::new();
@@ -121,7 +128,10 @@ pub fn export_compliance_report(report: &ComplianceReport, format: &str) -> Resu
 
             Ok(pdf_content)
         }
-        _ => Err("Unsupported format".to_string()),
+        _ => Err(ApiError::from_kind(
+            ApiErrorKind::UnsupportedFormat,
+            format!("Unsupported format: {}", format),
+        )),
     }
 }
 
@@ -153,6 +163,34 @@ mod tests {
         assert_eq!(report.vault_id, "v1");
         assert_eq!(report.owner, "owner1");
         assert_eq!(report.current_balance, 1000);
+    }
+
+    #[test]
+    fn test_generate_compliance_report_vault_not_found() {
+        let store = create_vault_store();
+        let event_store = create_event_store();
+
+        let err = generate_compliance_report(&store, &event_store, "missing").unwrap_err();
+        assert_eq!(err.code, "vault_not_found");
+    }
+
+    #[test]
+    fn test_export_compliance_report_unsupported_format() {
+        let report = ComplianceReport {
+            vault_id: "v1".to_string(),
+            owner: "owner1".to_string(),
+            beneficiary: "ben1".to_string(),
+            report_generated_at: Utc::now(),
+            fund_movements: vec![],
+            beneficiary_changes: vec![],
+            ttl_history: vec![],
+            total_deposits: 1000,
+            total_withdrawals: 0,
+            current_balance: 1000,
+        };
+
+        let err = export_compliance_report(&report, "xml").unwrap_err();
+        assert_eq!(err.code, "unsupported_format");
     }
 
     #[test]

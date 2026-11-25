@@ -67,17 +67,15 @@ fn setup(
     let vault_id = client.create_vault(&owner, &beneficiary, &INTERVAL, &None);
     client.deposit(&vault_id, &owner, &deposit_amount);
 
-    let schedule_id = client
-        .set_vesting_schedule(
-            &vault_id,
-            &owner,
-            &start_time,
-            &vesting_interval,
-            &num_installments,
-            &deposit_amount,
-            &cliff_period,
-        )
-        .unwrap();
+    let schedule_id = client.set_vesting_schedule(
+        &vault_id,
+        &owner,
+        &start_time,
+        &vesting_interval,
+        &num_installments,
+        &deposit_amount,
+        &cliff_period,
+    );
 
     (env, owner, beneficiary, token_address, vault_id, schedule_id, client)
 }
@@ -86,13 +84,11 @@ fn setup(
 /// using the TTLExpiry condition. This matches the real on-chain flow.
 fn expire_and_release(env: &Env, vault_id: u64, owner: &Address, client: &TtlVaultContractClient) {
     // Set TTLExpiry as the release condition
-    client
-        .set_release_conditions(
-            &vault_id,
-            owner,
-            &vec![env, ReleaseCondition::TTLExpiry],
-        )
-        .unwrap();
+    client.set_release_conditions(
+        &vault_id,
+        owner,
+        &vec![env, ReleaseCondition::TTLExpiry],
+    );
     // Advance time past check_in_interval (INTERVAL seconds from vault creation at t=0)
     env.ledger().set_timestamp(INTERVAL + 1);
     client.trigger_release(&vault_id);
@@ -191,7 +187,7 @@ fn test_claim_vested_first_installment_linear() {
     let before         = token_client.balance(&beneficiary);
     let per_installment = deposit / installments as i128; // 1_000
 
-    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     assert_eq!(claimed, per_installment, "first installment should equal 1/4 of total");
     assert_eq!(token_client.balance(&beneficiary), before + per_installment,
         "beneficiary token balance must increase by one installment");
@@ -217,7 +213,7 @@ fn test_claim_vested_all_installments_sequentially() {
 
     for i in 1..=installments {
         env.ledger().set_timestamp(start_time + v_interval * i as u64 + 1);
-        let claimed  = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+        let claimed  = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
         let expected = if i < installments {
             per_installment
         } else {
@@ -249,7 +245,7 @@ fn test_claim_vested_batches_multiple_unlocked_installments() {
     // Advance past two installment windows without claiming
     env.ledger().set_timestamp(start_time + v_interval * 2 + 1);
 
-    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     let per_installment = deposit / installments as i128;
     assert_eq!(claimed, per_installment * 2, "should claim 2 installments at once");
 
@@ -309,10 +305,73 @@ fn test_claim_vested_cliff_allows_claim_after_expiry() {
     let token_client = token::Client::new(&env, &token_address);
     let before       = token_client.balance(&beneficiary);
 
-    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     assert!(claimed > 0, "claimed amount must be positive after cliff: got {}", claimed);
     assert!(token_client.balance(&beneficiary) > before,
         "beneficiary balance must increase after successful claim");
+}
+
+/// Regression: a pre-cliff query must not leave behind a cached value. Querying
+/// again after the cliff in the same environment must report the new amount.
+#[test]
+fn test_get_vesting_claimable_reflects_cliff_transition() {
+    let v_interval   = 86_400u64;           // 1 day
+    let cliff_period = 7 * 86_400u64;       // 7-day cliff
+    let installments = 12u32;
+    let deposit      = 12_000_000i128;
+    let start_time   = INTERVAL + 100;
+
+    let (env, owner, beneficiary, _token, vault_id, schedule_id, client) =
+        setup(deposit, start_time, v_interval, installments, cliff_period);
+
+    expire_and_release(&env, vault_id, &owner, &client);
+
+    // 1 day in — cliff is still 6 days away
+    env.ledger().set_timestamp(start_time + v_interval);
+    assert_eq!(client.get_vesting_claimable(&vault_id, &schedule_id), 0i128,
+        "nothing is claimable before the cliff");
+
+    // 1 second before the cliff — still zero
+    env.ledger().set_timestamp(start_time + cliff_period - 1);
+    assert_eq!(client.get_vesting_claimable(&vault_id, &schedule_id), 0i128,
+        "nothing is claimable 1 second before the cliff");
+
+    // Exactly at the cliff — the value must update without a claim or a TTL reset
+    env.ledger().set_timestamp(start_time + cliff_period);
+    let claimable = client.get_vesting_claimable(&vault_id, &schedule_id);
+    assert!(claimable > 0, "cliff transition must immediately expose unlocked installments");
+
+    // The view must agree with what claim_vested actually pays
+    let claimed = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
+    assert_eq!(claimed, claimable, "get_vesting_claimable must match the claim payout");
+
+    // After the claim the same query must drop back to zero at the same timestamp
+    assert_eq!(client.get_vesting_claimable(&vault_id, &schedule_id), 0i128,
+        "claimed installments must no longer be reported as claimable");
+}
+
+/// The view keeps tracking time after the cliff; it is not pinned to the value
+/// computed on the first post-cliff call.
+#[test]
+fn test_get_vesting_claimable_tracks_time_after_cliff() {
+    let v_interval   = 100u64;
+    let cliff_period = 300u64;
+    let installments = 8u32;
+    let deposit      = 8_000i128;
+    let start_time   = INTERVAL + 200;
+
+    let (env, owner, _beneficiary, _token, vault_id, schedule_id, client) =
+        setup(deposit, start_time, v_interval, installments, cliff_period);
+
+    expire_and_release(&env, vault_id, &owner, &client);
+
+    env.ledger().set_timestamp(start_time + cliff_period);
+    let at_cliff = client.get_vesting_claimable(&vault_id, &schedule_id);
+    assert!(at_cliff > 0, "value at cliff must be positive");
+
+    env.ledger().set_timestamp(start_time + cliff_period + 2 * v_interval);
+    let later = client.get_vesting_claimable(&vault_id, &schedule_id);
+    assert!(later > at_cliff, "value must grow as further installments unlock");
 }
 
 /// A zero cliff period means the first installment is claimable immediately at start_time.
@@ -381,7 +440,7 @@ fn test_claim_vested_double_claim_same_window_fails() {
     env.ledger().set_timestamp(start_time + v_interval + 1);
 
     // First claim succeeds
-    client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     // Second claim in same window must fail
     let result = client.try_claim_vested(&vault_id, &schedule_id, &beneficiary);
     assert!(result.is_err(), "double claim in same window must fail");
@@ -402,7 +461,7 @@ fn test_claim_vested_all_claimed_returns_complete_error() {
 
     // Advance past all installments and claim everything
     env.ledger().set_timestamp(start_time + v_interval * installments as u64 + 1);
-    client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    client.claim_vested(&vault_id, &schedule_id, &beneficiary);
 
     // Any further claim must fail
     let result = client.try_claim_vested(&vault_id, &schedule_id, &beneficiary);
@@ -431,17 +490,17 @@ fn test_claim_vested_last_installment_absorbs_remainder() {
 
     // Installment 1
     env.ledger().set_timestamp(start_time + v_interval + 1);
-    let c1 = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    let c1 = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     assert_eq!(c1, per_installment, "installment 1 must equal floor(deposit/n)");
 
     // Installment 2
     env.ledger().set_timestamp(start_time + v_interval * 2 + 1);
-    let c2 = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    let c2 = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     assert_eq!(c2, per_installment, "installment 2 must equal floor(deposit/n)");
 
     // Installment 3 (last) — must absorb the 2-stroop remainder
     env.ledger().set_timestamp(start_time + v_interval * 3 + 1);
-    let c3 = client.claim_vested(&vault_id, &schedule_id, &beneficiary).unwrap();
+    let c3 = client.claim_vested(&vault_id, &schedule_id, &beneficiary);
     let expected_last = deposit - per_installment * 2; // 1_000_001 - 666_666 = 333_335
     assert_eq!(c3, expected_last, "last installment must absorb the remainder");
 
