@@ -12,7 +12,9 @@ import com.ttllegacy.models.PasskeyRegisterRequest
 import com.ttllegacy.models.PasskeyVerifyRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
-import org.json.JSONArray
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.Base64
@@ -24,6 +26,30 @@ import kotlin.coroutines.resumeWithException
 /** Sentinel token written to [TokenProvider] when the app falls back to biometric auth. */
 internal const val BIOMETRIC_FALLBACK_TOKEN = "biometric-fallback-session"
 
+internal fun buildPasskeyRegistrationRequestJson(challenge: String, username: String): String =
+    buildJsonObject {
+        put("challenge", challenge)
+        put("rp", buildJsonObject {
+            put("id", "ttl-legacy.app")
+            put("name", "TTL-Legacy")
+        })
+        put("user", buildJsonObject {
+            put("id", Base64.getUrlEncoder().withoutPadding().encodeToString(username.toByteArray()))
+            put("name", username)
+            put("displayName", username)
+        })
+        put("pubKeyCredParams", buildJsonArray {
+            add(buildJsonObject {
+                put("type", "public-key")
+                put("alg", -7)
+            })
+        })
+        put("authenticatorSelection", buildJsonObject {
+            put("requireResidentKey", true)
+            put("userVerification", "required")
+        })
+    }.toString()
+
 @Singleton
 class PasskeyService @Inject constructor(
     private val apiClient: ApiClient,
@@ -33,18 +59,7 @@ class PasskeyService @Inject constructor(
 
     suspend fun register(activity: Activity, username: String): Result<Unit> = runCatching {
         val challenge = requireSuccess(apiClient.getChallenge()).challenge
-        val requestJson = JSONObject().apply {
-            put("challenge", challenge)
-            put("rp", JSONObject().put("id", "ttl-legacy.app").put("name", "TTL-Legacy"))
-            put("user", JSONObject()
-                .put("id", Base64.getUrlEncoder().withoutPadding().encodeToString(username.toByteArray()))
-                .put("name", username).put("displayName", username))
-            put("pubKeyCredParams", JSONArray().put(JSONObject().put("type", "public-key").put("alg", -7)))
-            put("authenticatorSelection", JSONObject()
-                .put("authenticatorAttachment", "platform")
-                .put("requireResidentKey", true)
-                .put("userVerification", "required"))
-        }.toString()
+        val requestJson = buildPasskeyRegistrationRequestJson(challenge, username)
 
         val credManager = CredentialManager.create(activity)
         val resp = credManager.createCredential(activity, CreatePublicKeyCredentialRequest(requestJson))

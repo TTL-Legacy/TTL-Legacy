@@ -171,3 +171,121 @@ fn test_set_beneficiaries_invalid_second_call_does_not_mutate_state() {
     assert_eq!(sum, 10_000, "state must not change after rejected call");
     assert_eq!(stored.len(), 2, "beneficiary count must remain 2");
 }
+
+// ===========================================================================
+// Issue #2042 — update_beneficiary_share must re-validate the full BPS sum
+// ===========================================================================
+
+/// Updating a share to a value that keeps the sum at exactly 10 000 must succeed.
+#[test]
+fn test_update_beneficiary_share_valid_keeps_sum_10000() {
+    let (env, owner, _, client) = setup();
+    let b1 = Address::generate(&env);
+    let b2 = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &b1, &3_600u64, &None);
+
+    // Initial split: 60/40
+    let initial = vec![
+        &env,
+        BeneficiaryEntry { address: b1.clone(), bps: 6_000, minimum_threshold: 0 },
+        BeneficiaryEntry { address: b2.clone(), bps: 4_000, minimum_threshold: 0 },
+    ];
+    client.set_beneficiaries(&vault_id, &owner, &initial);
+
+    // Change b1 from 6000 → 7000 and b2 from 4000 → 3000 (sum still 10 000)
+    // First update b2 to 3000
+    let result = client.try_update_beneficiary_share(&vault_id, &owner, &b2, &3_000u32);
+    // This should fail because after updating b2 to 3000, sum = 6000 + 3000 = 9000 ≠ 10000
+    assert!(
+        result.is_err(),
+        "update that breaks sum invariant must be rejected"
+    );
+    let err = result.unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        soroban_sdk::Error::from_contract_error(ContractError::InvalidBps as u32),
+        "error must be InvalidBps"
+    );
+
+    // Verify state is unchanged
+    let stored = client.get_vault(&vault_id).beneficiaries;
+    let sum: u32 = stored.iter().map(|e| e.bps).sum();
+    assert_eq!(sum, 10_000, "state must not change after rejected share update");
+}
+
+/// update_beneficiary_share where the new value does not break the sum should succeed.
+/// We set both beneficiaries back to 50/50 by updating in a valid way.
+#[test]
+fn test_update_beneficiary_share_exact_10000_sum_accepted() {
+    let (env, owner, _, client) = setup();
+    let b1 = Address::generate(&env);
+    let b2 = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &b1, &3_600u64, &None);
+
+    // Start: 50/50 — both values already equal 10 000
+    let initial = vec![
+        &env,
+        BeneficiaryEntry { address: b1.clone(), bps: 5_000, minimum_threshold: 0 },
+        BeneficiaryEntry { address: b2.clone(), bps: 5_000, minimum_threshold: 0 },
+    ];
+    client.set_beneficiaries(&vault_id, &owner, &initial);
+
+    // "Update" b1 to the same value (5000) — sum stays 10 000, must succeed
+    let result = client.try_update_beneficiary_share(&vault_id, &owner, &b1, &5_000u32);
+    assert!(
+        result.is_ok(),
+        "update that preserves 10 000 sum must succeed"
+    );
+}
+
+/// update_beneficiary_share on a non-existent beneficiary must fail with InvalidBeneficiary.
+#[test]
+fn test_update_beneficiary_share_unknown_address_rejected() {
+    let (env, owner, _, client) = setup();
+    let b1 = Address::generate(&env);
+    let unknown = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &b1, &3_600u64, &None);
+
+    let initial = vec![
+        &env,
+        BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
+    ];
+    client.set_beneficiaries(&vault_id, &owner, &initial);
+
+    let result = client.try_update_beneficiary_share(&vault_id, &owner, &unknown, &5_000u32);
+    assert!(
+        result.is_err(),
+        "update on unknown address must be rejected"
+    );
+    let err = result.unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        soroban_sdk::Error::from_contract_error(ContractError::InvalidBeneficiary as u32),
+        "error must be InvalidBeneficiary"
+    );
+}
+
+/// Non-owner cannot call update_beneficiary_share.
+#[test]
+fn test_update_beneficiary_share_non_owner_rejected() {
+    let (env, owner, _, client) = setup();
+    let b1 = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    let vault_id = client.create_vault(&owner, &b1, &3_600u64, &None);
+
+    let initial = vec![
+        &env,
+        BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
+    ];
+    client.set_beneficiaries(&vault_id, &owner, &initial);
+
+    let result = client.try_update_beneficiary_share(&vault_id, &attacker, &b1, &5_000u32);
+    assert!(
+        result.is_err(),
+        "non-owner must not be able to update beneficiary share"
+    );
+}

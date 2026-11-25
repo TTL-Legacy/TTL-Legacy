@@ -1,244 +1,301 @@
 #![cfg(test)]
 
+//! Tests for vault-level pause/resume (Issue #790).
+//!
+//! Issue #2031: in-flight check-in transactions that land in the same ledger
+//! as the pause must be blocked before any state mutation.  The pause gate is
+//! evaluated at the top of every check-in path so that `CHECK_IN_RECORDED_TOPIC`
+//! is never emitted and `last_check_in` is never updated for a paused vault.
+
+use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     Address, Env,
 };
 
+use crate::tests::common::setup_with_roles as setup;
+
+// ─── pause / resume basic behaviour ─────────────────────────────────────────
+
 #[test]
 fn test_pause_vault_owner_only() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let non_owner = Address::generate(&env);
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test that only vault owner can pause the vault
-    // Non-owner should be rejected with authorization error
+    let non_owner = Address::generate(&env);
+    let result = client.try_pause_vault(&vault_id, &non_owner);
+    assert!(result.is_err(), "non-owner must not be allowed to pause vault");
 }
 
 #[test]
 fn test_pause_vault_sets_flag() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test that pause_vault sets the paused flag to true
-    // Vault state should reflect paused status
+    client.pause_vault(&vault_id, &owner);
+    assert!(
+        client.is_vault_paused(&vault_id),
+        "vault must be paused after pause_vault"
+    );
 }
 
 #[test]
 fn test_pause_vault_active_vault() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test pausing an active vault
-    // Should succeed and change vault state to paused
+    // Should succeed on an active vault.
+    let result = client.try_pause_vault(&vault_id, &owner);
+    assert!(result.is_ok(), "pausing an active vault must succeed");
 }
 
 #[test]
 fn test_pause_vault_already_paused() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test pausing a vault that is already paused
-    // Should handle idempotently or return error
-}
-
-#[test]
-fn test_pause_vault_hibernating_vault() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test pausing a vault that is in hibernation
-    // Should not interfere with hibernation state
+    client.pause_vault(&vault_id, &owner);
+    // Idempotent: pausing again should not panic.
+    let result = client.try_pause_vault(&vault_id, &owner);
+    assert!(
+        result.is_ok(),
+        "pausing an already-paused vault must be idempotent"
+    );
+    assert!(client.is_vault_paused(&vault_id));
 }
 
 #[test]
 fn test_pause_vault_released_vault() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&owner, &vault_id, &100_000i128);
 
-    // Test that pause is rejected on released vault
-    // Vault already released should not be pausable
+    // Check in then expire.
+    env.ledger().set_timestamp(10);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+    env.ledger().set_timestamp(10 + interval + 1);
+    client.trigger_release(&vault_id);
+
+    // Pausing a released vault should be rejected.
+    let result = client.try_pause_vault(&vault_id, &owner);
+    assert!(
+        result.is_err(),
+        "pausing a released vault must be rejected"
+    );
 }
+
+// ─── resume ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_resume_vault_owner_only() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let non_owner = Address::generate(&env);
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.pause_vault(&vault_id, &owner);
 
-    // Test that only owner can resume a paused vault
-    // Non-owner should be rejected with authorization error
+    let non_owner = Address::generate(&env);
+    let result = client.try_resume_vault(&vault_id, &non_owner);
+    assert!(result.is_err(), "non-owner must not be allowed to resume vault");
 }
 
 #[test]
 fn test_resume_vault_clears_flag() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test that resume_vault clears the paused flag
-    // Vault should return to active state
+    client.pause_vault(&vault_id, &owner);
+    assert!(client.is_vault_paused(&vault_id));
+
+    client.resume_vault(&vault_id, &owner);
+    assert!(
+        !client.is_vault_paused(&vault_id),
+        "vault must not be paused after resume_vault"
+    );
 }
 
 #[test]
 fn test_resume_vault_paused_vault() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.pause_vault(&vault_id, &owner);
 
-    // Test resuming a paused vault
-    // Should succeed and restore to active state
+    let result = client.try_resume_vault(&vault_id, &owner);
+    assert!(result.is_ok(), "resuming a paused vault must succeed");
+    assert!(!client.is_vault_paused(&vault_id));
 }
 
 #[test]
 fn test_resume_vault_not_paused() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test resuming a vault that is not paused
-    // Should handle idempotently or return error
+    // Resume on a non-paused vault is idempotent.
+    let result = client.try_resume_vault(&vault_id, &owner);
+    assert!(
+        result.is_ok(),
+        "resuming a non-paused vault must be idempotent"
+    );
+    assert!(!client.is_vault_paused(&vault_id));
 }
+
+// ─── trigger_release interaction ─────────────────────────────────────────────
 
 #[test]
 fn test_trigger_release_blocked_while_paused() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&owner, &vault_id, &100_000i128);
 
-    // Test that trigger_release is blocked when vault is paused
-    // Should return error preventing release during pause
+    // Check in and expire.
+    env.ledger().set_timestamp(10);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+    env.ledger().set_timestamp(10 + interval + 1);
+
+    // Pause before release.
+    client.pause_vault(&vault_id, &owner);
+
+    let result = client.try_trigger_release(&vault_id);
+    assert!(
+        result.is_err(),
+        "trigger_release must be blocked while vault is paused"
+    );
+    assert_eq!(
+        client.get_release_status(&vault_id),
+        ReleaseStatus::Locked,
+        "status must remain Locked when trigger_release is blocked by pause"
+    );
 }
 
 #[test]
 fn test_trigger_release_allowed_after_resume() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 500u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
+    client.deposit(&owner, &vault_id, &100_000i128);
 
-    // Test that trigger_release works after resuming paused vault
-    // Should proceed normally once vault is resumed
+    // Check in and expire.
+    env.ledger().set_timestamp(10);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+    env.ledger().set_timestamp(10 + interval + 1);
+
+    // Pause then resume.
+    client.pause_vault(&vault_id, &owner);
+    client.resume_vault(&vault_id, &owner);
+
+    // Release should now succeed.
+    client.trigger_release(&vault_id);
+    assert_eq!(
+        client.get_vault(&vault_id).status,
+        ReleaseStatus::Released,
+        "vault must be Released after trigger_release following resume"
+    );
 }
 
+// ─── Issue #2031: pause gate evaluated before any state mutation ──────────────
+
+/// When a vault is paused and a check-in is attempted, the check-in must be
+/// fully rejected: `last_check_in` must NOT be updated and
+/// `CHECK_IN_RECORDED_TOPIC` must NOT be emitted.
+///
+/// This test verifies that the pause gate sits before all state mutations in
+/// the check-in path so that "in-flight" transactions hitting the same ledger
+/// as a pause are silently dropped without altering vault state.
 #[test]
-fn test_checkin_extends_ttl_while_paused() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let initial_ttl: u64 = 86400;
+fn test_paused_vault_check_in_does_not_mutate_state() {
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test that check_in extends TTL even while vault is paused
-    // Pause should not block TTL extension on check-in
+    // Perform an initial check-in to establish a known last_check_in baseline.
+    env.ledger().set_timestamp(1_000);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+    let baseline_last_check_in = client.get_vault(&vault_id).last_check_in;
+    assert_eq!(
+        baseline_last_check_in, 1_000,
+        "baseline last_check_in must equal the initial check-in timestamp"
+    );
+
+    // Pause the vault.
+    client.pause_vault(&vault_id, &owner);
+    assert!(client.is_vault_paused(&vault_id));
+
+    // Advance time and attempt a check-in while paused.
+    env.ledger().set_timestamp(2_000);
+    let result = client.try_check_in(&vault_id, &owner, &None, &None, &None);
+    assert!(
+        result.is_err(),
+        "check_in must fail when vault is paused"
+    );
+
+    // last_check_in must remain at the pre-pause value — no state mutation.
+    let vault_after = client.get_vault(&vault_id);
+    assert_eq!(
+        vault_after.last_check_in,
+        baseline_last_check_in,
+        "last_check_in must not be updated when check_in is blocked by pause \
+         (Issue #2031: pause gate must precede all state mutations)"
+    );
 }
 
+/// Resuming the vault after a pause allows the next check-in to proceed and
+/// updates last_check_in normally.
 #[test]
-fn test_ttl_frozen_while_paused() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+fn test_check_in_resumes_after_vault_unpause() {
+    let (env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test that TTL countdown is frozen when vault is paused
-    // Time should not progress toward expiry while paused
+    env.ledger().set_timestamp(1_000);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    client.pause_vault(&vault_id, &owner);
+    env.ledger().set_timestamp(2_000);
+    // Blocked while paused.
+    let _ = client.try_check_in(&vault_id, &owner, &None, &None, &None);
+
+    // Resume and check in again.
+    client.resume_vault(&vault_id, &owner);
+    env.ledger().set_timestamp(3_000);
+    client.check_in(&vault_id, &owner, &None, &None, &None);
+
+    let vault = client.get_vault(&vault_id);
+    assert_eq!(
+        vault.last_check_in, 3_000,
+        "last_check_in must be updated after check-in following resume"
+    );
 }
 
-#[test]
-fn test_ttl_resumes_countdown_after_pause() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test that TTL resumes normal countdown after pause is lifted
-    // Should continue from where it left off
-}
-
-#[test]
-fn test_vault_paused_event() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test that VaultPaused event is emitted when pause_vault is called
-    // Event should include vault_id and timestamp
-}
-
-#[test]
-fn test_vault_resumed_event() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test that VaultResumed event is emitted when resume_vault is called
-    // Event should include vault_id and timestamp
-}
+// ─── pause / resume cycle ────────────────────────────────────────────────────
 
 #[test]
 fn test_pause_resume_cycle() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
+    let (_env, owner, beneficiary, _admin, _token_address, client) = setup();
+    let interval = 3_600u64;
+    let vault_id = client.create_vault(&owner, &beneficiary, &interval, &None);
 
-    // Test pause -> resume -> pause -> resume cycle
-    // Should handle multiple state transitions correctly
+    for _ in 0..3 {
+        client.pause_vault(&vault_id, &owner);
+        assert!(client.is_vault_paused(&vault_id));
+        client.resume_vault(&vault_id, &owner);
+        assert!(!client.is_vault_paused(&vault_id));
+    }
 }
+
+// ─── nonexistent vault ───────────────────────────────────────────────────────
 
 #[test]
 fn test_pause_vault_nonexistent() {
-    let env = Env::new();
-    let nonexistent_id: u64 = 99999;
-    let owner = Address::generate(&env);
-
-    // Test pausing a nonexistent vault
-    // Should return error for invalid vault_id
-}
-
-#[test]
-fn test_pause_duration_not_required() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test that pause doesn't require specifying a duration
-    // Unlike hibernation, pause should be indefinite until resumed
-}
-
-#[test]
-fn test_pause_allows_beneficiary_changes() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-    let beneficiary = Address::generate(&env);
-    let new_beneficiary = Address::generate(&env);
-
-    // Test that beneficiary changes are allowed while vault is paused
-    // Pause should not prevent updating beneficiary
-}
-
-#[test]
-fn test_pause_prevents_release_overrides() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test that release overrides are blocked while paused
-    // Force release should not bypass pause protection
-}
-
-#[test]
-fn test_pause_wallet_view_indicator() {
-    let env = Env::new();
-    let vault_id: u64 = 1;
-    let owner = Address::generate(&env);
-
-    // Test that wallet shows clear indication when vault is paused
-    // Frontend should display pause status prominently
+    let (env, _owner, _beneficiary, _admin, _token_address, client) = setup();
+    let fake_caller = Address::generate(&env);
+    let result = client.try_pause_vault(&99999u64, &fake_caller);
+    assert!(result.is_err(), "pausing a nonexistent vault must fail");
 }

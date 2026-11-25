@@ -4,9 +4,9 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env,
+    vec, Address, Env, IntoVal, Symbol, TryIntoVal,
 };
 
 fn setup_clawback_env() -> (
@@ -41,7 +41,7 @@ fn test_clawback_within_grace_period() {
     let (env, owner, _, client) = setup_clawback_env();
     let b1 = Address::generate(&env);
 
-    let vault_id = client.create_vault(&owner, &b1, &100);
+    let vault_id = client.create_vault(&owner, &b1, &3_600, &None);
     let entries = vec![
         &env,
         BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
@@ -60,6 +60,22 @@ fn test_clawback_within_grace_period() {
     let vault = client.get_vault(&vault_id);
     let bps = vault.beneficiaries.iter().find(|e| e.address == b1).unwrap().bps;
     assert_eq!(bps, 0u32, "BPS should be zeroed after clawback");
+
+    let clawback_event = env.events().all().iter().find_map(|e| {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone().into_val(&env);
+        let topic0: Symbol = topics.get(0)?.try_into_val(&env).ok()?;
+        let topic1: u64 = topics.get(1)?.try_into_val(&env).ok()?;
+        if topic0 == FUNDS_CLAWEDBACK_TOPIC && topic1 == vault_id {
+            e.2.try_into_val(&env).ok()
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        clawback_event,
+        Some((b1.clone(), 10_000u32)),
+        "clawback event should be emitted with beneficiary and reclaimed amount"
+    );
 }
 
 /// Clawback after the grace period expires is rejected.
@@ -68,7 +84,7 @@ fn test_clawback_after_grace_period_rejected() {
     let (env, owner, _, client) = setup_clawback_env();
     let b1 = Address::generate(&env);
 
-    let vault_id = client.create_vault(&owner, &b1, &100);
+    let vault_id = client.create_vault(&owner, &b1, &3_600, &None);
     let entries = vec![
         &env,
         BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
@@ -90,7 +106,7 @@ fn test_clawback_without_release_mark_rejected() {
     let (env, owner, _, client) = setup_clawback_env();
     let b1 = Address::generate(&env);
 
-    let vault_id = client.create_vault(&owner, &b1, &100);
+    let vault_id = client.create_vault(&owner, &b1, &3_600, &None);
     let entries = vec![
         &env,
         BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },
@@ -108,7 +124,7 @@ fn test_clawback_rejects_non_owner() {
     let b1 = Address::generate(&env);
     let impostor = Address::generate(&env);
 
-    let vault_id = client.create_vault(&owner, &b1, &100);
+    let vault_id = client.create_vault(&owner, &b1, &3_600, &None);
     let entries = vec![
         &env,
         BeneficiaryEntry { address: b1.clone(), bps: 10_000, minimum_threshold: 0 },

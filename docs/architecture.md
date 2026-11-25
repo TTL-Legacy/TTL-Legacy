@@ -127,6 +127,83 @@ TTL-Legacy operates on a public blockchain, so all contract state is inherently 
 
 This project treats privacy as a best-effort layer layered on top of public blockchain state, not as a guarantee that all beneficiary identities stay hidden forever. The commitment path is offered as an opt-in mechanism for users who value privacy more than maximum compatibility.
 
+## Check-In Delegation Model
+
+The check-in delegation system lets a vault owner authorise one or more third-party addresses (service providers, automated bots, trusted contacts) to submit check-ins on their behalf without granting any other vault privileges.
+
+### Roles
+
+| Role | Description |
+| :--- | :--- |
+| **Delegator** | The vault owner. The only address that can add or remove delegates. |
+| **Delegate** | An address authorised to call `check_in_as_delegate` for a specific vault. A delegate cannot withdraw funds, update beneficiaries, transfer ownership, or pause the vault. |
+
+### Data Model
+
+Delegation state is stored in two persistent keys per vault:
+
+| Storage Key | Type | Description |
+| :--- | :--- | :--- |
+| `CheckInDelegates(vault_id)` | `Vec<Address>` | Ordered list of all currently authorised delegates. |
+| `CheckInDelegateExpiry(vault_id, delegate)` | `u64` | Optional Unix timestamp after which this specific delegation is invalid. Absent when no expiry was set. |
+| `DelegateNonce(vault_id, delegate)` | `u64` | Monotonically incrementing counter used to prevent replay attacks. Starts at 0 and incremented on every accepted delegate check-in. |
+
+### Delegation Scope
+
+A delegate may only call `check_in_as_delegate`. All other state-mutating entry points (`withdraw`, `update_beneficiary`, `transfer_ownership`, etc.) require the vault owner's direct authorisation and are not reachable via a delegation.
+
+The delegate does not need a passkey. `check_in_as_delegate` skips passkey and signature validation and relies solely on Soroban's `require_auth` for the delegate address.
+
+### Expiry
+
+When a delegation is created via `delegate_check_in`, an optional `expiry` timestamp (Unix seconds) can be supplied. At check-in time the contract compares `env.ledger().timestamp()` against the stored expiry. If `now > expiry`, the call returns `DelegateExpired` (error 110) and the nonce is not incremented.
+
+A delegation with no expiry remains valid until explicitly revoked.
+
+### Nonce and Replay Prevention
+
+Every successful `check_in_as_delegate` call must supply a `nonce` value equal to the current stored nonce for `(vault_id, delegate)`. The contract increments the stored nonce after a successful check-in. Submitting a stale or replayed nonce returns `InvalidNonce` (error 83).
+
+Clients must read the current nonce with `get_delegate_nonce(vault_id, delegate)` before constructing a check-in transaction.
+
+### Revocation
+
+The delegator calls `remove_check_in_delegate(vault_id, caller, delegate)` to revoke a delegation immediately. The delegate address is removed from `CheckInDelegates` and the expiry record (if any) is left in storage but becomes unreachable. There is no on-chain grace period after revocation.
+
+| Event Topic | Emitted When |
+| :--- | :--- |
+| `del_ci` | A delegate is added via `add_check_in_delegate` or `delegate_check_in`. |
+| `rev_del` | A delegate is removed via `remove_check_in_delegate`. |
+
+### Trust Assumptions
+
+- The contract trusts Soroban's `require_auth` to verify that the delegate signed the transaction. No additional proof-of-identity is performed.
+- Delegate authorisation is vault-scoped. The same address can be a delegate for multiple vaults with independent nonces.
+- An admin pause or vault freeze blocks `check_in_as_delegate` exactly as it blocks a direct owner check-in.
+- Releasing a vault (`trigger_release`) automatically invalidates all delegations because the vault status changes from `Locked`; subsequent delegate check-in calls return `AlreadyReleased`.
+
+### API Summary
+
+```rust
+// Add a permanent delegate (owner only)
+add_check_in_delegate(vault_id, caller, delegate) -> Result<(), ContractError>
+
+// Add a delegate with an optional expiry timestamp (owner only)
+delegate_check_in(vault_id, caller, delegate_address, expiry: Option<u64>) -> Result<(), ContractError>
+
+// Remove a delegate immediately (owner only)
+remove_check_in_delegate(vault_id, caller, delegate) -> Result<(), ContractError>
+
+// Perform a check-in as a registered delegate
+check_in_as_delegate(vault_id, caller, nonce) -> Result<(), ContractError>
+
+// Query helpers
+get_check_in_delegates(vault_id) -> Vec<Address>
+is_check_in_delegate_pub(vault_id, delegate) -> bool
+```
+
+---
+
 ## Component Documentation
 
 For detailed information on specific components, please refer to the following:

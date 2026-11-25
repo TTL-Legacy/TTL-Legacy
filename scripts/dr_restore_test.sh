@@ -6,6 +6,15 @@
 #   2. Verify trap cleanup on early exit
 #   3. Verify mktemp is used for all temporary files
 #   4. Verify restrictive permissions on restored DB
+#   5. Verify multiple temp files cleanup
+#   6. Verify corrupt backup file exits non-zero with a clear error message
+#   7. verify_schema_version passes when restored DB version matches the
+#      expected backend version
+#   8. verify_schema_version aborts when the restored version is behind
+#   9. verify_schema_version aborts when the restored version is ahead
+#  10. verify_schema_version fails closed when _sqlx_migrations is missing
+#  11. verify_schema_version fails closed when the restored DB is missing
+#  12. expected_migration_version derives the latest backend migration version
 
 set -euo pipefail
 
@@ -15,6 +24,8 @@ trap 'rm -rf "${TEST_DIR}"' EXIT
 
 log() { echo "[dr_restore_test] $*"; }
 fail() { echo "[dr_restore_test] FAIL: $*" >&2; exit 1; }
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Test 1: Verify mktemp files are created and cleaned up properly
 test_temp_file_cleanup() {
@@ -68,7 +79,8 @@ EOF
 
     # After script exit, temp file should be cleaned up
     if [[ -f "${temp_marker}" ]]; then
-        local temp_file=$(cat "${temp_marker}")
+        local temp_file
+        temp_file=$(cat "${temp_marker}")
         if [[ -f "${temp_file}" ]]; then
             fail "Temp file was not cleaned up on exit: ${temp_file}"
         fi
@@ -223,6 +235,193 @@ EOF
     log "  ✓ Corrupt backup file exits non-zero (exit code: ${exit_code}) with error message"
 }
 
+# ---------------------------------------------------------------------------
+# Tests for verify_schema_version (Issue #2149)
+# ---------------------------------------------------------------------------
+
+# Extract the schema-version functions (and the log/die helpers they call)
+# from the real dr_restore.sh so the tests below exercise the actual
+# implementation rather than a copy of it.
+EXTRACTED_FUNCS="${TEST_DIR}/extracted_schema_functions.sh"
+{
+    sed -n \
+        -e '/^expected_migration_version() {$/,/^}$/p' \
+        -e '/^latest_applied_migration_version() {$/,/^}$/p' \
+        -e '/^verify_schema_version() {$/,/^}$/p' \
+        "${REPO_ROOT}/scripts/dr_restore.sh"
+    grep -F 'log()  { echo "[dr_restore] $*"; }' "${REPO_ROOT}/scripts/dr_restore.sh"
+    grep -F 'die()  { echo "[dr_restore] ERROR: $*" >&2; exit 1; }' "${REPO_ROOT}/scripts/dr_restore.sh"
+} > "${EXTRACTED_FUNCS}"
+
+if ! grep -q "verify_schema_version()" "${EXTRACTED_FUNCS}"; then
+    fail "Failed to extract verify_schema_version from dr_restore.sh"
+fi
+
+SCHEMA_CHECK_RC=0
+SCHEMA_CHECK_OUT=""
+
+# Run a helper from the extracted functions in a subshell, capturing its
+# stdout and stderr (merged) in SCHEMA_CHECK_OUT and its exit status in
+# SCHEMA_CHECK_RC.
+run_extracted() {
+    local helper="$1"
+    shift
+    SCHEMA_CHECK_RC=0
+    SCHEMA_CHECK_OUT=$(
+        set +e
+        # shellcheck disable=SC1090
+        source "${EXTRACTED_FUNCS}"
+        "${helper}" "$@" 2>&1
+        exit $?
+    ) || SCHEMA_CHECK_RC=$?
+}
+
+# Create a SQLite database with a _sqlx_migrations table containing $2.
+make_schema_db() {
+    local db="$1"
+    local version="$2"
+    sqlite3 "${db}" \
+        "CREATE TABLE _sqlx_migrations (version BIGINT NOT NULL PRIMARY KEY); INSERT INTO _sqlx_migrations (version) VALUES (${version});"
+}
+
+# Test 7: verify_schema_version passes when the versions match
+test_verify_schema_version_match() {
+    log "Test 7: verify_schema_version passes when versions match"
+
+    local db="${TEST_DIR}/schema_match.db"
+    local expected=""
+
+    run_extracted expected_migration_version
+    expected="${SCHEMA_CHECK_OUT}"
+
+    if [[ -z "${expected}" ]] || ! [[ "${expected}" =~ ^[0-9]+$ ]]; then
+        fail "expected_migration_version should return a numeric version, got: '${expected}'"
+    fi
+
+    make_schema_db "${db}" "${expected}"
+    run_extracted verify_schema_version "${db}"
+
+    if [[ "${SCHEMA_CHECK_RC}" -ne 0 ]]; then
+        fail "Matching schema versions should exit 0, got ${SCHEMA_CHECK_RC}: ${SCHEMA_CHECK_OUT}"
+    fi
+    if ! grep -q "verified" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Matching versions should log a confirmation: ${SCHEMA_CHECK_OUT}"
+    fi
+    if ! grep -qF "version ${expected} matches" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Confirmation should mention the matched version: ${SCHEMA_CHECK_OUT}"
+    fi
+
+    log "  ✓ Matching schema versions accepted"
+}
+
+# Test 8: verify_schema_version aborts when the restored version is behind
+test_verify_schema_version_mismatch_behind() {
+    log "Test 8: verify_schema_version aborts when restored version is behind expected"
+
+    local db="${TEST_DIR}/schema_behind.db"
+    make_schema_db "${db}" 8
+    run_extracted verify_schema_version "${db}" 9
+
+    if [[ "${SCHEMA_CHECK_RC}" -eq 0 ]]; then
+        fail "Mismatched versions should exit non-zero"
+    fi
+    if ! grep -qF "restored DB: 8" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Error should print the restored DB version: ${SCHEMA_CHECK_OUT}"
+    fi
+    if ! grep -qF "expected backend: 9" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Error should print the expected backend version: ${SCHEMA_CHECK_OUT}"
+    fi
+    if ! grep -qi "mismatch" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Error should mention the mismatch: ${SCHEMA_CHECK_OUT}"
+    fi
+
+    log "  ✓ Restored-behind version aborts with both versions in the error"
+}
+
+# Test 9: verify_schema_version aborts when the restored version is ahead
+test_verify_schema_version_mismatch_ahead() {
+    log "Test 9: verify_schema_version aborts when restored version is ahead of expected"
+
+    local db="${TEST_DIR}/schema_ahead.db"
+    make_schema_db "${db}" 10
+    run_extracted verify_schema_version "${db}" 9
+
+    if [[ "${SCHEMA_CHECK_RC}" -eq 0 ]]; then
+        fail "Mismatched versions should exit non-zero"
+    fi
+    if ! grep -qF "restored DB: 10" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Error should print the restored DB version: ${SCHEMA_CHECK_OUT}"
+    fi
+    if ! grep -qF "expected backend: 9" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Error should print the expected backend version: ${SCHEMA_CHECK_OUT}"
+    fi
+
+    log "  ✓ Restored-ahead version aborts with both versions in the error"
+}
+
+# Test 10: verify_schema_version fails closed when _sqlx_migrations is missing
+test_verify_schema_version_missing_table_fails_closed() {
+    log "Test 10: verify_schema_version fails closed when _sqlx_migrations is missing"
+
+    local db="${TEST_DIR}/schema_no_table.db"
+    sqlite3 "${db}" "CREATE TABLE unrelated_table (id INTEGER);"
+    run_extracted verify_schema_version "${db}" 9
+
+    if [[ "${SCHEMA_CHECK_RC}" -eq 0 ]]; then
+        fail "Missing _sqlx_migrations should exit non-zero"
+    fi
+    if grep -q "verified" <<<"${SCHEMA_CHECK_OUT}"; then
+        fail "Missing migration table should not log a match confirmation"
+    fi
+
+    log "  ✓ Missing _sqlx_migrations fails closed"
+}
+
+# Test 11: verify_schema_version fails closed when the restored DB is missing
+test_verify_schema_version_missing_db_fails_closed() {
+    log "Test 11: verify_schema_version fails closed when the restored DB is missing"
+
+    local db="${TEST_DIR}/does_not_exist.db"
+    run_extracted verify_schema_version "${db}" 9
+
+    if [[ "${SCHEMA_CHECK_RC}" -eq 0 ]]; then
+        fail "Missing restored DB should exit non-zero"
+    fi
+
+    log "  ✓ Missing restored DB fails closed"
+}
+
+# Test 12: expected_migration_version derives the latest backend migration version
+test_expected_migration_version_derived_from_backend() {
+    log "Test 12: expected_migration_version derives the latest backend migration version"
+
+    local expected=""
+    local latest=""
+
+    run_extracted expected_migration_version
+    expected="${SCHEMA_CHECK_OUT}"
+
+    if [[ -z "${expected}" ]]; then
+        fail "expected_migration_version should return a version"
+    fi
+    if ! [[ "${expected}" =~ ^[0-9]+$ ]]; then
+        fail "expected_migration_version should return a numeric version, got '${expected}'"
+    fi
+
+    # Independent check: the expected version is the highest migration file version.
+    latest=$(
+        find "${REPO_ROOT}/backend/migrations" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' 2>/dev/null |
+            sed -n 's/^\([0-9][0-9]*\)_.*\.sql$/\1/p' |
+            sort -n |
+            tail -n 1
+    ) || true
+    if [[ -n "${latest}" ]] && [[ "${expected}" != "$((10#${latest}))" ]]; then
+        fail "expected_migration_version returned '${expected}', expected '${latest}'"
+    fi
+
+    log "  ✓ expected_migration_version returns the latest backend migration version ('${expected}')"
+}
+
 # Run all tests
 log "Starting dr_restore.sh test suite"
 test_temp_file_cleanup
@@ -231,4 +430,10 @@ test_dr_restore_uses_mktemp
 test_restored_db_permissions
 test_multiple_temp_files_cleanup
 test_corrupt_backup_file_exits_nonzero
+test_verify_schema_version_match
+test_verify_schema_version_mismatch_behind
+test_verify_schema_version_mismatch_ahead
+test_verify_schema_version_missing_table_fails_closed
+test_verify_schema_version_missing_db_fails_closed
+test_expected_migration_version_derived_from_backend
 log "All tests passed!"
